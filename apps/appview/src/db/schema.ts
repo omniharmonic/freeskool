@@ -486,16 +486,72 @@ export const notificationFeed = pgTable(
   (t) => [index('fs_notification_feed_did_idx').on(t.did, t.createdAt)],
 )
 
-/** Monthly digest drafts (compose stub). */
-export const newsletter = pgTable('fs_newsletter', {
+/**
+ * Monthly digest issues: composed by `jobs/newsletter.ts#composeNewsletterIssue`,
+ * sent by `sendNewsletterIssue` once a steward calls `POST
+ * /api/admin/newsletter/:id/send`. `html`/`text` are the BASE digest content, with no
+ * unsubscribe link baked in — each send appends a per-recipient one-click unsubscribe
+ * footer built from that subscriber's own (freshly rotated) token.
+ */
+export const newsletterIssue = pgTable('fs_newsletter_issue', {
   id: text('id').primaryKey(),
-  period: text('period').notNull(),
-  subject: text('subject').notNull(),
-  body: text('body').notNull(),
+  month: text('month').notNull(),
+  html: text('html').notNull(),
+  text: text('text').notNull(),
+  /** 'draft' | 'sent' */
   status: text('status').notNull().default('draft'),
-  createdAt: ts('created_at').notNull().defaultNow(),
   sentAt: ts('sent_at'),
+  recipientCount: integer('recipient_count'),
 })
+
+/**
+ * Newsletter consent, ONE row per DID. `emailRef` is a snapshot of the account email at
+ * subscribe time (not a foreign key) — the same address a custodial signup already
+ * holds. `tokenHash` is the hash of the CURRENT one-click unsubscribe token; it is
+ * ROTATED on every send (`lib/newsletter-subscriptions.ts#rotateUnsubscribeToken`), so a
+ * token in any one email works exactly once, ever — only its hash is ever stored.
+ */
+export const newsletterSubscription = pgTable(
+  'fs_newsletter_subscription',
+  {
+    did: text('did').primaryKey(),
+    emailRef: text('email_ref').notNull(),
+    subscribedAt: ts('subscribed_at').notNull().defaultNow(),
+    unsubscribedAt: ts('unsubscribed_at'),
+    tokenHash: text('token_hash').notNull(),
+  },
+  (t) => [uniqueIndex('fs_newsletter_subscription_token_idx').on(t.tokenHash)],
+)
+
+/**
+ * Opt-in to having one's DERIVED role published as a public `coop.lexicon.membership`
+ * claim (`lib/membership-claims.ts`). OFF by default — R9: no public record may name a
+ * DID its holder did not choose to.
+ */
+export const memberPrefs = pgTable('fs_member_prefs', {
+  did: text('did').primaryKey(),
+  publicRole: boolean('public_role').notNull().default(false),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+})
+
+/**
+ * A steward-to-successor hand-off token (7-day TTL, single use). `toDid` is nullable:
+ * an open link accepted by whoever redeems it first, or a link addressed to one named
+ * successor. See `http/routes/handoff.ts`.
+ */
+export const handoff = pgTable(
+  'fs_handoff',
+  {
+    id: text('id').primaryKey(),
+    fromDid: text('from_did').notNull(),
+    toDid: text('to_did'),
+    tokenHash: text('token_hash').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    acceptedAt: ts('accepted_at'),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [uniqueIndex('fs_handoff_token_idx').on(t.tokenHash)],
+)
 
 /* ───────────────────────────── spaces-shim (Postgres) ─────────────────────────── */
 
@@ -572,7 +628,10 @@ export const schema = {
   notificationSent,
   notificationOutbox,
   notificationFeed,
-  newsletter,
+  newsletterIssue,
+  newsletterSubscription,
+  memberPrefs,
+  handoff,
   space,
   spaceMember,
   spaceRecord,

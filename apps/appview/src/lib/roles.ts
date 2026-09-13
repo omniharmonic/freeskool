@@ -22,6 +22,7 @@ import { attendanceTally, custodialAccount, invite, member, moderationQueue, ste
 import { getThresholds } from './policy.js'
 import { config } from '../config.js'
 import { getIndexer } from '../index/indexer.js'
+import { log } from './logging.js'
 
 /**
  * Does this DID belong to THIS school at all — by having EVER signed in through either
@@ -129,6 +130,7 @@ export async function roleOf(did: string, schoolDid = config().SCHOOL_DID): Prom
 export async function bumpTally(
   did: string,
   delta: { attendedConfirmed?: number; hostedEvents?: number },
+  schoolDid = config().SCHOOL_DID,
 ): Promise<void> {
   await getDb()
     .insert(attendanceTally)
@@ -146,6 +148,21 @@ export async function bumpTally(
         updatedAt: new Date(),
       },
     })
+
+  // THE ROLE RE-DERIVATION PATH: evidence just changed, so the derived role may have
+  // just crossed into Host+. `publishRoleClaim` itself is the gate (policy off AND/OR
+  // not opted in is the common case and costs one already-warm cache read) — this is a
+  // best-effort side effect, dynamically imported to avoid a module cycle
+  // (roles.ts -> membership-claims.ts -> school-actor.ts -> roles.ts), and never allowed
+  // to fail the attendance/hosting write it rides along with.
+  if (!schoolDid) return
+  try {
+    const { publishRoleClaim } = await import('./membership-claims.js')
+    const role = await roleOf(did, schoolDid)
+    await publishRoleClaim(schoolDid as `did:${string}`, did as `did:${string}`, role)
+  } catch (err) {
+    log.warn('role re-derivation publish check failed', { detail: String(err) })
+  }
 }
 
 export { Role, deriveRole }

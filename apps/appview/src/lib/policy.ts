@@ -28,6 +28,7 @@ export function mergeThresholds(partial: unknown): Thresholds {
     firstEventApproval: typeof t.firstEventApproval === 'boolean' ? t.firstEventApproval : defaultThresholds.firstEventApproval,
     feedbackK: numeric(t.feedbackK, defaultThresholds.feedbackK),
     destructiveActionStewards: numeric(t.destructiveActionStewards, defaultThresholds.destructiveActionStewards),
+    publishRoles: typeof t.publishRoles === 'boolean' ? t.publishRoles : (defaultThresholds.publishRoles ?? false),
   }
 }
 

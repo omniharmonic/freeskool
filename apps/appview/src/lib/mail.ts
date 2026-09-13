@@ -13,6 +13,8 @@ export interface Mail {
   to: string
   subject: string
   text: string
+  /** Plain HTML alternative (e.g. the monthly newsletter). Never a tracking pixel. */
+  html?: string
   /** An `.ics` invitation, attached as text/calendar. */
   ics?: { filename: string; content: string }
 }
@@ -37,6 +39,7 @@ export async function sendMail(mail: Mail): Promise<{ delivered: boolean; transp
     to: mail.to,
     subject: mail.subject,
     text: mail.text,
+    ...(mail.html ? { html: mail.html } : {}),
     ...(mail.ics
       ? {
           attachments: [

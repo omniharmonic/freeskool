@@ -79,6 +79,10 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 5
+        },
+        "publishRoles": {
+          "type": "boolean",
+          "description": "Let qualifying members' derived roles reach the protocol as coop.lexicon.membership claims. Off by default; publishing a given member's role additionally requires that member's own opt-in."
         }
       }
     }

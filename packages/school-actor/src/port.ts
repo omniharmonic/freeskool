@@ -25,6 +25,15 @@ export type SchoolAction =
   | 'close-request'
   | 'void-attendance'
   | 'materialize-occurrence'
+  /**
+   * The school republishing a MEMBER'S OWN already-derived role as a public
+   * `coop.lexicon.membership` claim, once that member has opted in and the policy
+   * allows it (see `apps/appview/src/lib/membership-claims.ts`). The caller is the
+   * subject themselves — they are consenting to their own already-qualifying role
+   * being named, not asking the school to grant anything — so this sits at Host, not
+   * Steward. Distinct from `set-role`, which is a STEWARD decision (e.g. a hand-off).
+   */
+  | 'publish-role-claim'
 
 /** Actions that require the policy's destructiveActionStewards threshold (default 2). */
 export const DESTRUCTIVE_ACTIONS: ReadonlySet<SchoolAction> = new Set<SchoolAction>([

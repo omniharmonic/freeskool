@@ -35,11 +35,17 @@ export interface EventListing {
   createdAt?: string
 }
 
-/** Written by the school after deriveRole(); the protocol only ever sees this claim. */
+/**
+ * Written by the school after deriveRole(); the protocol only ever sees this claim.
+ * Gated by `lib/membership-claims.ts#publishRoleClaim` — written only when the policy
+ * allows it AND the subject opted in AND role >= Host. `addedBy` is always the school
+ * DID itself in v1 (never a steward's personal DID).
+ */
 export interface Membership {
   subject: string
   /** Open integer registry: 10 member / 20 host / 30 facilitator / 40 steward. */
   role: number
   school?: string
+  addedBy?: string
   createdAt?: string
 }

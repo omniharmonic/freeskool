@@ -22,6 +22,13 @@ export interface Thresholds {
   firstEventApproval: boolean
   feedbackK: number
   destructiveActionStewards: number
+  /**
+   * A steward's explicit choice to let a qualifying member's DERIVED role reach the
+   * protocol as a `coop.lexicon.membership` claim (see
+   * `apps/appview/src/lib/membership-claims.ts`). OFF by default: publishing is also
+   * gated per-member on an opt-in, so this alone never names anyone.
+   */
+  publishRoles?: boolean
 }
 
 /** Lex's defaults: "if you say you're part of Free School, you're part of Free School." */
@@ -32,6 +39,7 @@ export const defaultThresholds: Thresholds = {
   firstEventApproval: false,
   feedbackK: 3,
   destructiveActionStewards: 2,
+  publishRoles: false,
 }
 
 /** Evidence the AppView derives from public records (and the steward list). */

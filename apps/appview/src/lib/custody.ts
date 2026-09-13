@@ -20,6 +20,7 @@ import { hashToken, newToken, randomPassword, unwrapSecret, wrapSecret } from '.
 import { createAccount, createInviteCode, PdsError } from './pds.js'
 import { sendMail } from './mail.js'
 import { registerEmailTarget } from '../notifications/dispatch.js'
+import { subscribe } from './newsletter-subscriptions.js'
 import { log } from './logging.js'
 
 export const VERIFY_TTL_MS = 24 * 3_600_000
@@ -42,7 +43,7 @@ export interface SignupResult {
   verifyUrl?: string
 }
 
-export async function signup(input: { email: string; inviterDid?: string }): Promise<SignupResult> {
+export async function signup(input: { email: string; inviterDid?: string; newsletter?: boolean }): Promise<SignupResult> {
   const c = config()
   const email = input.email.trim().toLowerCase()
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -91,6 +92,8 @@ export async function signup(input: { email: string; inviterDid?: string }): Pro
     usedAt: new Date(),
   })
   await registerEmailTarget(account.did, email)
+  // Default false: only the signup form's own checkbox, ticked, subscribes.
+  if (input.newsletter === true) await subscribe(account.did, email)
 
   const { url } = await sendVerificationEmail(account.did, email)
   log.info('custodial account minted', { handleDomain: c.handleDomain })

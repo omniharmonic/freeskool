@@ -10,7 +10,9 @@
  *   POST /moderation/:id/approve  a second steward signs on
  *   POST /moderation/:id/execute  run it as the school, once the threshold is met
  *   GET  /peers   PUT /peers    the peer registry (= contrail's `relays`)
- *   POST /newsletter            compose a monthly digest draft (stub)
+ *   GET  /newsletter   POST /newsletter          list / compose a monthly digest draft
+ *   POST /newsletter/:id/send   send a draft to every subscribed member (see
+ *                               ../../jobs/newsletter.ts)
  */
 import { Hono } from 'hono'
 import { z } from 'zod'
@@ -19,7 +21,7 @@ import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireRole, requireViewer } from '../session.js'
 import { getDb } from '../../db/index.js'
-import { moderationQueue, newsletter } from '../../db/schema.js'
+import { moderationQueue, newsletterIssue } from '../../db/schema.js'
 import { rowId, tid } from '../../lib/ids.js'
 import { schoolActor, schoolDid } from '../../lib/school-actor.js'
 import { SchoolActError, type Approval, type SchoolAction } from '@freeschool/school-actor'
@@ -28,7 +30,7 @@ import { currentPolicyUri, getThresholds, refreshPolicyCache } from '../../lib/p
 import { getRecord } from '../../lib/pds.js'
 import { addPeer, disablePeer, listPeers, probePeer } from '../../index/peers.js'
 import { getIndexer, resetIndexer } from '../../index/indexer.js'
-import { composeMonthlyDigest } from '../../jobs/newsletter.js'
+import { composeNewsletterIssue, sendNewsletterIssue } from '../../jobs/newsletter.js'
 
 export const admin = new Hono<AppEnv>()
 
@@ -57,6 +59,8 @@ const policyBody = z.object({
       firstEventApproval: z.boolean().optional(),
       feedbackK: z.number().int().min(2).max(10).optional(),
       destructiveActionStewards: z.number().int().min(1).max(5).optional(),
+      /** A steward's choice to let qualifying members' roles reach the protocol. */
+      publishRoles: z.boolean().optional(),
     })
     .optional(),
   reason: z.string().min(3).max(1000),
@@ -283,19 +287,34 @@ admin.put('/peers', async (c) => {
   return c.json({ peers: await listPeers() })
 })
 
-/* newsletter (stub) */
+/* newsletter */
 
 admin.post('/newsletter', async (c) => {
   const period = c.req.query('period') ?? new Date().toISOString().slice(0, 7)
-  const draft = await composeMonthlyDigest(period)
-  const id = rowId()
-  await getDb().insert(newsletter).values({ id, period, subject: draft.subject, body: draft.body, status: 'draft' })
-  return c.json({ id, ...draft, status: 'draft', note: 'composing is implemented; SENDING is a stub' }, 201)
+  const draft = await composeNewsletterIssue(period)
+  return c.json({ subject: `Free School, ${draft.month}`, body: draft.text, ...draft }, 201)
 })
 
 admin.get('/newsletter', async (c) => {
-  const rows = await getDb().select().from(newsletter).orderBy(desc(newsletter.createdAt)).limit(24)
+  const rows = await getDb()
+    .select({
+      id: newsletterIssue.id,
+      month: newsletterIssue.month,
+      status: newsletterIssue.status,
+      sentAt: newsletterIssue.sentAt,
+      recipientCount: newsletterIssue.recipientCount,
+    })
+    .from(newsletterIssue)
+    .orderBy(desc(newsletterIssue.month))
+    .limit(24)
   return c.json({ drafts: rows })
+})
+
+admin.post('/newsletter/:id/send', async (c) => {
+  const id = c.req.param('id')
+  const result = await sendNewsletterIssue(id)
+  if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status as 404 | 409)
+  return c.json({ ok: true, recipientCount: result.recipientCount })
 })
 
 /** A denial from the port is a 403/409 with its audit id, never a 500. */

@@ -8,6 +8,8 @@
  *                             repo, gated by the two rules below
  *   GET /visibility-defaults  what this session is allowed to make public, and why
  *   GET /badges               plain-language sentences derived from counts and role
+ *   PUT /public-role          opt in/out of publishing MY derived role, if it ever
+ *                             qualifies (see ../../lib/membership-claims.ts)
  *
  * `visibility` on a skill claim: 'public' writes the record to the repo (it is a public
  * claim about oneself, which is the point); 'school' keeps it app-side so it informs
@@ -41,6 +43,8 @@ import { getDb } from '../../db/index.js'
 import { appMeta, attendanceTally } from '../../db/schema.js'
 import { getThresholds } from '../../lib/policy.js'
 import { tierOf, type SkillTierValue } from '../../lib/skill-tiers.js'
+import { config } from '../../config.js'
+import { isPublicRoleOptIn, publishRoleClaim, setPublicRoleOptIn } from '../../lib/membership-claims.js'
 import { badgeSentences, type VouchCount } from '../../lib/badges.js'
 
 export const me = new Hono<AppEnv>()
@@ -130,6 +134,27 @@ me.get('/badges', async (c) => {
     role,
     badges: badgeSentences({ hosted, attended }, vouches),
   })
+})
+
+const publicRoleBody = z.object({ publicRole: z.boolean() }).strict()
+
+me.put('/public-role', async (c) => {
+  const parsed = publicRoleBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
+  const viewer = c.var.viewer!
+  await setPublicRoleOptIn(viewer.did, parsed.data.publicRole)
+  // Re-derivation moment: opting in may immediately qualify if the role is already
+  // Host+ and the policy already allows it — no need to wait for the next attendance
+  // attestation. Best-effort; the opt-in itself always succeeds either way.
+  if (parsed.data.publicRole && config().SCHOOL_DID) {
+    const role = await roleOf(viewer.did)
+    await publishRoleClaim(config().SCHOOL_DID as `did:${string}`, viewer.did as `did:${string}`, role).catch(() => undefined)
+  }
+  return c.json({ publicRole: parsed.data.publicRole })
+})
+
+me.get('/public-role', async (c) => {
+  return c.json({ publicRole: await isPublicRoleOptIn(c.var.viewer!.did) })
 })
 
 /** Positive skillAttestations received, grouped by skill with a resolved label. */

@@ -26,6 +26,8 @@ const signupBody = z.object({
   email: z.string().email(),
   /** Optional invite, used only as `invite-or-vouch` evidence. */
   inviterDid: z.string().startsWith('did:').optional(),
+  /** The signup form's own newsletter checkbox. Default false — opt-in, not opt-out. */
+  newsletter: z.boolean().optional(),
 })
 
 auth.post('/signup', async (c) => {
