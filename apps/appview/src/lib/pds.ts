@@ -58,6 +58,16 @@ export async function createInviteCode(useCount = 1): Promise<string> {
   return out.code
 }
 
+/**
+ * `takeOwnership`'s step 2: rotate a custodial account's PDS password to a fresh random
+ * one, admin-side, WITHOUT the member's old password or any session of theirs. This is
+ * what lets us hand the member a working password once (`lib/custody.ts#takeOwnership`)
+ * without ever routing through (or invalidating) the session-based password-change flow.
+ */
+export async function updateAccountPassword(did: string, password: string): Promise<void> {
+  await xrpc<{ success: boolean }>('com.atproto.admin.updateAccountPassword', { did, password }, { admin: true })
+}
+
 export interface CreatedAccount {
   did: string
   handle: string

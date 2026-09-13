@@ -12,7 +12,14 @@ import { z } from 'zod'
 import { eq } from 'drizzle-orm'
 import type { AppEnv } from '../session.js'
 import { createSession, destroySession, requireViewer } from '../session.js'
-import { signup, verifyEmailToken, getCustodialAccount, SignupError } from '../../lib/custody.js'
+import {
+  signup,
+  verifyEmailToken,
+  getCustodialAccount,
+  takeOwnership,
+  revealOwnershipPassword,
+  SignupError,
+} from '../../lib/custody.js'
 import { oauthClient, OAuthUnavailableError } from '../oauth.js'
 import { config } from '../../config.js'
 import { roleOf } from '../../lib/roles.js'
@@ -105,6 +112,41 @@ auth.get('/me', requireViewer, async (c) => {
     handle: custodial?.handle,
     isCustodial: custodial?.isCustodial ?? false,
     emailVerified: Boolean(custodial?.verifiedAt),
+  })
+})
+
+/**
+ * The exit from custody. The viewer must be signed in AS the custodial account (the
+ * session check here IS "verify the session belongs to the custodial account" —
+ * `requireViewer` already refused anyone without a session, and `takeOwnership` itself
+ * refuses a DID that is not custodial). See `lib/custody.ts` for the full five-step flow.
+ */
+auth.post('/take-ownership', requireViewer, async (c) => {
+  const viewer = c.var.viewer!
+  try {
+    const result = await takeOwnership(viewer.did)
+    return c.json({ ok: true, handle: result.handle, ...(result.revealUrl ? { revealUrl: result.revealUrl } : {}) })
+  } catch (err) {
+    if (err instanceof SignupError) return c.json({ error: err.code, message: err.message }, err.status as 404 | 409)
+    throw err
+  }
+})
+
+/**
+ * The one-time reveal. Deliberately UNAUTHENTICATED — the token itself, single-use and
+ * 24h-TTL, is the credential (same shape as `/verify`'s magic link); requiring a session
+ * here would just mean "whoever is signed in as this DID", which the PDS password rotation
+ * in step 2 has already made impossible to fake.
+ */
+auth.get('/take-ownership/:token', async (c) => {
+  const token = c.req.param('token')
+  const result = await revealOwnershipPassword(token)
+  if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status as 404 | 410)
+  return c.json({
+    ok: true,
+    handle: result.handle,
+    password: result.password,
+    message: 'This is shown once. Sign in at your PDS with it, then change it to a password of your own.',
   })
 })
 

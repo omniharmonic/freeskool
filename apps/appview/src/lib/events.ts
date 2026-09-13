@@ -36,6 +36,8 @@ import { log } from './logging.js'
 import { getRecordByUri, parseAtUri, sidecarsForEvent } from '../index/queries.js'
 import { isListed } from '../http/visibility.js'
 import type { EventConfig, EventListing } from '../lexicons/coop.js'
+import { getEventExtra, setEventExtra } from './event-extra.js'
+import { Role } from '@freeschool/shared'
 
 export interface CreateEventInput {
   name: string
@@ -62,6 +64,13 @@ export interface CreateEventInput {
   tags?: string[]
   /** One sidecar per (skill, level) the class teaches. */
   skills?: Array<{ skill: string; level: 1 | 2 | 3; prerequisites?: string }>
+  /**
+   * App-side only (`fs_event_extra` — see `lib/event-extra.ts`'s doc comment for why not
+   * a lexicon field). `materials` ≤ 20 items of ≤ 120 chars; `suppliesNote` ≤ 300 chars
+   * free text, enforced by the route's zod schema, not here.
+   */
+  materials?: string[]
+  suppliesNote?: string
   /** Recurrence. Materialized server-side by the daily job, never by the client. */
   series?: {
     rrule: string
@@ -175,6 +184,16 @@ export function decideListingEdit(state: {
   return 'none'
 }
 
+/**
+ * Who may see the roster (`GET /api/events/:id/rsvps`) — the host of THIS event, or a
+ * steward (moderation needs the same "know who is coming" visibility). Pure, so the
+ * "forbidden for an ordinary member / visible to the host" rule is testable without a
+ * database or an indexed event.
+ */
+export function canViewRoster(hostDid: string, viewerDid: string, viewerRole: number): boolean {
+  return hostDid === viewerDid || viewerRole >= Role.Steward
+}
+
 export async function createEventAsHost(viewer: Viewer, input: CreateEventInput): Promise<CreatedEvent> {
   const agent = await actorAgent(viewer)
   const now = new Date().toISOString()
@@ -255,6 +274,8 @@ export async function createEventAsHost(viewer: Viewer, input: CreateEventInput)
     visibility: input.visibility,
     callerDid: viewer.did as Did,
   })
+
+  await setEventExtra(event.uri, input.materials ?? [], input.suppliesNote)
 
   await bumpTally(viewer.did, { hostedEvents: 1 })
   if (input.endsAt ?? input.startsAt) await openFeedbackWindow(event.uri, input.endsAt ?? input.startsAt)
@@ -363,6 +384,12 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
     createdAt: existingConfig?.value.createdAt ?? new Date().toISOString(),
   }
   const cfg = await put(agent, viewer.did, NSID.eventConfig, configParts?.rkey ?? tid(), mergedConfig)
+
+  // Same "omit means leave alone" convention as `tags`/`visibility` above.
+  const existingExtra = await getEventExtra(eventUri)
+  const newMaterials = input.materials !== undefined ? input.materials : existingExtra.materials
+  const newSuppliesNote = input.suppliesNote !== undefined ? input.suppliesNote : existingExtra.suppliesNote
+  await setEventExtra(event.uri, newMaterials, newSuppliesNote)
 
   // Replace the skill sidecars entirely when `skills` is present; leave them alone
   // otherwise. All in the HOST's own repo, same as creation.

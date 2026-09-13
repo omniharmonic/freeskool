@@ -15,7 +15,7 @@
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { skillTier } from '../db/schema.js'
 // A native JSON import, not `fs.readFileSync` + `JSON.parse`: tsc's `resolveJsonModule`
@@ -35,6 +35,23 @@ const SENSITIVE_LABEL_RE = /police|ICE|legal|medic|security|encrypt|doxx|squat|p
 export async function tierOf(skillId: string): Promise<SkillTierValue> {
   const rows = await getDb().select({ tier: skillTier.tier }).from(skillTier).where(eq(skillTier.skillId, skillId)).limit(1)
   return rows[0]?.tier === 'B' ? 'B' : 'A'
+}
+
+/**
+ * Batched `tierOf`, for the taxonomy endpoints (`http/routes/skills.ts`), which return
+ * hundreds of nodes at once — one query for the whole set rather than one per skill.
+ * Defaults every id not in `fs_skill_tier` to `'A'`, same as `tierOf`.
+ */
+export async function tiersFor(skillIds: string[]): Promise<Record<string, SkillTierValue>> {
+  const out: Record<string, SkillTierValue> = {}
+  for (const id of skillIds) out[id] = 'A'
+  if (skillIds.length === 0) return out
+  const rows = await getDb()
+    .select({ skillId: skillTier.skillId, tier: skillTier.tier })
+    .from(skillTier)
+    .where(inArray(skillTier.skillId, skillIds))
+  for (const r of rows) if (r.tier === 'B') out[r.skillId] = 'B'
+  return out
 }
 
 /** The curated Tier B list, named in the task brief verbatim. */

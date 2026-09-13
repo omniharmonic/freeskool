@@ -12,11 +12,12 @@
  */
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireViewer, requireRole } from '../session.js'
 import {
+  canViewRoster,
   createEventAsHost,
   EventNotFoundError,
   EventPermissionError,
@@ -32,10 +33,11 @@ import { viewerRelation } from '../relation.js'
 import { toCalendarEvent } from './calendar.js'
 import { buildIcs, icsStatus } from '../../lib/ics.js'
 import { getDb } from '../../db/index.js'
-import { attendance, attendanceRollup } from '../../db/schema.js'
+import { attendance, attendanceRollup, custodialAccount } from '../../db/schema.js'
 import { rowId } from '../../lib/ids.js'
-import { bumpTally } from '../../lib/roles.js'
-import { rsvpCounts } from '../../lib/rsvp.js'
+import { bumpTally, roleOf } from '../../lib/roles.js'
+import { rsvpCounts, rsvpRoster } from '../../lib/rsvp.js'
+import { getEventExtra } from '../../lib/event-extra.js'
 
 export const events = new Hono<AppEnv>()
 
@@ -52,6 +54,8 @@ const createBody = z.object({
   visibility: z.enum(['listed', 'unlisted', 'private']).optional(),
   neighborhood: z.string().max(200).optional(),
   rsvpRequired: z.boolean().optional(),
+  materials: z.array(z.string().min(1).max(120)).max(20).optional(),
+  suppliesNote: z.string().max(300).optional(),
   tags: z
     .array(z.string().regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, 'tags must be lowercase kebab-case'))
     .max(10)
@@ -166,15 +170,84 @@ events.get('/events/:id', async (c) => {
   const viewer = c.var.viewer
   const relation = viewer ? await viewerRelation(viewer, uri, loaded.hostDid) : 'public'
   if (!loaded.listed && relation === 'public') return c.json({ error: 'NotFound' }, 404)
+  // The raw visibility enum (listed|unlisted|private) is a moderation/host-facing fact,
+  // never shown to an ordinary viewer — it is not shown to an 'rsvp'/'attendee' relation
+  // either, only to the host themselves or a steward. Same gate the roster route uses.
+  const isHost = viewer?.did === loaded.hostDid
+  const canSeeRawVisibility = isHost || relation === 'steward'
   return c.json({
     ...projectEvent(loaded.event, loaded.inputs, relation),
     listed: loaded.listed,
     skills: loaded.skillLevels,
+    materials: loaded.extra.materials,
+    ...(loaded.extra.suppliesNote ? { suppliesNote: loaded.extra.suppliesNote } : {}),
     // Counts only. Never the roster.
     rsvps: await rsvpCounts(uri),
     viewerRelation: relation,
+    ...(canSeeRawVisibility ? { visibility: loaded.inputs.configs[0]?.visibility ?? 'listed' } : {}),
   })
 })
+
+/**
+ * `GET /api/events/:id/rsvps` — the host's (or a steward's) own roster: who is coming,
+ * with their status, so the host can "check attendance off a real list" (PRD persona).
+ * Never reachable by anyone else — `canViewRoster` is the one authorization rule, and it
+ * is a pure function precisely so "forbidden for a non-host member" is a unit test, not
+ * something that can silently regress through a route refactor.
+ */
+events.get('/events/:id/rsvps', requireViewer, async (c) => {
+  const uri = decodeURIComponent(c.req.param('id'))
+  const loaded = await loadEvent(uri)
+  if (!loaded) return c.json({ error: 'NotFound' }, 404)
+  const viewer = c.var.viewer!
+  const role = await roleOf(viewer.did)
+  if (!canViewRoster(loaded.hostDid, viewer.did, role)) {
+    return c.json({ error: 'PermissionDenied', message: 'only the host of this class or a steward may see who is coming' }, 403)
+  }
+  const rows = await rsvpRoster(uri)
+  const handles = await handlesForDids(rows.map((r) => r.did))
+  return c.json(
+    rows.map((r) => ({
+      did: r.did,
+      handle: handles[r.did] ?? r.did,
+      status: r.status,
+      createdAt: r.createdAt.toISOString(),
+    })),
+  )
+})
+
+/**
+ * Best-effort DID -> handle for the roster only — never authoritative, never cached.
+ * Our own custodial members resolve straight from `fs_custodial_account`; anyone else
+ * (an existing OAuth account) falls back to contrail's `identities` table, which is
+ * populated by indexing/backfill, not by us. A DID that resolves nowhere falls back to
+ * itself rather than leaving a gap in the response.
+ */
+async function handlesForDids(dids: string[]): Promise<Record<string, string>> {
+  if (dids.length === 0) return {}
+  const out: Record<string, string> = {}
+  const rows = await getDb()
+    .select({ did: custodialAccount.did, handle: custodialAccount.handle })
+    .from(custodialAccount)
+    .where(inArray(custodialAccount.did, dids))
+  for (const r of rows) out[r.did] = r.handle
+  const remaining = dids.filter((d) => !out[d])
+  if (remaining.length > 0) {
+    try {
+      const indexer = await getIndexer()
+      for (const did of remaining) {
+        const row = await indexer.db
+          .prepare('SELECT handle FROM identities WHERE did = ? LIMIT 1')
+          .bind(did)
+          .first<{ handle: string | null }>()
+        if (row?.handle) out[did] = row.handle
+      }
+    } catch {
+      /* index not ready; the did-as-handle fallback below still gives a usable response */
+    }
+  }
+  return out
+}
 
 const attendanceBody = z.object({
   attendees: z
@@ -264,17 +337,19 @@ export interface LoadedEvent {
   listed: boolean
   skillLevels: Array<{ skill: string; level: number; prerequisites?: string }>
   series?: { rrule?: string; exdates?: string[] }
+  extra: { materials: string[]; suppliesNote?: string }
 }
 
 export async function loadEvent(uri: string): Promise<LoadedEvent | null> {
   const indexer = await getIndexer()
   const row = await getRecordByUri(indexer, 'event', uri)
   if (!row) return null
-  const [listings, configs, skills, seriesRows] = await Promise.all([
+  const [listings, configs, skills, seriesRows, extra] = await Promise.all([
     sidecarsForEvent<EventListing>(indexer, 'eventListing', uri),
     sidecarsForEvent<EventConfig>(indexer, 'eventConfig', uri),
     sidecarsForEvent<{ skill: string; level: number; prerequisites?: string }>(indexer, 'skillLevel', uri),
     sidecarsForEvent<{ rrule?: string; exdates?: string[] }>(indexer, 'series', uri, 'firstEvent.uri'),
+    getEventExtra(uri),
   ])
   const inputs = { listings: listings.map((l) => l.value), configs: configs.map((x) => x.value) }
   return {
@@ -284,5 +359,6 @@ export async function loadEvent(uri: string): Promise<LoadedEvent | null> {
     listed: isListed(inputs),
     skillLevels: skills.map((s) => s.value),
     ...(seriesRows[0] ? { series: seriesRows[0].value } : {}),
+    extra,
   }
 }

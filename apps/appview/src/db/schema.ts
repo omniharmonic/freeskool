@@ -108,6 +108,29 @@ export const emailVerification = pgTable(
 )
 
 /**
+ * `takeOwnership`'s one-time reveal. The PDS account password is rotated IMMEDIATELY
+ * (`com.atproto.admin.updateAccountPassword`) when the member requests this, and the
+ * new password is held here, wrapped under the same versioned custody key as
+ * `fs_custodial_account.wrapped_password`, ONLY long enough for the member to open the
+ * single-use link we email them — `GET /api/auth/take-ownership/:token` nulls
+ * `wrapped_password` the moment it is read, and `used_at` makes a second read 410
+ * regardless. 24 h TTL. See `lib/custody.ts#takeOwnership`.
+ */
+export const ownershipReveal = pgTable(
+  'fs_ownership_reveal',
+  {
+    tokenHash: text('token_hash').primaryKey(),
+    did: text('did').notNull(),
+    keyVersion: text('key_version').notNull(),
+    wrappedPassword: bytea('wrapped_password'),
+    expiresAt: ts('expires_at').notNull(),
+    usedAt: ts('used_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [index('fs_ownership_reveal_did_idx').on(t.did)],
+)
+
+/**
  * Invite codes. `inviterDid` is evidence for the `invite-or-vouch` member gate, and
  * is PURGED 30 days after use by the retention job — the social graph of who invited
  * whom is not something we keep.
@@ -203,7 +226,12 @@ export const rsvp = pgTable(
     id: text('id').primaryKey(),
     eventUri: text('event_uri').notNull(),
     did: text('did').notNull(),
-    /** 'going' | 'interested' | 'notgoing' */
+    /**
+     * 'going' | 'interested' | 'notgoing' | 'waitlisted'. `waitlisted` is never what a
+     * caller requests — the server assigns it instead of 'going' when `capacity` is set
+     * and already met (`lib/rsvp.ts#resolveGoingOrWaitlist`); a departure promotes the
+     * earliest-by-`createdAt` waitlisted row (`promoteFromWaitlist`).
+     */
     status: text('status').notNull(),
     alsoPublicRecord: boolean('also_public_record').notNull().default(false),
     publicRecordUri: text('public_record_uri'),
@@ -381,6 +409,21 @@ export const peer = pgTable('fs_peer', {
   schoolDid: text('school_did'),
   addedAt: ts('added_at').notNull().defaultNow(),
   disabledAt: ts('disabled_at'),
+})
+
+/**
+ * Materials and a supplies note for a class — `coop.lexicon.event.config` (our ASSUMED
+ * shape, `lexicons/coop.ts`) has no fields for either, so they live here, app-side, one
+ * row per event. `suppliesNote` is free text the host writes ("bring a lock and cable");
+ * it is never auto-linkified or rendered as a payment affordance by this API — that is a
+ * client rendering rule, not something enforced by storage.
+ */
+export const eventExtra = pgTable('fs_event_extra', {
+  eventUri: text('event_uri').primaryKey(),
+  /** string[], ≤ 20 items of ≤ 120 chars — enforced by the route's zod schema. */
+  materials: jsonb('materials').notNull().default([]),
+  suppliesNote: text('supplies_note'),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
 })
 
 /* ───────────────────────────────── recurrence ─────────────────────────────────── */
@@ -607,12 +650,14 @@ export const schema = {
   oauthClientKey,
   custodialAccount,
   emailVerification,
+  ownershipReveal,
   invite,
   inviteLink,
   skillTier,
   requestRsvp,
   member,
   rsvp,
+  eventExtra,
   attendance,
   attendanceRollup,
   attendanceTally,

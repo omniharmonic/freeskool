@@ -13,11 +13,11 @@
  */
 import { and, eq, gt, isNull } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
-import { custodialAccount, emailVerification, invite } from '../db/schema.js'
+import { custodialAccount, emailVerification, invite, ownershipReveal } from '../db/schema.js'
 import { config } from '../config.js'
 import { generateHandle } from './handles.js'
 import { hashToken, newToken, randomPassword, unwrapSecret, wrapSecret } from './crypto.js'
-import { createAccount, createInviteCode, PdsError } from './pds.js'
+import { createAccount, createInviteCode, PdsError, updateAccountPassword } from './pds.js'
 import { sendMail } from './mail.js'
 import { registerEmailTarget } from '../notifications/dispatch.js'
 import { subscribe } from './newsletter-subscriptions.js'
@@ -168,24 +168,114 @@ export async function custodialPassword(did: string): Promise<string | null> {
   return unwrapSecret({ keyVersion: row.keyVersion, blob: Buffer.from(row.wrappedPassword) })
 }
 
+export const OWNERSHIP_REVEAL_TTL_MS = 24 * 3_600_000
+
+export interface TakeOwnershipResult {
+  handle: string
+  /** Returned ONLY when SMTP is unconfigured, so local development can see the link. */
+  revealUrl?: string
+}
+
 /**
- * STUB — `takeOwnership`.
+ * The exit from custody — resolves the open question the stub above used to leave
+ * unanswered ("step 2"), by never holding the NEW password at all except for the single
+ * 24h reveal window:
  *
- * The exit from custody. The member proves their email, we reveal a one-time password
- * reset, and from then on the app holds nothing:
- *
- *   1. verify a fresh magic link for purpose='take-ownership'
- *   2. `com.atproto.server.requestPasswordReset` / `resetPassword` through the PDS, OR
- *      hand the member the current password once over TLS and force a change
- *   3. `UPDATE fs_custodial_account SET is_custodial = false, wrapped_password = NULL,
- *      owned_at = now()`
- *   4. future writes on their behalf stop working — the app must fall back to asking
- *      them to authorize via OAuth, exactly like any other existing account
- *
- * Step 2 is the open question (the PDS's reset flow emails the user directly, which is
- * what we want, but it also invalidates the password we hold mid-flight), so this is
- * deliberately left unimplemented rather than half-implemented.
+ *   1. the caller is already authenticated as this DID (`requireViewer`, in auth.ts) —
+ *      that IS "the session belongs to the custodial account"; a second factor is not
+ *      this step's job.
+ *   2. rotate the PDS password ADMIN-SIDE, to a fresh random one
+ *      (`com.atproto.admin.updateAccountPassword`) — this needs no session of the
+ *      member's own and does not touch (or require) the password we currently hold.
+ *   3. set `isCustodial = false`, clear `wrappedPassword` — our OLD credential is
+ *      worthless the instant the PDS password rotates, so there is nothing left to
+ *      protect by keeping it.
+ *   4. wrap the NEW password under the same versioned custody key, but in a SEPARATE,
+ *      single-use, 24h-TTL table (`fs_ownership_reveal`) keyed by a token we email the
+ *      member — never the password itself. `GET /api/auth/take-ownership/:token`
+ *      (`revealOwnershipPassword`) is the only reader, and it nulls the wrapped blob the
+ *      moment it answers, so "we never learn or keep the final password" holds past the
+ *      first (and only) time the member opens the link.
+ *   5. future writes on this DID's behalf through `actorAgent` now 401
+ *      (`NoActorCredentialError`) until the member signs in via OAuth — the secondary
+ *      door, exactly like any other existing account. The UI explains this (Task 10).
  */
-export async function takeOwnership(_did: string): Promise<never> {
-  throw new SignupError('taking ownership of a custodial account is not implemented yet', 501, 'NotImplemented')
+export async function takeOwnership(did: string): Promise<TakeOwnershipResult> {
+  const row = await getCustodialAccount(did)
+  if (!row) throw new SignupError('no custodial account for this session', 404, 'NotFound')
+  if (!row.isCustodial) throw new SignupError('this account has already taken full ownership', 409, 'AlreadyOwned')
+
+  const newPassword = randomPassword(18) // 18 bytes -> 24 base64url chars
+  await updateAccountPassword(did, newPassword)
+
+  await getDb()
+    .update(custodialAccount)
+    .set({ isCustodial: false, wrappedPassword: null, ownedAt: new Date() })
+    .where(eq(custodialAccount.did, did))
+
+  const wrapped = wrapSecret(newPassword)
+  const token = newToken()
+  await getDb().insert(ownershipReveal).values({
+    tokenHash: hashToken(token),
+    did,
+    keyVersion: wrapped.keyVersion,
+    wrappedPassword: wrapped.blob,
+    expiresAt: new Date(Date.now() + OWNERSHIP_REVEAL_TTL_MS),
+  })
+
+  const url = `${config().APPVIEW_PUBLIC_URL}/api/auth/take-ownership/${encodeURIComponent(token)}`
+  await sendMail({
+    to: row.email,
+    subject: 'Take full ownership of your Free School account',
+    text: [
+      `You asked to take full ownership of @${row.handle}.`,
+      '',
+      'Open this link to see your new password (it is shown ONCE, so save it somewhere safe):',
+      url,
+      '',
+      'After that, sign in with it at your PDS and change it to one of your own choosing.',
+      "You can export your full repo any time with com.atproto.sync.getRepo — it is your data, not ours.",
+      '',
+      'The link works once and expires in 24 hours. From now on, publishing here needs a real sign-in.',
+    ].join('\n'),
+  })
+  log.info('custodial account took ownership')
+  return { handle: row.handle, ...(config().SMTP_URL ? {} : { revealUrl: url }) }
+}
+
+export type RevealOwnershipResult =
+  | { ok: true; handle: string; password: string }
+  | { ok: false; status: number; error: string; message: string }
+
+/** The single-use reveal. Claims the row atomically so a double-click cannot double-read. */
+export async function revealOwnershipPassword(token: string): Promise<RevealOwnershipResult> {
+  const db = getDb()
+  const hash = hashToken(token)
+  const claimed = await db
+    .update(ownershipReveal)
+    .set({ usedAt: new Date() })
+    .where(and(eq(ownershipReveal.tokenHash, hash), isNull(ownershipReveal.usedAt), gt(ownershipReveal.expiresAt, new Date())))
+    .returning()
+  const row = claimed[0]
+  if (!row) {
+    const existing = await db.select().from(ownershipReveal).where(eq(ownershipReveal.tokenHash, hash)).limit(1)
+    if (!existing[0]) return { ok: false, status: 404, error: 'NotFound', message: 'unknown take-ownership link' }
+    return {
+      ok: false,
+      status: 410,
+      error: existing[0].usedAt ? 'AlreadyUsed' : 'Expired',
+      message: existing[0].usedAt
+        ? 'this link has already been used — the password was shown once'
+        : 'this link has expired',
+    }
+  }
+  if (!row.wrappedPassword) {
+    // Defensive: usedAt was NULL at claim time, so this should be unreachable.
+    return { ok: false, status: 410, error: 'AlreadyUsed', message: 'this link has already been used' }
+  }
+  const password = unwrapSecret({ keyVersion: row.keyVersion, blob: Buffer.from(row.wrappedPassword) })
+  // Minimize retention: the blob has now served its one purpose.
+  await db.update(ownershipReveal).set({ wrappedPassword: null }).where(eq(ownershipReveal.tokenHash, hash))
+  const account = await getCustodialAccount(row.did)
+  return { ok: true, handle: account?.handle ?? '', password }
 }

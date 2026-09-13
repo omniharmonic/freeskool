@@ -14,7 +14,17 @@ import { Hono } from 'hono'
 import { z } from 'zod'
 import type { AppEnv } from '../session.js'
 import { requireViewer } from '../session.js'
-import { deleteRsvp, myRsvp, rsvpCounts, upsertRsvp, RSVP_STATUSES, type RsvpStatus } from '../../lib/rsvp.js'
+import {
+  deleteRsvp,
+  myRsvp,
+  promoteFromWaitlist,
+  resolveGoingOrWaitlist,
+  rsvpCounts,
+  upsertRsvp,
+  waitlistPosition,
+  RSVP_STATUSES,
+  type RsvpStatus,
+} from '../../lib/rsvp.js'
 import { loadEvent } from './events.js'
 import { actorAgent, NoActorCredentialError } from '../../lib/actor-agent.js'
 import { NSID } from '../../lexicons/nsids.js'
@@ -46,6 +56,17 @@ rsvps.post('/rsvp', requireViewer, async (c) => {
   const existing = await myRsvp(eventUri, viewer.did)
   let publicRecordUri = existing?.publicRecordUri ?? null
 
+  // WAITLIST: a requested 'going' only actually lands on 'going' if there is room.
+  // Re-confirming an existing 'going' spot never knocks yourself onto your own waitlist
+  // (`resolveGoingOrWaitlist`'s exclude-self count). The public record (below) always
+  // reflects what the member asked for, not the queue outcome — the waitlist is an
+  // app-side capacity fact, not something the protocol needs to represent.
+  const capacity = loaded.inputs.configs[0]?.capacity
+  const finalStatus: RsvpStatus =
+    status === 'going' && existing?.status !== 'going'
+      ? await resolveGoingOrWaitlist(eventUri, viewer.did, capacity)
+      : status
+
   if (alsoPublicRecord) {
     try {
       publicRecordUri = await writePublicRsvp(viewer, eventUri, status, publicRecordUri)
@@ -62,11 +83,16 @@ rsvps.post('/rsvp', requireViewer, async (c) => {
     publicRecordUri = null
   }
 
-  await upsertRsvp({ eventUri, did: viewer.did, status, alsoPublicRecord, publicRecordUri })
+  await upsertRsvp({ eventUri, did: viewer.did, status: finalStatus, alsoPublicRecord, publicRecordUri })
+
+  // A departure from 'going' frees a spot — promote whoever has waited longest.
+  if (existing?.status === 'going' && finalStatus !== 'going') {
+    await promoteFromWaitlist(eventUri)
+  }
 
   // The host learns that someone RSVP'd. They are told WHO only because they will meet
   // them; the notification carries the DID in the body, not in a public record.
-  if (status === 'going' && loaded.hostDid !== viewer.did) {
+  if (finalStatus === 'going' && loaded.hostDid !== viewer.did) {
     await enqueueNotification({
       did: loaded.hostDid,
       category: 'rsvp.received',
@@ -76,7 +102,13 @@ rsvps.post('/rsvp', requireViewer, async (c) => {
     })
   }
 
-  return c.json({ ok: true, status, alsoPublicRecord, counts: await rsvpCounts(eventUri) })
+  return c.json({
+    ok: true,
+    status: finalStatus,
+    alsoPublicRecord,
+    ...(finalStatus === 'waitlisted' ? { waitlistPosition: await waitlistPosition(eventUri, viewer.did) } : {}),
+    counts: await rsvpCounts(eventUri),
+  })
 })
 
 rsvps.delete('/rsvp', requireViewer, async (c) => {
@@ -87,6 +119,8 @@ rsvps.delete('/rsvp', requireViewer, async (c) => {
   if (removed?.publicRecordUri) {
     await deletePublicRsvp(viewer, removed.publicRecordUri).catch(() => {})
   }
+  // Clearing a 'going' RSVP frees a spot, same as switching away from it above.
+  if (removed?.wasGoing) await promoteFromWaitlist(eventUri)
   return c.json({ ok: true, counts: await rsvpCounts(eventUri) })
 })
 
@@ -94,9 +128,16 @@ rsvps.delete('/rsvp', requireViewer, async (c) => {
 rsvps.get('/rsvp', requireViewer, async (c) => {
   const eventUri = c.req.query('eventUri')
   if (!eventUri) return c.json({ error: 'InvalidRequest' }, 400)
-  const row = await myRsvp(eventUri, c.var.viewer!.did)
+  const did = c.var.viewer!.did
+  const row = await myRsvp(eventUri, did)
   return c.json({
-    rsvp: row ? { status: row.status, alsoPublicRecord: row.alsoPublicRecord } : null,
+    rsvp: row
+      ? {
+          status: row.status,
+          alsoPublicRecord: row.alsoPublicRecord,
+          ...(row.status === 'waitlisted' ? { waitlistPosition: await waitlistPosition(eventUri, did) } : {}),
+        }
+      : null,
     counts: await rsvpCounts(eventUri),
   })
 })
