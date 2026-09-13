@@ -11,6 +11,7 @@ import { runMigrations } from './db/migrate.js'
 import { log } from './lib/logging.js'
 import { startJobs } from './jobs/index.js'
 import { getIndexer } from './index/indexer.js'
+import { startPeerLiveSync } from './index/live-sync.js'
 import { refreshPolicyCache } from './lib/policy.js'
 import { seedSkillTiers } from './lib/skill-tiers.js'
 import { closeDb } from './db/index.js'
@@ -34,7 +35,24 @@ export async function main(): Promise<{ close: () => Promise<void> }> {
 
   const boss = process.env.FREESCHOOL_NO_JOBS === '1' ? undefined : await startJobs()
 
+  /**
+   * Live indexing from the peer registry. Treated as a background worker alongside
+   * the jobs, so `FREESCHOOL_NO_JOBS=1` (the smoke test) gets a quiet HTTP-only
+   * process, and a failure to attach degrades to the 15-minute backfill rather than
+   * taking the server down with it.
+   */
+  const liveSync =
+    boss && c.PEER_LIVE_SYNC
+      ? await startPeerLiveSync(indexer).catch((err) => {
+          log.warn('peer live sync failed to start; falling back to periodic backfill', {
+            detail: String(err),
+          })
+          return undefined
+        })
+      : undefined
+
   const close = async () => {
+    await liveSync?.stop().catch(() => {})
     await boss?.stop({ graceful: true }).catch(() => {})
     server.close()
     await closeDb()

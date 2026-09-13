@@ -50,6 +50,14 @@ const schema = z.object({
   /** Hosts allowed past contrail's SSRF guard (local/private PDSes). */
   ALLOWED_PRIVATE_PDS_HOSTS: z.string().default('localhost,127.0.0.1,host.docker.internal').transform(csv),
 
+  /**
+   * Live indexing from peer PDS hosts over `com.atproto.sync.subscribeRepos`
+   * (src/sync/README.md). On by default — the 15-minute `backfillFromPeers` job is
+   * the safety net beneath it, not the primary path. Set `PEER_LIVE_SYNC=0` to run
+   * on the backfill alone.
+   */
+  PEER_LIVE_SYNC: z.stringbool().default(true),
+
   CONTRAIL_NAMESPACE: z.string().default('org.freeschool.appview'),
   /** Jetstream live ingest only makes sense on the public network; off locally. */
   CONTRAIL_LIVE_INGEST: z.stringbool().default(false),
@@ -159,6 +167,7 @@ export function redactedConfig(c: Config) {
     peers: c.PEER_PDS_HOSTS.length,
     schoolConfigured: Boolean(c.SCHOOL_DID && c.SCHOOL_APP_PASSWORD),
     liveIngest: c.CONTRAIL_LIVE_INGEST,
+    peerLiveSync: c.PEER_LIVE_SYNC,
     custodyKeyVersion: c.CUSTODY_KEY_VERSION,
     push: Boolean(c.VAPID_PUBLIC_KEY && c.VAPID_PRIVATE_KEY),
     smtp: Boolean(c.SMTP_URL),

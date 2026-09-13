@@ -20,15 +20,33 @@ importers:
       '@atproto/api':
         specifier: ^0.20.44
         version: 0.20.44
+      '@atproto/identity':
+        specifier: 0.5.13
+        version: 0.5.13
       '@atproto/jwk-jose':
         specifier: ^0.2.4
         version: 0.2.4
+      '@atproto/lex-cbor':
+        specifier: 0.1.6
+        version: 0.1.6
       '@atproto/oauth-client':
         specifier: ^0.8.7
         version: 0.8.7
       '@atproto/oauth-client-node':
         specifier: ^0.5.7
         version: 0.5.7
+      '@atproto/repo':
+        specifier: 0.10.14
+        version: 0.10.14
+      '@atproto/sync':
+        specifier: 0.4.10
+        version: 0.4.10
+      '@atproto/xrpc-server':
+        specifier: 0.13.1
+        version: 0.13.1
+      '@freeschool/pds-follow':
+        specifier: workspace:*
+        version: link:../../packages/pds-follow
       '@freeschool/school-actor':
         specifier: workspace:*
         version: link:../../packages/school-actor
@@ -47,6 +65,9 @@ importers:
       hono:
         specifier: ^4.13.7
         version: 4.13.7
+      luxon:
+        specifier: ^3.7.2
+        version: 3.7.2
       nodemailer:
         specifier: ^10.0.9
         version: 10.0.9
@@ -66,6 +87,9 @@ importers:
         specifier: ^4.6.4
         version: 4.6.4
     devDependencies:
+      '@types/luxon':
+        specifier: ^3.7.1
+        version: 3.7.5
       '@types/node':
         specifier: ^22.15.0
         version: 22.20.2
@@ -78,6 +102,9 @@ importers:
       '@types/web-push':
         specifier: ^3.6.4
         version: 3.6.4
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
       drizzle-kit:
         specifier: ^0.31.10
         version: 0.31.10
@@ -90,6 +117,9 @@ importers:
       vitest:
         specifier: ^3.2.4
         version: 3.2.7(@types/node@22.20.2)(jiti@2.7.0)(jsdom@30.0.1(@noble/hashes@1.8.0))(lightningcss@1.32.0)(terser@5.51.2)(tsx@4.23.13)
+      ws:
+        specifier: 8.21.3
+        version: 8.21.3
 
   apps/web:
     dependencies:
@@ -1994,6 +2024,9 @@ packages:
   '@types/estree@1.0.9':
     resolution: {integrity: sha512-GhdPgy1el4/ImP05X05Uw4cw2/M93BCUmnEvWZNStlCzEKME4Fkk+YpoA5OiHNQmoS7Cafb8Xa3Pya8m1Qrzeg==}
 
+  '@types/luxon@3.7.5':
+    resolution: {integrity: sha512-jJ41Q4z6ZVO260MNDdHfW7+7a5iMiX8Mr6ZJHcmgrvhZha6dz5704o/lF2kKl6URjH6ivEL97w9xS/MgpJEphg==}
+
   '@types/node@22.20.2':
     resolution: {integrity: sha512-xlvWf4Vs9n1PEVYwP1n4vvG07M6y8WgvJ2t0vbrWTmijsIHp1cS+uJ2kMIRdY3nHZK0nCYKrPeD171+SzF4/zw==}
 
@@ -2019,6 +2052,9 @@ packages:
 
   '@types/web-push@3.6.4':
     resolution: {integrity: sha512-GnJmSr40H3RAnj0s34FNTcJi1hmWFV5KXugE0mYWnYhgTAHLJ/dJKAwDmvPJYMke0RplY2XE9LnM4hqSqKIjhQ==}
+
+  '@types/ws@8.18.1':
+    resolution: {integrity: sha512-ThVF6DCVhA8kUGy+aazFQ4kXQ7E1Ty7A3ypFOe0IcJV8O/M511G99AW24irKrW56Wt44yG9+ij8FaqoBGkuBXg==}
 
   '@vitejs/plugin-react@5.2.0':
     resolution: {integrity: sha512-YmKkfhOAi3wsB1PhJq5Scj3GXMn3WvtQ/JC0xoopuHoXSdmtdStOpFrYaT1kie2YgFBcIe64ROzMYRjCrYOdYw==}
@@ -6082,6 +6118,8 @@ snapshots:
 
   '@types/estree@1.0.9': {}
 
+  '@types/luxon@3.7.5': {}
+
   '@types/node@22.20.2':
     dependencies:
       undici-types: 6.21.0
@@ -6109,6 +6147,10 @@ snapshots:
   '@types/trusted-types@2.0.7': {}
 
   '@types/web-push@3.6.4':
+    dependencies:
+      '@types/node': 22.20.2
+
+  '@types/ws@8.18.1':
     dependencies:
       '@types/node': 22.20.2
 

@@ -313,7 +313,7 @@ async function main() {
   ok('.ics for an anonymous viewer carries only the neighborhood')
 
   /* 8. the peer-registry indexing path */
-  step(8, 'index from the peer registry (the liveness floor until PdsChangeSource exists)')
+  step(8, 'index from the peer registry (the safety net beneath PdsChangeSource)')
   if (process.env.SMOKE_SKIP_BACKFILL === '1') {
     info('skipped (SMOKE_SKIP_BACKFILL=1)')
   } else {

@@ -79,8 +79,9 @@ export async function startJobs(): Promise<PgBoss> {
   await boss.schedule(QUEUES.newsletter, '0 9 1 * *')
   await boss.schedule(QUEUES.notifyOutbox, '* * * * *')
   await boss.schedule(QUEUES.pushOutbox, '* * * * *')
-  // Until `PdsChangeSource` exists (src/sync/README.md), a periodic backfill IS our
-  // liveness floor for other people's writes.
+  // `PdsChangeSource` (src/sync/README.md) is the fast path for other people's
+  // writes; this stays the safety net beneath it. It closes anything a dropped
+  // socket, a cold start, or a peer's exhausted stream retention missed.
   await boss.schedule(QUEUES.backfill, '*/15 * * * *')
 
   log.info('jobs started', { queues: Object.values(QUEUES).length })
