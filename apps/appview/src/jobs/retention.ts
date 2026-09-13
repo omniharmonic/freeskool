@@ -18,16 +18,32 @@
  *                  password blob in a used row is already nulled at read time
  *                  (`lib/custody.ts#revealOwnershipPassword`), so this is metadata
  *                  cleanup, not a second line of secret-retention defense.
+ *   email verify   `fs_email_verification` rows that are USED or EXPIRED. Each one is a
+ *                  (DID, magic-link hash) pair: a spent token is a permanent record that
+ *                  this account was created, and verified, at this minute.
+ *   invite links   `fs_invite_link` rows that are EXPIRED or EXHAUSTED. `inviter_did` is
+ *                  NOT NULL on this table, so — unlike `fs_invite`, where the fact of an
+ *                  invite is role evidence that must survive its inviter — there is
+ *                  nothing to keep once the link is dead, and deleting the row is the
+ *                  STRONGER form of the same 30-day "who invited whom is not ours to
+ *                  keep" rule. A link's own TTL is days, well inside that window.
+ *   hand-offs      `fs_handoff` rows ACCEPTED or EXPIRED, after 30 days. The row pairs
+ *                  two steward DIDs; `fs_steward` is what actually carries the role, so
+ *                  the hand-off row is only wanted while someone might still be asking
+ *                  what happened, and `fs_audit` answers that afterwards.
  *
  * Every step is idempotent and bounded, so it is safe to run more than once a day and
  * safe to run on a machine that was off for a week.
  */
-import { and, eq, isNotNull, isNull, lt, or, sql } from 'drizzle-orm'
+import { and, eq, isNotNull, isNull, lt, lte, or, sql } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import {
   attendance,
   attendanceRollup,
+  emailVerification,
+  handoff,
   invite,
+  inviteLink,
   notificationFeed,
   notificationOutbox,
   oauthState,
@@ -43,6 +59,8 @@ import { log } from '../lib/logging.js'
 export const INVITER_PURGE_DAYS = 30
 export const ATTENDANCE_COLLAPSE_DAYS = 90
 export const NOTIFICATION_KEEP_DAYS = 90
+/** Same window as `INVITER_PURGE_DAYS`, and for the same reason: it pairs two DIDs. */
+export const HANDOFF_KEEP_DAYS = 30
 
 export interface RetentionResult {
   invitersPurged: number
@@ -53,6 +71,9 @@ export interface RetentionResult {
   oauthStatesPruned: number
   notificationsPruned: number
   ownershipRevealsPurged: number
+  emailVerificationsPurged: number
+  inviteLinksPurged: number
+  handoffsPurged: number
 }
 
 export async function runRetention(now = new Date()): Promise<RetentionResult> {
@@ -143,6 +164,29 @@ export async function runRetention(now = new Date()): Promise<RetentionResult> {
     .where(or(isNotNull(ownershipReveal.usedAt), lt(ownershipReveal.expiresAt, now)))
     .returning({ tokenHash: ownershipReveal.tokenHash })
 
+  /* 8. spent magic links: used, or expired and never used */
+  const emailVerifications = await db
+    .delete(emailVerification)
+    .where(or(isNotNull(emailVerification.usedAt), lt(emailVerification.expiresAt, now)))
+    .returning({ tokenHash: emailVerification.tokenHash })
+
+  /* 9. dead invite LINKS: expired, or out of uses */
+  const inviteLinks = await db
+    .delete(inviteLink)
+    .where(or(lt(inviteLink.expiresAt, now), lte(inviteLink.usesLeft, 0)))
+    .returning({ id: inviteLink.id })
+
+  /* 10. settled hand-offs, after 30 days */
+  const handoffs = await db
+    .delete(handoff)
+    .where(
+      and(
+        or(isNotNull(handoff.acceptedAt), lt(handoff.expiresAt, now)),
+        lt(handoff.createdAt, new Date(now.getTime() - HANDOFF_KEEP_DAYS * 86_400_000)),
+      ),
+    )
+    .returning({ id: handoff.id })
+
   const result: RetentionResult = {
     invitersPurged: purged.length,
     attendanceCollapsed: collapsedRows,
@@ -152,6 +196,9 @@ export async function runRetention(now = new Date()): Promise<RetentionResult> {
     oauthStatesPruned: states.length,
     notificationsPruned: outbox.length + feed.length,
     ownershipRevealsPurged: ownershipReveals.length,
+    emailVerificationsPurged: emailVerifications.length,
+    inviteLinksPurged: inviteLinks.length,
+    handoffsPurged: handoffs.length,
   }
   log.info('retention pass complete', { ...result })
   return result

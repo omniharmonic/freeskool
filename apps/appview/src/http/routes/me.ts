@@ -16,6 +16,13 @@
  * matching and the request queue without broadcasting it. The protocol has no way to
  * express a private record in v1, so 'school' genuinely means "not written".
  *
+ * AND CONSENT THAT ENDS MUST END THE RECORD (A6). `PUT /skill-claims` takes the member's
+ * WHOLE set, so flipping a claim from 'public' to 'school' — or dropping it from the list
+ * altogether — is a withdrawal of consent to publish it. The route therefore DELETES every
+ * `freeschool.draft.skillClaim` in the member's repo that the incoming set no longer asks to
+ * be public. Without that, the toggle was a lie: the UI said "school only" and the record
+ * stayed readable by anyone, forever.
+ *
  * TWO FORCED-OFF RULES on a public claim, both enforced by `checkPublicClaims` below
  * before anything is written:
  *   - an OAuth-door session can NEVER set `visibility: 'public'` in v1. There is no
@@ -247,6 +254,28 @@ export async function tierOfSkillUri(skillUri: string): Promise<SkillTierValue> 
   return resolveSkillTier(skill?.value.id)
 }
 
+/** Cheap "is anything of mine published?", from the index. See `needsRepo` below. */
+async function hasPublishedClaim(did: string): Promise<boolean> {
+  try {
+    const indexer = await getIndexer()
+    const { records } = await listCollection(indexer, 'skillClaim', { did, limit: 1 })
+    return records.length > 0
+  } catch {
+    // Index unavailable: assume there MIGHT be something to withdraw. Failing towards
+    // "try to retract" is the right direction for a consent withdrawal.
+    return true
+  }
+}
+
+/**
+ * One claim per skill, so re-stating a level updates the existing record rather than
+ * accumulating duplicates — and so that a claim can be found again in order to DELETE it
+ * (A6) without keeping an app-side uri index beside the repo.
+ */
+export function skillClaimRkey(skillUri: string): string {
+  return (skillUri.split('/').pop() ?? tid()).slice(0, 15)
+}
+
 me.put('/skill-claims', async (c) => {
   const parsed = claimsBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
@@ -261,35 +290,74 @@ me.put('/skill-claims', async (c) => {
   }
 
   const published: Array<{ uri: string; skill: string; level: string }> = []
+  const retracted: string[] = []
   const appSide: Array<{ skill: string; level: string; note?: string }> = []
+  // The rkeys this request wants to EXIST publicly afterwards. Anything else in the repo
+  // is consent that has been withdrawn.
+  const keep = new Set(toPublish.map((claim) => skillClaimRkey(claim.skill)))
 
-  if (toPublish.length > 0) {
-    try {
-      const agent = await actorAgent(viewer)
-      for (const claim of toPublish) {
-        const res = await agent.com.atproto.repo.putRecord({
-          repo: viewer.did,
-          collection: NSID.skillClaim,
-          // Deterministic-ish: one claim per skill, so re-stating a level updates rather
-          // than accumulating. The rkey is derived from the skill's rkey.
-          rkey: (claim.skill.split('/').pop() ?? tid()).slice(0, 15),
-          record: {
-            $type: NSID.skillClaim,
-            skill: claim.skill,
-            level: claim.level,
-            ...(claim.note ? { note: claim.note } : {}),
-            createdAt: now,
-          } as Record<string, unknown>,
-          validate: false,
-        })
-        published.push({ uri: res.data.uri, skill: claim.skill, level: claim.level })
-      }
-      const indexer = await getIndexer()
-      await indexer.notify(published.map((p) => p.uri)).catch(() => {})
-    } catch (err) {
-      if (err instanceof NoActorCredentialError) return c.json({ error: 'ReauthRequired' }, 401)
-      throw err
+  /**
+   * Does this request need the member's own credential at all? Publishing obviously does;
+   * so does a RETRACTION, and a retraction is only possible if something is published. The
+   * index answers that cheaply, and answering it first is what keeps an app-side-only save
+   * ('school' visibility, nothing public, nothing to withdraw) working for a session whose
+   * OAuth authorization has lapsed — it writes no records either way.
+   */
+  const needsRepo = toPublish.length > 0 || (await hasPublishedClaim(viewer.did))
+
+  if (needsRepo) try {
+    const agent = await actorAgent(viewer)
+
+    /**
+     * A6. Read the member's OWN repo — `listRecords` on their own PDS through their own
+     * session, not the index: the index is eventually consistent, and "we could not see it,
+     * so we left it published" is the wrong way for a consent withdrawal to fail.
+     *
+     * Read BEFORE publishing, so the records written a few lines down are never candidates
+     * for their own deletion.
+     */
+    const existing = await agent.com.atproto.repo
+      .listRecords({ repo: viewer.did, collection: NSID.skillClaim, limit: 100 })
+      .then((res) => res.data.records.map((r) => r.uri))
+      .catch(() => [] as string[])
+
+    for (const claim of toPublish) {
+      const res = await agent.com.atproto.repo.putRecord({
+        repo: viewer.did,
+        collection: NSID.skillClaim,
+        rkey: skillClaimRkey(claim.skill),
+        record: {
+          $type: NSID.skillClaim,
+          skill: claim.skill,
+          level: claim.level,
+          ...(claim.note ? { note: claim.note } : {}),
+          createdAt: now,
+        } as Record<string, unknown>,
+        validate: false,
+      })
+      published.push({ uri: res.data.uri, skill: claim.skill, level: claim.level })
     }
+
+    for (const uri of existing) {
+      const rkey = uri.split('/').pop()
+      if (!rkey || keep.has(rkey)) continue
+      await agent.com.atproto.repo
+        .deleteRecord({ repo: viewer.did, collection: NSID.skillClaim, rkey })
+        .then(() => retracted.push(uri))
+        .catch(() => {
+          /* best effort per record; the rest of the withdrawal still happens */
+        })
+    }
+
+    if (published.length > 0 || retracted.length > 0) {
+      const indexer = await getIndexer()
+      // The DELETED uris need the notify too, not just the new ones: an authoritative
+      // not-found from the PDS is what tells contrail to drop a record from the index.
+      await indexer.notify([...published.map((p) => p.uri), ...retracted]).catch(() => {})
+    }
+  } catch (err) {
+    if (err instanceof NoActorCredentialError) return c.json({ error: 'ReauthRequired' }, 401)
+    throw err
   }
 
   for (const claim of parsed.data.claims) {
@@ -302,7 +370,7 @@ me.put('/skill-claims', async (c) => {
     .values({ key: APP_SIDE_CLAIMS_KEY(viewer.did), value: appSide, updatedAt: new Date() })
     .onConflictDoUpdate({ target: appMeta.key, set: { value: appSide, updatedAt: new Date() } })
 
-  return c.json({ published, keptAppSide: appSide.length })
+  return c.json({ published, retracted, keptAppSide: appSide.length })
 })
 
 me.get('/skill-claims', async (c) => {

@@ -26,6 +26,7 @@ import { loadEvent } from './events.js'
 import { getDb } from '../../db/index.js'
 import { attendance } from '../../db/schema.js'
 import { enqueueNotification } from '../../notifications/dispatch.js'
+import { viewerRelation } from '../relation.js'
 
 export const feedbackRoutes = new Hono<AppEnv>()
 
@@ -84,15 +85,31 @@ feedbackRoutes.post('/feedback', requireViewer, async (c) => {
     throw err
   }
 
-  // The host is told feedback arrived. With NO actor, ever.
-  await enqueueNotification({
-    did: loaded.hostDid,
-    category: 'feedback.received',
-    dedupKey: `feedback.received:${eventUri}:${Date.now()}`,
-    title: 'New feedback on a class you taught',
-    body: 'It stays anonymous. A summary appears once enough people have answered.',
-    navigate: `/events/${encodeURIComponent(eventUri)}/feedback`,
-  })
+  /**
+   * The host is told — ONCE PER EVENT, and only when there is something they can actually
+   * look at (#15).
+   *
+   * The old notification fired per BALLOT, with `Date.now()` in the dedup key so nothing
+   * was ever deduped. That is a de-anonymisation channel, not just noise: a host watching
+   * their notifications learns HOW MANY people have answered and exactly WHEN each one did,
+   * which against a roster of four is most of the way to knowing who said what. Holding the
+   * notification until the numeric summary unlocks (k distinct ballots) means the first
+   * thing the host learns is the same thing everyone else can see.
+   *
+   * `dedupKey` carries no timestamp, so `enqueueNotification` claims it once per event and
+   * every later ballot is silent. With NO actor, ever.
+   */
+  const summary = await feedbackSummary(eventUri)
+  if (summary.released) {
+    await enqueueNotification({
+      did: loaded.hostDid,
+      category: 'feedback.received',
+      dedupKey: `feedback.received:${eventUri}`,
+      title: 'Feedback on a class you taught',
+      body: 'Enough people have answered for a summary. It stays anonymous.',
+      navigate: `/events/${encodeURIComponent(eventUri)}/feedback`,
+    })
+  }
 
   return c.json({ ok: true }, 201)
 })
@@ -101,7 +118,13 @@ feedbackRoutes.get('/events/:id/feedback-summary', async (c) => {
   const eventUri = decodeURIComponent(c.req.param('id'))
   const loaded = await loadEvent(eventUri)
   if (!loaded) return c.json({ error: 'NotFound' }, 404)
+  // #14: the same guard as `GET /api/events/:id`. An unlisted or moderated-away class is
+  // not discoverable, and neither is its feedback — otherwise this endpoint confirms that a
+  // given at-uri exists, and how busy it was, for an event the calendar will not show.
+  const viewer = c.var.viewer
+  const relation = viewer ? await viewerRelation(viewer, eventUri, loaded.hostDid) : 'public'
+  if (!loaded.listed && relation === 'public') return c.json({ error: 'NotFound' }, 404)
   const summary = await feedbackSummary(eventUri)
-  // Everyone sees the same thing. The host has no privileged view, by design.
+  // Everyone who can see the class sees the same summary. The host has no privileged view.
   return c.json(summary)
 })
