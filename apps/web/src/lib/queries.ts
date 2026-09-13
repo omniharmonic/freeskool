@@ -9,11 +9,14 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
 import type {
+  AdminPolicyInput,
   AttendanceRow,
   CreateEventInput,
   CreateRequestInput,
   FeedbackInput,
+  ModerationProposeInput,
   NotificationPref,
+  PeersInput,
   RequestClaimInput,
   RsvpSetInput,
   SetNewsletterInput,
@@ -245,6 +248,20 @@ export function useAdminPolicy() {
   });
 }
 
+/** `PUT /api/admin/policy` is a destructive action (see the doc comment on
+ * `AdminPolicyInput`'s `approvals` field) — a 403 is a real, expected
+ * response, not a transient failure, so this never retries. */
+export function useSetPolicyMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AdminPolicyInput) => api.admin.setPolicy(body),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['admin-policy'] });
+    },
+  });
+}
+
 export function useModerationQueue() {
   return useQuery({
     queryKey: ['moderation-queue'],
@@ -252,10 +269,76 @@ export function useModerationQueue() {
   });
 }
 
-export function usePeers() {
+export function useProposeModerationMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: ModerationProposeInput) => api.admin.moderation.propose(body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['moderation-queue'] });
+    },
+  });
+}
+
+/** `AlreadyApproved` (409) is the real, expected response when the caller is
+ * the steward who opened the item — their own approval was already
+ * recorded at open time (see `ModerationScreen`'s doc comment). Never retry
+ * past it. */
+export function useApproveModerationMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.admin.moderation.approve(id),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['moderation-queue'] });
+    },
+  });
+}
+
+/** `ErrThresholdNotMet` (403) is a real, expected response short of the
+ * policy's steward threshold — never retry past it. */
+export function useExecuteModerationMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.admin.moderation.execute(id),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['moderation-queue'] });
+    },
+  });
+}
+
+export function usePeers(probe = false) {
   return useQuery({
-    queryKey: ['peers'],
-    queryFn: () => api.admin.peers(),
+    queryKey: ['peers', probe],
+    queryFn: () => api.admin.peers({ probe }),
+  });
+}
+
+export function useSetPeersMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: PeersInput) => api.admin.setPeers(body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['peers'] });
+    },
+  });
+}
+
+/** Composing never mutates anything server-persistent in a way the UI needs
+ * to invalidate elsewhere — it only ever creates a fresh draft row the
+ * caller then holds onto by id. */
+export function useComposeNewsletterMutation() {
+  return useMutation({
+    mutationFn: (period?: string) => api.admin.newsletter.compose(period),
+  });
+}
+
+/** `AlreadySent` (409) is a real, expected response on a re-send — never
+ * retry past it. */
+export function useSendNewsletterMutation() {
+  return useMutation({
+    mutationFn: (id: string) => api.admin.newsletter.send(id),
+    retry: false,
   });
 }
 

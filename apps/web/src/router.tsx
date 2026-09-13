@@ -19,6 +19,11 @@ import { OAuthConfirmScreen } from './routes/OAuthConfirmScreen';
 import { ZineScreen } from './routes/ZineScreen';
 import { InviteScreen } from './routes/InviteScreen';
 import { Placeholder } from './routes/Placeholder';
+import { AdminOverviewScreen } from './routes/admin/AdminLayout';
+import { PolicyScreen } from './routes/admin/PolicyScreen';
+import { ModerationScreen } from './routes/admin/ModerationScreen';
+import { PeersScreen } from './routes/admin/PeersScreen';
+import { NewsletterScreen } from './routes/admin/NewsletterScreen';
 
 /** The zine and the sign-in flow (both doors plus the verify landing) are the
  * places without tabs. */
@@ -67,11 +72,11 @@ const routes = [
   }),
   createRoute({ getParentRoute: () => rootRoute, path: '/invite/$token', component: InviteScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/me/settings', component: NotificationSettingsScreen }),
-  createRoute({ getParentRoute: () => rootRoute, path: '/admin', component: Placeholder }), // Task 8
-  createRoute({ getParentRoute: () => rootRoute, path: '/admin/policy', component: Placeholder }), // Task 8
-  createRoute({ getParentRoute: () => rootRoute, path: '/admin/moderation', component: Placeholder }), // Task 8
-  createRoute({ getParentRoute: () => rootRoute, path: '/admin/peers', component: Placeholder }), // Task 8
-  createRoute({ getParentRoute: () => rootRoute, path: '/admin/newsletter', component: Placeholder }), // Task 8
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin', component: AdminOverviewScreen }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/policy', component: PolicyScreen }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/moderation', component: ModerationScreen }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/peers', component: PeersScreen }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/newsletter', component: NewsletterScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/handoff', component: Placeholder }), // Task 10
   createRoute({ getParentRoute: () => rootRoute, path: '/how-it-works', component: Placeholder }), // Task 10
 ];

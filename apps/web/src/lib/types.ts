@@ -488,10 +488,41 @@ export interface NotificationPrefsResponse {
 
 // ── admin ────────────────────────────────────────────────────────────────
 
+/**
+ * Mirrors `freeschool.draft.policy#thresholds` (`packages/lexicons/lexicons/
+ * freeschool/draft/policy.json`) and `Thresholds` in
+ * `packages/shared/src/roles.ts` exactly. The web app has no dependency on
+ * `@freeschool/shared`, so the shape is duplicated here rather than imported.
+ */
+export interface PolicyThresholds {
+  memberRequires: 'none' | 'invite-or-vouch' | 'attended-one';
+  hostMinAttended: number;
+  facilitatorMinHosted: number;
+  firstEventApproval: boolean;
+  feedbackK: number;
+  destructiveActionStewards: number;
+  /** Off by default; publishing a given member's role additionally needs that member's own opt-in. */
+  publishRoles?: boolean;
+}
+
+/** The `freeschool.draft.policy` record itself, as returned in `record`. */
+export interface PolicyRecordValue {
+  title: string;
+  text: string;
+  version: string;
+  effectiveAt: string;
+  thresholds?: PolicyThresholds;
+  createdAt: string;
+  [key: string]: unknown;
+}
+
+/** `GET /api/admin/policy` — `thresholds` always merges in server-side
+ * defaults (`mergeThresholds` in `apps/appview/src/lib/policy.ts`), so it is
+ * never partial even when `record` is still `null` (no policy written yet). */
 export interface AdminPolicyResponse {
-  uri?: string;
-  thresholds: unknown;
-  record: unknown;
+  uri?: string | null;
+  thresholds: PolicyThresholds;
+  record: PolicyRecordValue | null;
 }
 
 export interface AdminPolicyInput {
@@ -499,8 +530,13 @@ export interface AdminPolicyInput {
   text: string;
   version: string;
   effectiveAt?: string;
-  thresholds?: Record<string, unknown>;
+  thresholds?: Partial<PolicyThresholds>;
+  /** MANDATORY — `policyBody` on the server refuses a write without one. */
   reason: string;
+  /** Co-signing stewards. Writing policy is a destructive action
+   * (`DESTRUCTIVE_ACTIONS` in `packages/school-actor/src/port.ts`), so a
+   * lone steward's PUT needs this threshold met or the server answers 403
+   * `ErrThresholdNotMet` — see the doc comment on `PolicyScreen`. */
   approvals?: Array<{ stewardDid: string; at: string }>;
 }
 
@@ -510,14 +546,32 @@ export interface AdminPolicyWriteResult {
   auditId?: string;
 }
 
+/** Mirrors `moderationBody`'s `action` enum on the server exactly
+ * (`apps/appview/src/http/routes/admin.ts`). */
+export type ModerationAction =
+  | 'curate-listing'
+  | 'remove-listing'
+  | 'restore-listing'
+  | 'set-role'
+  | 'suspend-role'
+  | 'close-request'
+  | 'void-attendance';
+
+/** Mirrors `Approval` in `packages/school-actor/src/port.ts`. */
+export interface ModerationApproval {
+  stewardDid: string;
+  at: string;
+  sig?: string;
+}
+
 export interface ModerationItem {
   id: string;
-  action: string;
-  subjectUri?: string;
-  subjectDid?: string;
+  action: ModerationAction;
+  subjectUri?: string | null;
+  subjectDid?: string | null;
   reason: string;
   status: string;
-  approvals: unknown;
+  approvals: ModerationApproval[];
   createdAt: string;
 }
 
@@ -527,9 +581,10 @@ export interface ModerationQueueResponse {
 }
 
 export interface ModerationProposeInput {
-  action: string;
+  action: ModerationAction;
   subjectUri?: string;
   subjectDid?: string;
+  /** MANDATORY — there is no code path on the server that acts without one. */
   reason: string;
 }
 
@@ -539,7 +594,7 @@ export interface ModerationProposeResult {
 }
 
 export interface ModerationApproveResult {
-  approvals: unknown;
+  approvals: ModerationApproval[];
   required: number;
 }
 
@@ -549,14 +604,25 @@ export interface ModerationExecuteResult {
   auditId?: string;
 }
 
+/** Mirrors `listPeers()`'s row shape in `apps/appview/src/index/peers.ts`. */
 export interface PeerRecord {
   host: string;
-  [key: string]: unknown;
+  source: string;
+  schoolDid: string | null;
+}
+
+/** Mirrors `probePeer()`'s return shape — present only when the request
+ * carried `?probe=1`. There is no last-sync timestamp on a peer row; this is
+ * the closest live signal the API exposes (see `PeersScreen`'s doc comment). */
+export interface PeerProbe {
+  host: string;
+  listReposByCollection: boolean;
+  listRepos: boolean;
 }
 
 export interface PeersResponse {
   peers: PeerRecord[];
-  probed?: unknown;
+  probed?: PeerProbe[];
 }
 
 export interface PeersInput {
@@ -564,10 +630,17 @@ export interface PeersInput {
   remove?: string[];
 }
 
+/** `POST /api/admin/newsletter` merges `{subject, body}` with the draft row
+ * itself (`id`, `month`, `html`, `text`, `status`) — see the route in
+ * `apps/appview/src/http/routes/admin.ts`. `body` and `text` are therefore
+ * the same string under two names; `subject` is synthesized, not stored. */
 export interface NewsletterDraft {
   id: string;
+  month: string;
   subject: string;
   body: string;
+  text: string;
+  html: string;
   status: string;
   [key: string]: unknown;
 }

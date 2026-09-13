@@ -251,11 +251,15 @@ export const api = {
       execute: (id: string) =>
         post<ModerationExecuteResult>(`/api/admin/moderation/${encodeURIComponent(id)}/execute`),
     },
-    peers: () => get<PeersResponse>('/api/admin/peers'),
+    /** `probe` mirrors `?probe=1` — a live reachability check per peer. There is
+     * no last-sync timestamp on a peer row (see `PeersScreen`'s doc comment). */
+    peers: (opts: { probe?: boolean } = {}) =>
+      get<PeersResponse>('/api/admin/peers', opts.probe ? { probe: 1 } : undefined),
     setPeers: (p: PeersInput) => put<PeersResponse>('/api/admin/peers', p),
     newsletter: {
-      compose: () => post<NewsletterDraft>('/api/admin/newsletter'),
-      send: (id: string) => post<{ ok: boolean }>(`/api/admin/newsletter/${encodeURIComponent(id)}/send`),
+      /** `period` defaults server-side to the current month (`YYYY-MM`). */
+      compose: (period?: string) => request<NewsletterDraft>('/api/admin/newsletter', { method: 'POST', query: period ? { period } : undefined }),
+      send: (id: string) => post<{ ok: boolean; recipientCount: number }>(`/api/admin/newsletter/${encodeURIComponent(id)}/send`),
     },
     handoff: {
       start: (b: HandoffStartInput) => post<HandoffResult>('/api/admin/handoff', b),
