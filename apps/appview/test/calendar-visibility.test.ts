@@ -6,9 +6,11 @@ import { describe, expect, it } from 'vitest'
 import {
   icsLocation,
   isListed,
+  isVenueNeeded,
   neighborhoodOf,
   projectEvent,
   seesFullLocation,
+  tagsOf,
   type CalendarEvent,
   type ListingInputs,
 } from '../src/http/visibility.js'
@@ -87,6 +89,8 @@ describe('how much of it does this viewer see?', () => {
       status: 'community.lexicon.calendar.event#scheduled',
       neighborhood: 'North Boulder',
       locationRedacted: true,
+      venueNeeded: false,
+      tags: [],
     })
     const serialized = JSON.stringify(out)
     expect(serialized).not.toContain('Juniper')
@@ -141,5 +145,47 @@ describe('the .ics LOCATION line respects the same boundary', () => {
     const online: CalendarEvent = { uri: 'u', hostDid: 'd', locations: [{ uri: 'https://meet.example.org/abc' }] }
     expect(icsLocation(online, { listings: [], configs: [] }, 'rsvp')).toBe('https://meet.example.org/abc')
     expect(icsLocation(online, { listings: [], configs: [] }, 'public')).toBeUndefined()
+  })
+})
+
+describe('venueNeeded', () => {
+  it('is true when a class has no address and no neighborhood at all', () => {
+    const noVenue: CalendarEvent = { uri: 'u', hostDid: 'd', name: 'Knife sharpening' }
+    expect(isVenueNeeded(noVenue, { listings: [], configs: [] })).toBe(true)
+    const out = projectEvent(noVenue, { listings: [], configs: [] }, 'public')
+    expect(out.venueNeeded).toBe(true)
+  })
+
+  it('is false once a neighborhood is configured, even with no precise address', () => {
+    const noVenue: CalendarEvent = { uri: 'u', hostDid: 'd' }
+    const inputs: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'listed', neighborhood: 'North Boulder' }] }
+    expect(isVenueNeeded(noVenue, inputs)).toBe(false)
+  })
+
+  it('is false once a location is set', () => {
+    expect(isVenueNeeded(event, { listings: [], configs: [] })).toBe(false)
+  })
+})
+
+describe('tags', () => {
+  it('collects tags from every config and listing sidecar, deduped and lowercased', () => {
+    const inputs: ListingInputs = {
+      listings: [{ event: ref, school: 'did:plc:school', status: 'listed', tags: ['Skillshare'] }],
+      configs: [{ event: ref, visibility: 'listed', tags: ['skillshare', 'bikes'] }],
+    }
+    expect(tagsOf(inputs)).toEqual(['skillshare', 'bikes'])
+  })
+
+  it('is an empty array, never undefined, when nothing carries a tag', () => {
+    expect(tagsOf({ listings: [], configs: [] })).toEqual([])
+  })
+
+  it('projectEvent carries tags for both the public and trusted views', () => {
+    const inputs: ListingInputs = {
+      listings: [],
+      configs: [{ event: ref, visibility: 'listed', tags: ['knitting'] }],
+    }
+    expect(projectEvent(event, inputs, 'public').tags).toEqual(['knitting'])
+    expect(projectEvent(event, inputs, 'host').tags).toEqual(['knitting'])
   })
 })

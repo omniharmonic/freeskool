@@ -21,6 +21,8 @@ export interface EventConfig {
   rsvpRequired?: boolean
   /** DID of the school this event is offered under. */
   school?: string
+  /** Lowercase kebab tags. Routes the school's curation listing — see lib/events.ts. */
+  tags?: string[]
   createdAt?: string
 }
 

@@ -21,6 +21,7 @@ import { getIndexer } from '../../index/indexer.js'
 import { getRecordByUri, listCollection, parseAtUri } from '../../index/queries.js'
 import { getRecord } from '../../lib/pds.js'
 import { resolvePdsEndpoint } from '../../lib/identity.js'
+import { countInterested, isInterested, meetsThreshold, toggleInterest } from '../../lib/request-rsvp.js'
 
 export const requests = new Hono<AppEnv>()
 
@@ -42,9 +43,9 @@ requests.get('/requests', async (c) => {
     limit: Number(c.req.query('limit') ?? 50),
     ...(c.req.query('cursor') ? { cursor: c.req.query('cursor')! } : {}),
   })
-  return c.json({
-    cursor,
-    requests: records.map((r) => ({
+  const viewer = c.var.viewer
+  const items = await Promise.all(
+    records.map(async (r) => ({
       uri: r.uri,
       askedBy: r.did,
       title: r.value.title,
@@ -53,8 +54,19 @@ requests.get('/requests', async (c) => {
       threshold: r.value.threshold,
       status: r.value.status,
       claims: r.counts?.claim ?? r.counts?.claims ?? 0,
+      // "I'm interested" — app-side (R9: no public roster), the count a `threshold`
+      // gates claiming against. Never a list of who.
+      rsvpCount: await countInterested(r.uri),
+      viewerInterested: viewer ? await isInterested(r.uri, viewer.did) : false,
     })),
-  })
+  )
+  return c.json({ cursor, requests: items })
+})
+
+requests.post('/requests/:id/rsvp', requireViewer, async (c) => {
+  const requestUri = decodeURIComponent(c.req.param('id'))
+  const result = await toggleInterest(requestUri, c.var.viewer!.did)
+  return c.json(result)
 })
 
 const createBody = z.object({
@@ -104,9 +116,18 @@ requests.post('/requests/:id/claim', requireViewer, requireRole(Role.Host), asyn
   const viewer = c.var.viewer!
   const indexer = await getIndexer()
 
-  const request = await getRecordByUri(indexer, 'request', requestUri)
+  const request = await getRecordByUri<RequestRecord>(indexer, 'request', requestUri)
   const requestCid = request?.cid ?? (await cidFromPds(requestUri))
   if (!requestCid) return c.json({ error: 'NotFound', message: 'unknown request' }, 404)
+
+  const threshold = request?.value.threshold
+  const interested = await countInterested(requestUri)
+  if (!meetsThreshold(interested, threshold)) {
+    return c.json(
+      { error: 'ThresholdNotMet', message: `this request needs ${threshold} interested people; has ${interested}` },
+      409,
+    )
+  }
 
   let eventRef: { uri: string; cid: string } | undefined
   if (parsed.data.eventUri) {

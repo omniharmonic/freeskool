@@ -50,6 +50,20 @@ export function isListed({ listings, configs }: ListingInputs): boolean {
   return configs.some((c) => c.visibility === 'listed')
 }
 
+/** Union of every config sidecar's declared tags, deduped, lowercase. Never the event's author. */
+export function tagsOf({ configs, listings }: ListingInputs): string[] {
+  const out = new Set<string>()
+  for (const c of configs) for (const t of c.tags ?? []) out.add(t.toLowerCase())
+  for (const l of listings) for (const t of l.tags ?? []) out.add(t.toLowerCase())
+  return [...out]
+}
+
+/** True when nobody has offered a place for this class to happen yet. */
+export function isVenueNeeded(event: CalendarEvent, inputs: ListingInputs): boolean {
+  const hasLocations = Array.isArray(event.locations) && event.locations.length > 0
+  return !hasLocations && !neighborhoodOf(inputs, event)
+}
+
 export function neighborhoodOf({ configs }: ListingInputs, event: CalendarEvent): string | undefined {
   const fromConfig = configs.find((c) => c.neighborhood)?.neighborhood
   if (fromConfig) return fromConfig
@@ -74,6 +88,10 @@ export interface PublicCalendarEntry {
   neighborhood?: string
   /** True when the viewer is being shown a coarsened location. */
   locationRedacted: boolean
+  /** True when the host has no address and no neighborhood at all — nobody has a room yet. */
+  venueNeeded: boolean
+  /** Lowercase kebab tags this class carries. Never includes who added them. */
+  tags: string[]
 }
 
 export interface FullCalendarEntry extends PublicCalendarEntry {
@@ -100,6 +118,8 @@ export function projectEvent(
       return n ? { neighborhood: n } : {}
     })(),
     locationRedacted: !seesFullLocation(relation),
+    venueNeeded: isVenueNeeded(event, inputs),
+    tags: tagsOf(inputs),
   }
   if (!seesFullLocation(relation)) return base
   return {

@@ -92,6 +92,11 @@ export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('base64url')
 }
 
+/** A shareable invite-link token: 128 bits, base64url. Only its hashToken() is stored. */
+export function newInviteToken(): string {
+  return randomBytes(16).toString('base64url')
+}
+
 /* deterministic occurrence rkey */
 
 const B32 = '234567abcdefghijklmnopqrstuvwxyz'

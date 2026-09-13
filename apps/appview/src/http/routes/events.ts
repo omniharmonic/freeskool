@@ -16,7 +16,7 @@ import { and, eq, isNull, sql } from 'drizzle-orm'
 import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireViewer, requireRole } from '../session.js'
-import { createEventAsHost } from '../../lib/events.js'
+import { createEventAsHost, EventNotFoundError, EventPermissionError, updateEventAsHost } from '../../lib/events.js'
 import { NoActorCredentialError } from '../../lib/actor-agent.js'
 import { getIndexer } from '../../index/indexer.js'
 import { getRecordByUri, sidecarsForEvent } from '../../index/queries.js'
@@ -46,6 +46,10 @@ const createBody = z.object({
   visibility: z.enum(['listed', 'unlisted', 'private']).optional(),
   neighborhood: z.string().max(200).optional(),
   rsvpRequired: z.boolean().optional(),
+  tags: z
+    .array(z.string().regex(/^[a-z0-9]+(-[a-z0-9]+)*$/, 'tags must be lowercase kebab-case'))
+    .max(10)
+    .optional(),
   skills: z
     .array(
       z.object({
@@ -88,6 +92,27 @@ events.post('/events', requireViewer, requireRole(Role.Host), async (c) => {
         },
         401,
       )
+    }
+    throw err
+  }
+})
+
+const updateBody = createBody.partial()
+
+events.put('/events/:id', requireViewer, async (c) => {
+  const uri = decodeURIComponent(c.req.param('id'))
+  const parsed = updateBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) {
+    return c.json({ error: 'InvalidRequest', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400)
+  }
+  try {
+    const updated = await updateEventAsHost(c.var.viewer!, uri, parsed.data)
+    return c.json(updated)
+  } catch (err) {
+    if (err instanceof EventNotFoundError) return c.json({ error: 'NotFound' }, 404)
+    if (err instanceof EventPermissionError) return c.json({ error: 'PermissionDenied', message: err.message }, 403)
+    if (err instanceof NoActorCredentialError) {
+      return c.json({ error: 'ReauthRequired', message: 'sign in again before updating your class' }, 401)
     }
     throw err
   }

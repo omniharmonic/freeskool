@@ -14,6 +14,7 @@ import { z } from 'zod'
 import type { AppEnv } from '../session.js'
 import { getIndexer } from '../../index/indexer.js'
 import { eventsInWindow, sidecarsForEvent } from '../../index/queries.js'
+import { config } from '../../config.js'
 import type { EventConfig, EventListing } from '../../lexicons/coop.js'
 import { isListed, projectEvent, type CalendarEvent, type ViewerRelation } from '../visibility.js'
 import { viewerRelation } from '../relation.js'
@@ -54,7 +55,15 @@ calendar.get('/calendar', async (c) => {
     if (!isListed(inputs)) continue
 
     const relation: ViewerRelation = viewer ? await viewerRelation(viewer, e.uri, e.did) : 'public'
-    out.push(projectEvent(toCalendarEvent(e.uri, e.did, e.value), inputs, relation))
+    // 'ours' when our own school curated or configured it; 'listed' means it reached us
+    // only through ANOTHER school's listing (peer exchange — see docs/plans/gap-report.md
+    // §A item 11; inbound consumption is not built yet, so this is almost always 'ours').
+    const schoolDid = config().SCHOOL_DID
+    const origin: 'ours' | 'listed' =
+      listingValues.some((l) => l.school === schoolDid) || configValues.some((cfg) => cfg.school === schoolDid)
+        ? 'ours'
+        : 'listed'
+    out.push({ ...projectEvent(toCalendarEvent(e.uri, e.did, e.value), inputs, relation), origin })
   }
 
   return c.json({ from: fromIso, to: toIso, events: out })

@@ -125,6 +125,55 @@ export const invite = pgTable(
   (t) => [index('fs_invite_used_by_idx').on(t.usedByDid)],
 )
 
+/**
+ * Shareable invite LINKS (distinct from `fs_invite`, the signup-invite-code evidence
+ * table above). Anyone signed in can mint one; only its SHA-256 is ever stored, so a
+ * stolen database row cannot be replayed as a working link. `inviterDid` never leaves
+ * this table — it is not returned from the mint endpoint's URL, nor to the redeemer.
+ */
+export const inviteLink = pgTable(
+  'fs_invite_link',
+  {
+    id: text('id').primaryKey(),
+    tokenHash: text('token_hash').notNull(),
+    inviterDid: text('inviter_did').notNull(),
+    schoolDid: text('school_did').notNull(),
+    eventUri: text('event_uri'),
+    usesLeft: integer('uses_left').notNull().default(1),
+    expiresAt: ts('expires_at').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    redeemedAt: ts('redeemed_at'),
+  },
+  (t) => [uniqueIndex('fs_invite_link_token_hash_idx').on(t.tokenHash)],
+)
+
+/**
+ * Tier B marks a skill as sensitive/high-risk (security culture, legal support, street
+ * medicine, ...): its claims default to app-side-only and a public claim needs an
+ * explicit confirmation. App-side, not a lexicon field — see src/lib/skill-tiers.ts.
+ */
+export const skillTier = pgTable('fs_skill_tier', {
+  skillId: text('skill_id').primaryKey(),
+  /** 'A' | 'B' */
+  tier: text('tier').notNull().default('A'),
+  reason: text('reason'),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+})
+
+/**
+ * "I'm interested" on a needs-board request — app-side (R9: no roster), and the count
+ * a request's own `threshold` is checked against before a host may claim it.
+ */
+export const requestRsvp = pgTable(
+  'fs_request_rsvp',
+  {
+    requestUri: text('request_uri').notNull(),
+    did: text('did').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.requestUri, t.did] }), index('fs_request_rsvp_req_idx').on(t.requestUri)],
+)
+
 /* ───────────────────────────────── RSVP & attendance ───────────────────────────── */
 
 /**
@@ -485,6 +534,9 @@ export const schema = {
   custodialAccount,
   emailVerification,
   invite,
+  inviteLink,
+  skillTier,
+  requestRsvp,
   rsvp,
   attendance,
   attendanceRollup,

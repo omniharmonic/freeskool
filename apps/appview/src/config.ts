@@ -25,6 +25,8 @@ const schema = z.object({
   DATABASE_URL: z.string().default('postgres://freeschool:freeschool@localhost:5434/freeschool'),
   APPVIEW_PORT: z.coerce.number().int().positive().default(4000),
   APPVIEW_PUBLIC_URL: z.string().url().default('http://localhost:4000'),
+  /** The PWA's own origin. Invite links point here. Falls back to APPVIEW_PUBLIC_URL. */
+  WEB_PUBLIC_URL: z.string().url().optional(),
 
   /** Our reference PDS — the primary door mints accounts here. */
   PDS_URL: z.string().url().default('http://localhost:3000'),
@@ -112,6 +114,8 @@ export type Config = z.infer<typeof schema> & {
   oauthUsable: boolean
   oauthClientId: string
   isProd: boolean
+  /** WEB_PUBLIC_URL, or APPVIEW_PUBLIC_URL when the PWA is not given its own origin. */
+  webPublicUrl: string
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -128,6 +132,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // A confidential client's client_id IS the metadata URL.
     oauthClientId: `${publicUrl}/oauth/client-metadata.json`,
     isProd: parsed.NODE_ENV === 'production',
+    webPublicUrl: (parsed.WEB_PUBLIC_URL ?? publicUrl).replace(/\/$/, ''),
   }
 }
 
