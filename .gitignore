@@ -17,3 +17,7 @@ apps/appview/.dev-mail.log
 # Playwright output (apps/web/playwright.config.ts)
 test-results/
 playwright-report/
+
+# Production secrets (infra/production/.env.example is the template)
+infra/production/.env
+infra/production/.authority.env
