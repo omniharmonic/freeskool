@@ -433,9 +433,28 @@ async function main() {
       .join('\n'),
   )
   assert(report.violations.length === 0, `the privacy audit found ${report.violations.length} violation(s)`)
+  /**
+   * `records` is how many records exist in the AUDITED collections across this run's repos,
+   * and it is deliberately NOT asserted to be 0: F1 added the school-written collections, so
+   * a passing run legitimately has listings and occurrences in it (allowed, at their event
+   * strongRef, because the host published that event). What the claim "wrote nothing public"
+   * rests on is that 0 of them are violations, which is the assert above — and that the
+   * app-side collections in particular are EMPTY, which is this one.
+   */
+  const { NSID: NSIDs } = await import('../src/lexicons/nsids.js')
+  const appSideOnly = report.cells.filter((cell) =>
+    [NSIDs.rsvp, NSIDs.attendance, NSIDs.hostFeedback].includes(cell.collection as never),
+  )
+  const appSideRecords = appSideOnly.reduce((n, cell) => n + cell.count, 0)
+  assert(
+    appSideRecords === 0,
+    `3 RSVPs, 3 attendance attestations and 3 ballots must write NOTHING public, but ${appSideRecords} record(s) ` +
+      `exist in ${appSideOnly.map((c) => c.collection).join(', ')}`,
+  )
   ok(
     `privacy audit OK across ${report.repos} repo(s) this run created: ${report.records} record(s) in the ` +
-      'audited collections, 0 violations — 3 RSVPs, 3 attestations and 3 ballots wrote nothing public',
+      'audited collections, 0 violations, and 0 in rsvp/attendance/hostFeedback — the 3 RSVPs, ' +
+      '3 attestations and 3 ballots wrote nothing public',
   )
 
   void steward

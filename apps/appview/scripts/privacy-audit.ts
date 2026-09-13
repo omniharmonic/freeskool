@@ -50,7 +50,23 @@
  *      stranger anything about the host they could not already see by reading the event.
  *      This is the opt-in public-RSVP path (`alsoPublicRecord`, `src/http/routes/rsvp.ts`).
  *
+ *   6. The same reasoning, at the exact paths listed in `STRONGREF_EXEMPT_PATHS`, for the
+ *      SCHOOL-WRITTEN collections F1 added: a `coop.lexicon.event.listing` names the host's
+ *      event, a `freeschool.draft.occurrence` names the host's event and series, a
+ *      `freeschool.draft.claim` names the asker's request, a `freeschool.draft.skillClaim`
+ *      names the taxonomy authority's skill. Each points at a public record its OWN author
+ *      wrote. Narrow on purpose: exact paths, so a NEW field naming somebody on any of these
+ *      is a violation until somebody justifies it there.
+ *
  * Nothing else is exempt.
+ *
+ * AND SEPARATELY, FREE TEXT (F1). `reason`, `note`, `description` and `suppliesNote` are
+ * scanned for an `@handle`-shaped token or a `did:` prefix, and there is NO exemption for
+ * either. A handle is not a DID, so the structural scan cannot see it at all; and a
+ * free-text field is never the right place to name somebody, whoever they are — the
+ * structural `actors[]` exemption exists precisely so a steward does not have to be named in
+ * prose. `freeschool.draft.moderationAction` no longer carries a `reason` at all (F0), which
+ * is the main thing this scan was going to find.
  *
  * OUTPUT. One row per (repo, collection) that exists, with counts; then every violation,
  * with the DID truncated to 12 characters (`did:plc:abcd…`) and the offending rkey — a
@@ -69,7 +85,18 @@ import { getThresholds } from '../src/lib/policy.js'
 import { NSID } from '../src/lexicons/nsids.js'
 import { isMain } from '../src/lib/is-main.js'
 
-/** The collections a stranger could read that could name somebody else. */
+/**
+ * The collections a stranger could read that could name somebody else.
+ *
+ * F1 adds the SCHOOL-WRITTEN ones. They were missing for an understandable reason — the
+ * school is exempt as an institution, so "the school names the school" is never a violation —
+ * but that is not what these records do: a listing and an occurrence both point at a HOST's
+ * event, a claim points at an ASKER's request, a skill claim points at the taxonomy
+ * AUTHORITY's skill. Every one of those is a DID the record's author did not write, and they
+ * were simply not being looked at. They are all allowed, for a reason
+ * (`STRONGREF_EXEMPT_PATHS`) — but now the audit proves it each run instead of assuming it,
+ * and a NEW field on any of them is a violation by default.
+ */
 export const AUDITED_COLLECTIONS = [
   NSID.rsvp,
   NSID.attendance,
@@ -78,10 +105,50 @@ export const AUDITED_COLLECTIONS = [
   NSID.moderationAction,
   NSID.skillAttestation,
   NSID.approval,
+  NSID.eventListing,
+  NSID.occurrence,
+  NSID.claim,
+  NSID.skillClaim,
+  NSID.policy,
+  NSID.school,
 ] as const
 
-const DID_EXACT = /^did:[a-z0-9]+:[a-zA-Z0-9._:%-]+$/
-const AT_URI_DID = /^at:\/\/(did:[a-z0-9]+:[a-zA-Z0-9._:%-]+)(\/|$)/
+/**
+ * Paths whose value is a strongRef (or at-uri) pointing at a record ITS OWN AUTHOR
+ * published — the same reasoning as the RSVP exemption (5): the thing pointed at is already
+ * public, written by the person it names, so the pointer tells a stranger nothing they could
+ * not read directly. Narrow ON PURPOSE: exact paths, not prefixes, so a new field naming
+ * somebody is a violation until somebody justifies it here.
+ */
+const STRONGREF_EXEMPT_PATHS: Record<string, readonly string[]> = {
+  // The school lists a host's event. The listing IS the curation surface; the event is the
+  // host's own public record.
+  [NSID.eventListing]: ['event.uri', 'event'],
+  // The school materializes an occurrence of a host's series: both refs point at records the
+  // host (or the school itself) published.
+  [NSID.occurrence]: ['event.uri', 'event', 'series.uri', 'series'],
+  // A host claims an asker's request, optionally naming the event they made for it.
+  [NSID.claim]: ['request.uri', 'request', 'event.uri', 'event'],
+  // A member's own claim points at a skill in the taxonomy authority's repo.
+  [NSID.skillClaim]: ['skill'],
+}
+
+const DID_RE = /did:[a-z0-9]+:[a-zA-Z0-9._:%-]+/
+/**
+ * #13. An at-uri FIRST, so its authority is attributed to the at-uri rather than reported
+ * twice; then any bare DID. Global, and applied with `matchAll` INSIDE the string rather than
+ * anchored to the whole of it — which is the bug: `namedDids` only ever matched a field whose
+ * ENTIRE value was a DID or an at-uri, so `"ask did:plc:abc about it"`, a `text` field with
+ * an at-uri in the middle of a sentence, or any DID embedded in a longer string walked
+ * straight past the audit.
+ */
+const NAMED_DID_RE = new RegExp(`at:\\/\\/(${DID_RE.source})|(${DID_RE.source})`, 'g')
+
+/** Free-text fields a human wrote, where a DID or a handle is not a reference but a mention. */
+export const FREE_TEXT_FIELDS: ReadonlySet<string> = new Set(['reason', 'note', 'description', 'suppliesNote'])
+/** `@alice.test`, `@dana.bsky.social`. The leading `@` is required: `boulder.test` on its own is a domain. */
+const HANDLE_MENTION = /@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,24}\b/i
+const DID_MENTION = /did:[a-z0-9]+:/i
 
 export interface NamedDid {
   /** Dotted path inside the record value, e.g. `approvals.0.stewardDid`. */
@@ -92,18 +159,66 @@ export interface NamedDid {
 /**
  * Every DID named anywhere in a record value, with the path that named it. Exported for
  * the tests: this is the whole definition of "names a DID".
+ *
+ * #13: the scan is INSIDE each string (`matchAll`), not anchored to the whole of it. A DID
+ * mentioned mid-sentence in a `text` or `reason` field is exactly as public as one sitting
+ * alone in a `subject` field, and the anchored version could not see it.
  */
 export function namedDids(value: unknown, path = ''): NamedDid[] {
   if (typeof value === 'string') {
-    if (DID_EXACT.test(value)) return [{ path, did: value }]
-    const uri = AT_URI_DID.exec(value)
-    return uri ? [{ path, did: uri[1]! }] : []
+    const seen = new Set<string>()
+    const out: NamedDid[] = []
+    for (const m of value.matchAll(NAMED_DID_RE)) {
+      // Group 1 is an at-uri's authority; group 2 is a bare DID.
+      const did = m[1] ?? m[2]
+      if (!did || seen.has(did)) continue
+      seen.add(did)
+      out.push({ path, did })
+    }
+    return out
   }
   if (Array.isArray(value)) {
     return value.flatMap((item, i) => namedDids(item, path ? `${path}.${i}` : String(i)))
   }
   if (value && typeof value === 'object') {
     return Object.entries(value).flatMap(([key, v]) => namedDids(v, path ? `${path}.${key}` : key))
+  }
+  return []
+}
+
+export interface TextMention {
+  path: string
+  kind: 'handle' | 'did'
+}
+
+/**
+ * F1. THE FREE-TEXT SCAN, which is a different question from `namedDids`.
+ *
+ * A steward writing "@alice.test kept turning up drunk" in a `reason`, or a host writing
+ * "ask did:plc:… first" in a `note`, names a person in a public record just as surely as a
+ * `subject` field does — and a HANDLE is not a DID, so the structural scan above cannot see
+ * it at all. There is no exemption for any of these: a free-text field is never the right
+ * place to name somebody, whoever they are, so even a steward's own handle is flagged (the
+ * structural `actors[]` exemption exists precisely so a steward does not need to be named in
+ * prose).
+ *
+ * Only fields a human wrote (`FREE_TEXT_FIELDS`) are scanned, so a structural at-uri in a
+ * `subject`/`event`/`skill` field is not double-reported as a mention.
+ */
+export function textMentions(value: unknown, path = ''): TextMention[] {
+  if (typeof value === 'string') {
+    const key = path.split('.').pop() ?? ''
+    if (!FREE_TEXT_FIELDS.has(key)) return []
+    const out: TextMention[] = []
+    if (DID_MENTION.test(value)) out.push({ path, kind: 'did' })
+    if (HANDLE_MENTION.test(value)) out.push({ path, kind: 'handle' })
+    return out
+  }
+  if (Array.isArray(value)) {
+    return value.flatMap((item, i) => textMentions(item, path ? `${path}.${i}` : String(i)))
+  }
+  if (value && typeof value === 'object') {
+    return Object.entries(value).flatMap(([key, v]) => textMentions(v, path ? `${path}.${key}` : key))
   }
   return []
 }
@@ -167,7 +282,13 @@ export function verdictFor(
       : { allowed: false, reason: 'attestations have no app-side double-opt-in table in v1' }
   }
 
-  return { allowed: false, reason: `no exemption covers ${collection}` }
+  // F1: a strongRef to a record its own author published — the listing/occurrence/claim/
+  // skillClaim cases. Exact paths only (see `STRONGREF_EXEMPT_PATHS`).
+  if (STRONGREF_EXEMPT_PATHS[collection]?.includes(named.path)) {
+    return { allowed: true, reason: `strongRef to a public record its own author wrote (at ${named.path})` }
+  }
+
+  return { allowed: false, reason: `no exemption covers ${collection} (at ${named.path})` }
 }
 
 export interface AuditCell {
@@ -178,6 +299,8 @@ export interface AuditCell {
   namedOthers: number
   allowed: number
   violations: number
+  /** Records with a handle or a DID mentioned in FREE TEXT (F1). Counted in `violations` too. */
+  textMentions: number
 }
 
 export interface AuditViolation {
@@ -195,6 +318,7 @@ export interface AuditReport {
   repos: number
   records: number
   cells: AuditCell[]
+  /** Structural namings AND free-text mentions, in one list: the script exits 1 on any. */
   violations: AuditViolation[]
   /** Recorded in the report so a future run can tell why attestations failed. */
   attestationConsentTable: boolean
@@ -338,8 +462,10 @@ export async function runPrivacyAudit(options?: {
         if (!(AUDITED_COLLECTIONS as readonly string[]).includes(collection)) continue
         const found = await allRecords(host, did, collection)
         records += found.length
-        const cell: AuditCell = { host, repoDid: did, collection, count: found.length, namedOthers: 0, allowed: 0, violations: 0 }
+        const cell: AuditCell = { host, repoDid: did, collection, count: found.length, namedOthers: 0, allowed: 0, violations: 0, textMentions: 0 }
         for (const record of found) {
+          const rkey = record.uri.split('/').pop() ?? '?'
+          // Author == subject is always fine: a DID in one's own repo is self-description.
           const others = namedDids(record.value).filter((n) => n.did !== did)
           if (others.length > 0) cell.namedOthers += 1
           for (const named of others) {
@@ -348,16 +474,25 @@ export async function runPrivacyAudit(options?: {
               cell.allowed += 1
             } else {
               cell.violations += 1
-              violations.push({
-                host,
-                repoDid: did,
-                collection,
-                rkey: record.uri.split('/').pop() ?? '?',
-                path: named.path,
-                namedDid: named.did,
-                reason: verdict.reason,
-              })
+              violations.push({ host, repoDid: did, collection, rkey, path: named.path, namedDid: named.did, reason: verdict.reason })
             }
+          }
+
+          // F1: a handle or a DID mentioned in a free-text field. No exemptions — see
+          // `textMentions`. The snippet is NEVER reported; an audit that reprints what it
+          // found would be its own violation.
+          for (const mention of textMentions(record.value)) {
+            cell.textMentions += 1
+            cell.violations += 1
+            violations.push({
+              host,
+              repoDid: did,
+              collection,
+              rkey,
+              path: mention.path,
+              namedDid: '<free text>',
+              reason: `free text names a ${mention.kind} (at ${mention.path}) — a public field a human wrote`,
+            })
           }
         }
         cells.push(cell)
@@ -380,13 +515,14 @@ export async function runPrivacyAudit(options?: {
 /** The table, as printed by the script and by the smoke test. */
 export function formatReport(report: AuditReport): string {
   const lines: string[] = []
-  const head = ['collection', 'repo', 'count', 'named', 'allowed', 'viol']
+  const head = ['collection', 'repo', 'count', 'named', 'allowed', 'text', 'viol']
   const rows = report.cells.map((cell) => [
     cell.collection,
     shortDid(cell.repoDid),
     String(cell.count),
     String(cell.namedOthers),
     String(cell.allowed),
+    String(cell.textMentions),
     String(cell.violations),
   ])
   const widths = head.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)))
@@ -396,9 +532,10 @@ export function formatReport(report: AuditReport): string {
   if (rows.length === 0) lines.push('(no repo on any audited host holds any of these collections)')
   for (const row of rows) lines.push(render(row))
   lines.push('')
+  const textFlagged = report.cells.reduce((n, cell) => n + cell.textMentions, 0)
   lines.push(
     `hosts ${report.hosts.length} · repos ${report.repos} · audited collections ${AUDITED_COLLECTIONS.length} · ` +
-      `records ${report.records} · violations ${report.violations.length}`,
+      `records ${report.records} · free-text mentions ${textFlagged} · violations ${report.violations.length}`,
   )
   lines.push(`policy.publishRoles=${report.publishRoles} · attestation double-opt-in table: none in v1`)
   if (report.violations.length > 0) {

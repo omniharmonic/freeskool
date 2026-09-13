@@ -89,7 +89,7 @@ Running a second stack beside a first (the e2e suite does this): `APPVIEW_PORT=4
 ### 6. Check it
 
 ```bash
-pnpm -r test            # unit/integration (live Postgres; 280 tests)
+pnpm -r test            # unit/integration (live Postgres; 563 tests across the workspace)
 pnpm -r typecheck
 pnpm lexicons:validate
 
@@ -98,7 +98,9 @@ pnpm --filter @freeschool/appview privacy-audit   # every public record on the P
 pnpm e2e                                          # the browser loop (see below)
 ```
 
-The privacy audit reads every repo on the PDS as a stranger would and fails on any public record that names a DID its holder did not write. On a box that has run the moderation or hand-off flows it currently reports real violations: `freeschool.draft.moderationAction` records carry `subjectDid`, the account acted on. That is a decision waiting on Benjamin, not a bug in the audit — see `docs/implementation-plan.md` §0b.
+The privacy audit reads every repo on the PDS as a stranger would and fails on any public record that names a DID its holder did not write — structurally (a `subject`, a strongRef) and in free text (an `@handle` or a `did:` written into a `reason`, `note`, `description` or `suppliesNote`). A clean run ends in `PRIVACY AUDIT OK`.
+
+It can still report violations against a dev PDS that has been around a while, and they are **pre-existing records, not current behaviour**: `freeschool.draft.moderationAction` records written before commit `2443ca6` carry `subjectDid` (the account acted on), and ones written before the final fix wave also carry `reason`. Neither is written any more — the public projection is `action` / `policyRef` / `actors` / `createdAt`, and the subject and the reason live app-side in `fs_moderation_queue` and `fs_audit`, where they are what stewards actually read. Old records cannot be edited away without the school's repo history saying so; on a throwaway dev PDS the answer is a fresh school.
 
 `pnpm e2e` drives a real browser through the whole MVP — sign up, ask for a class, post one, RSVP from three other members, check off attendance, three anonymous ballots, the k=3 summary, a materialized weekly series, the zine, and a steward policy change that re-derives a role. It needs the stack from steps 1–5 **already running**, Chromium (`pnpm --filter @freeschool/web exec playwright install chromium`), and the same exported env (two steps shell out to the AppView package). It takes a few minutes: the materializer ends in a full peer backfill.
 

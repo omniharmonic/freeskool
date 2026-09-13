@@ -4,7 +4,7 @@
  * precisely so they can be read and tested here rather than inferred from a table.
  */
 import { describe, expect, it } from 'vitest'
-import { namedDids, verdictFor, type ConsentFacts } from '../scripts/privacy-audit.js'
+import { AUDITED_COLLECTIONS, namedDids, textMentions, verdictFor, type ConsentFacts } from '../scripts/privacy-audit.js'
 import { NSID } from '../src/lexicons/nsids.js'
 
 const SCHOOL = 'did:plc:school00000000000000000'
@@ -40,6 +40,110 @@ describe('namedDids', () => {
 
   it('ignores strings that merely mention a did-ish word', () => {
     expect(namedDids({ reason: 'did you ask them first?', text: 'at://handle.test/x/y' })).toEqual([])
+  })
+
+  /**
+   * #13. The scan used to be ANCHORED to the whole string value, so a DID anywhere other
+   * than alone in its own field was invisible — which is most of the places a DID actually
+   * ends up in a free-text record.
+   */
+  describe('scans INSIDE strings, not only whole-value matches', () => {
+    it('finds a DID mentioned mid-sentence', () => {
+      expect(namedDids({ reason: `please ask ${MEMBER} before reposting` })).toEqual([{ path: 'reason', did: MEMBER }])
+    })
+
+    it('finds an at-uri mid-sentence, and reports its authority once', () => {
+      expect(namedDids({ note: `see at://${HOST}/community.lexicon.calendar.event/abc for details` })).toEqual([
+        { path: 'note', did: HOST },
+      ])
+    })
+
+    it('does not report an at-uri’s authority twice (once as a uri, once as a bare DID)', () => {
+      expect(namedDids({ subject: { uri: `at://${HOST}/community.lexicon.calendar.event/abc` } })).toEqual([
+        { path: 'subject.uri', did: HOST },
+      ])
+    })
+
+    it('finds several distinct DIDs in one string, and dedupes a repeat', () => {
+      const found = namedDids({ text: `${MEMBER} and ${STEWARD} and ${MEMBER} again` })
+      expect(found.map((f) => f.did)).toEqual([MEMBER, STEWARD])
+      expect(found.every((f) => f.path === 'text')).toBe(true)
+    })
+  })
+})
+
+describe('textMentions: a handle or a DID written into free text', () => {
+  it('flags an @handle in a reason', () => {
+    expect(textMentions({ reason: 'repeated no-shows after @alice.test was warned' })).toEqual([
+      { path: 'reason', kind: 'handle' },
+    ])
+  })
+
+  it('flags a did: in a note, a description and a suppliesNote', () => {
+    expect(textMentions({ note: 'ask did:plc:abc123 first' })).toEqual([{ path: 'note', kind: 'did' }])
+    expect(textMentions({ description: 'co-taught with did:plc:abc123' })).toEqual([{ path: 'description', kind: 'did' }])
+    expect(textMentions({ suppliesNote: 'borrow a jig from did:plc:abc123' })).toEqual([
+      { path: 'suppliesNote', kind: 'did' },
+    ])
+  })
+
+  it('flags both kinds in one field', () => {
+    expect(textMentions({ reason: 'did:plc:abc123, aka @alice.test' }).map((m) => m.kind).sort()).toEqual([
+      'did',
+      'handle',
+    ])
+  })
+
+  it('leaves ordinary prose, and a bare domain, alone — the leading @ is required', () => {
+    expect(textMentions({ reason: 'kept missing the class at boulder.test on Thursdays' })).toEqual([])
+    expect(textMentions({ description: 'Bring a jar. We meet at 6.' })).toEqual([])
+  })
+
+  it('only scans fields a human wrote, so a structural ref is not double-reported', () => {
+    expect(textMentions({ subject: `at://${HOST}/x/y`, skill: `at://${HOST}/freeschool.draft.skill/s` })).toEqual([])
+  })
+
+  it('walks nested objects and arrays', () => {
+    expect(textMentions({ items: [{ note: 'see @dana.bsky.social' }] })).toEqual([
+      { path: 'items.0.note', kind: 'handle' },
+    ])
+  })
+})
+
+describe('the school-written collections F1 added', () => {
+  for (const nsid of [NSID.eventListing, NSID.occurrence, NSID.claim, NSID.skillClaim, NSID.policy, NSID.school]) {
+    it(`audits ${nsid}`, () => {
+      expect((AUDITED_COLLECTIONS as readonly string[]).includes(nsid)).toBe(true)
+    })
+  }
+
+  it('lets a school listing name the host through the event strongRef, and nowhere else', () => {
+    const eventRef = { path: 'event.uri', did: HOST }
+    expect(verdictFor(NSID.eventListing, SCHOOL, eventRef, facts()).allowed).toBe(true)
+    expect(verdictFor(NSID.eventListing, SCHOOL, { path: 'curatedFor', did: HOST }, facts()).allowed).toBe(false)
+  })
+
+  it('lets an occurrence name the host through its event and series refs', () => {
+    expect(verdictFor(NSID.occurrence, SCHOOL, { path: 'event.uri', did: HOST }, facts()).allowed).toBe(true)
+    expect(verdictFor(NSID.occurrence, SCHOOL, { path: 'series.uri', did: HOST }, facts()).allowed).toBe(true)
+    expect(verdictFor(NSID.occurrence, SCHOOL, { path: 'hostDid', did: HOST }, facts()).allowed).toBe(false)
+  })
+
+  it('lets a claim name the asker through the request ref only', () => {
+    expect(verdictFor(NSID.claim, HOST, { path: 'request.uri', did: MEMBER }, facts()).allowed).toBe(true)
+    expect(verdictFor(NSID.claim, HOST, { path: 'claimedFrom', did: MEMBER }, facts()).allowed).toBe(false)
+  })
+
+  it('lets a skill claim name the taxonomy authority through `skill`', () => {
+    expect(verdictFor(NSID.skillClaim, MEMBER, { path: 'skill', did: HOST }, facts()).allowed).toBe(true)
+    expect(verdictFor(NSID.skillClaim, MEMBER, { path: 'vouchedBy', did: HOST }, facts()).allowed).toBe(false)
+  })
+
+  it('allows nothing but the school’s own DID in a policy or school record', () => {
+    expect(verdictFor(NSID.policy, SCHOOL, { path: 'thresholds.owner', did: MEMBER }, facts()).allowed).toBe(false)
+    expect(verdictFor(NSID.school, SCHOOL, { path: 'peers.0', did: MEMBER }, facts()).allowed).toBe(false)
+    // A school DID stays exempt as an institutional actor (exemption 4).
+    expect(verdictFor(NSID.school, SCHOOL, { path: 'peers.0', did: SCHOOL }, facts()).allowed).toBe(true)
   })
 })
 
