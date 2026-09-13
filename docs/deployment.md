@@ -21,6 +21,10 @@ the AppView (indexer + API + jobs), Postgres, and the school's own reference PDS
 | PDS | `https://pds.freeskool.xyz`; handles `<name>.freeskool.xyz` |
 | Email | Resend over SMTP (`smtps://resend:<key>@smtp.resend.com:2465`) |
 | Registrar / DNS | Namecheap, `freeskool.xyz` |
+| School | `boulder.freeskool.xyz` = `did:plc:wv2kwwxv2keocw52uaugwbis` (policy `3mvg3wgw2ps2x`) |
+| Skills authority | `skills.freeskool.xyz` = `did:plc:yekh7akcatgn7o7foedjpgj4`, 525 skills seeded |
+| First steward | Benjamin (`calmalder301.freeskool.xyz`), appointed 2026-09-13 |
+| Secrets | `/opt/freeskool/infra/production/.env` + `.authority.env` on the server; copies in `~/.config/freeskool/` on Benjamin's Mac |
 
 Why Falkenstein and not a US location: Hetzner's CX line (CX33 €9.99/month, 20 TB traffic) is EU-only;
 the US locations only offer CPX at roughly four to seven times the price. Boulder sees ~130 ms to
@@ -44,7 +48,9 @@ lets Caddy mint a certificate per handle on demand.
 
 Resend adds its own records once the domain is created there (a `resend._domainkey` TXT for DKIM,
 an MX plus SPF TXT on the `send` subdomain, and optionally `_dmarc`). Until `freeskool.xyz` is a
-verified Resend domain, mail goes out from the already-verified `omniharmonic.com`.
+verified Resend domain, mail goes out from the already-verified `omniharmonic.com`
+(`MAIL_FROM=Free School <freeskool@omniharmonic.com>`): the Resend account is at its plan's domain
+limit, so adding `freeskool.xyz` needs an upgrade or a freed domain first.
 
 ## Email (Resend)
 
