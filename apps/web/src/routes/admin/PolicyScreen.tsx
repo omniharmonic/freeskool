@@ -1,3 +1,4 @@
+import { LoadingState, PageState } from '../../components/PageState';
 import { useEffect, useState } from 'react';
 import { AdminLayout } from './AdminLayout';
 import { Button, Toggle } from '../../components/bits';
@@ -28,7 +29,7 @@ const MEMBER_GATE_OPTIONS: Array<{ value: PolicyThresholds['memberRequires']; la
  * rather than a false "Saved".
  */
 export function PolicyScreen() {
-  const { data, isPending } = useAdminPolicy();
+  const { data, isPending, isError, refetch } = useAdminPolicy();
   const setPolicyMutation = useSetPolicyMutation();
 
   const [title, setTitle] = useState('');
@@ -82,8 +83,8 @@ export function PolicyScreen() {
       current="policy"
       standfirst="Who can join, when hosting unlocks, and how many stewards a removal needs."
     >
-      {isPending || !thresholds ? (
-        <p className="text-body text-ink-soft">Loading…</p>
+      {isError ? <PageState title="The policy couldn’t load." error action={<button className="primary-action" onClick={() => void refetch()}>Try again</button>}>Your changes have not been sent.</PageState> : isPending || !thresholds ? (
+        <LoadingState label="Loading the current policy…" />
       ) : (
         <div className="space-y-5">
           <section aria-labelledby="policy-thresholds-heading">
@@ -224,8 +225,8 @@ export function PolicyScreen() {
             </label>
           </section>
 
-          {saved ? <p className="text-body text-green">Saved — takes effect immediately.</p> : null}
-          {error ? <p className="text-body text-pink">{error}</p> : null}
+          {saved ? <p role="status" className="text-body text-green">Saved — takes effect immediately.</p> : null}
+          {error ? <p role="alert" className="text-body text-pink">{error}</p> : null}
 
           <Button wide onClick={() => void onSave()} disabled={!canSave || setPolicyMutation.isPending}>
             Save policy

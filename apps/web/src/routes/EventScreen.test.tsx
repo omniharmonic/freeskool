@@ -65,6 +65,7 @@ vi.mock('../lib/api', () => {
         icsHref: (id: string) => `/api/events/${encodeURIComponent(id)}.ics`,
       },
       auth: { me: vi.fn() },
+      skills: {get:vi.fn()},
       rsvp: { get: vi.fn(), set: vi.fn(), clear: vi.fn() },
       invites: { mint: vi.fn() },
       push: { vapidKey: vi.fn(), subscribe: vi.fn() },
@@ -342,4 +343,52 @@ describe('EventScreen', () => {
     fireEvent.click(await screen.findByRole('button', { name: "You're on the waitlist" }));
     await waitFor(() => expect(api.rsvp.clear).toHaveBeenCalledWith(EVENT_URI));
   });
+  it('honestly indicates when no public overview was provided', async () => {
+    renderScreen();
+    expect(await screen.findByText('The host hasn’t added a public overview yet.')).toBeInTheDocument();
+    expect(screen.queryByText(/host hasn’t added a description/)).not.toBeInTheDocument();
+  });
+
+  it('shows the public invitation to signed-out visitors while withholding attendee details', async () => {
+    vi.mocked(api.auth.me).mockRejectedValue(new Error('Not signed in'));
+    vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent,
+      publicOverview: { description: 'Learn to grow oyster mushrooms.', audience: 'No experience needed.', accessibility: 'Seated work available.' },
+      description: 'Enter through the private kitchen door.',
+      materials: ['A notebook'], suppliesNote: 'Starter kits provided.',
+    });
+    renderScreen();
+    expect(await screen.findByText('Learn to grow oyster mushrooms.')).toBeVisible();
+    expect(screen.getByText('No experience needed.')).toBeVisible();
+    expect(screen.getByText('Seated work available.')).toBeVisible();
+    expect(screen.getByText('A notebook')).toBeVisible();
+    expect(screen.getByText('Starter kits provided.')).toBeVisible();
+    expect(screen.queryByText('Enter through the private kitchen door.')).not.toBeInTheDocument();
+  });
+
+  it('shows skill depth, prerequisites and safe meeting links only to eligible viewers', async () => {
+    vi.mocked(api.skills.get).mockResolvedValue({label:'Bicycle mechanics'} as never);
+    vi.mocked(api.events.get).mockResolvedValue({...baseEvent,locationRedacted:false,mode:'community.lexicon.calendar.event#virtual',skills:[{skill:'at://did:plc:school/freeschool.draft.skill/bicycle',level:1,prerequisites:'Bring a question.'}],uris:[{uri:'https://example.org/meeting',name:'Join the class'},{uri:'javascript:alert(1)',name:'Unsafe link'}]});
+    renderScreen();
+    expect(await screen.findByRole('link',{name:'Bicycle mechanics ↗'})).toBeVisible();
+    expect(screen.getByText('Introductory · no experience assumed')).toBeVisible();
+    expect(screen.getByText('Before you come: Bring a question.')).toBeVisible();
+    expect(screen.getByRole('link',{name:'Join the class ↗'})).toHaveAttribute('href','https://example.org/meeting');
+    expect(screen.queryByRole('link',{name:'Unsafe link ↗'})).not.toBeInTheDocument();
+  });
+  it('withholds meeting links before RSVP even if an accidental payload includes them', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({...baseEvent,mode:'community.lexicon.calendar.event#virtual',uris:[{uri:'https://example.org/private-meeting',name:'Join the class'}]});
+    renderScreen();
+    expect(await screen.findByText('Online. RSVP to see the meeting link.')).toBeVisible();
+    expect(screen.queryByRole('link',{name:'Join the class ↗'})).not.toBeInTheDocument();
+  });
+
+  it('shows recovery when an RSVP fails and does not trigger a success nudge', async () => {
+    vi.mocked(api.rsvp.set).mockRejectedValueOnce(new Error('offline'));
+    renderScreen();
+    fireEvent.click(await screen.findByRole('button', { name: "I'll be there" }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not save your RSVP');
+    expect(vi.mocked(useInstallFlow).mock.results[0]!.value.afterRsvp).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: "I'll be there" })).toBeEnabled();
+  });
+
 });

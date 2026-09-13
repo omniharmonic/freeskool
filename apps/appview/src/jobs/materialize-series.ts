@@ -1,3 +1,5 @@
+import { getPresentation, savePresentation } from '../lib/event-presentation.js'
+import { getEventExtra, setEventExtra } from '../lib/event-extra.js'
 /**
  * Materialize series occurrences. Daily, on pg-boss.
  *
@@ -176,6 +178,7 @@ export async function materializeSeries(
       ? Math.max(0, new Date(template.value.endsAt).getTime() - dtstart.getTime())
       : 0
 
+  const [presentation, extra] = await Promise.all([getPresentation(series.firstEvent.uri), getEventExtra(series.firstEvent.uri)])
   const db = getDb()
   const existing = new Set(
     (
@@ -226,6 +229,9 @@ export async function materializeSeries(
       },
       audit: { reason: `materialize occurrence ${i + 1} of series ${parts.rkey}` },
     })
+
+    await savePresentation(event.uri, presentation)
+    await setEventExtra(event.uri, extra.materials, extra.suppliesNote)
 
     await schoolActor().putRecordAsSchool({
       schoolDid: schoolDid(),

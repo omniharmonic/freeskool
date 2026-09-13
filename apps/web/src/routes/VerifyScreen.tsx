@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { api, ApiError } from '../lib/api';
+import { FlowFrame } from '../components/FlowFrame';
+import { LoadingState } from '../components/PageState';
 import { Button } from '../components/bits';
+
+import { consumeSignInReturn } from '../lib/signin-return';
 
 type Status = 'verifying' | 'error';
 
@@ -33,7 +37,7 @@ export function VerifyScreen() {
     api.auth
       .verify(token)
       .then(() => {
-        void navigate({ to: '/requests' });
+        void navigate({ to: consumeSignInReturn() });
       })
       .catch((err: unknown) => {
         setStatus('error');
@@ -42,12 +46,10 @@ export function VerifyScreen() {
   }, [navigate]);
 
   return (
-    <div className="app-scroll">
-      <div className="safe-top safe-x pb-10 pt-10">
-        {status === 'verifying' ? <p className="text-body text-ink-soft">Signing you in…</p> : null}
+    <FlowFrame title={status === 'verifying' ? 'Welcome to Free School' : "That link didn't work"}>
+        {status === 'verifying' ? <LoadingState label="Signing you in…" /> : null}
         {status === 'error' ? (
           <>
-            <h1 className="text-lede font-bold">That link didn't work</h1>
             <p className="mt-2 max-w-[42ch] text-body text-ink-soft">{errorMessage}</p>
             <div className="mt-6">
               <Button href="/signin" ink="blue">
@@ -56,7 +58,6 @@ export function VerifyScreen() {
             </div>
           </>
         ) : null}
-      </div>
-    </div>
+    </FlowFrame>
   );
 }

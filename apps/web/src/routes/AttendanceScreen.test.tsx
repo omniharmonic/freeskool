@@ -174,4 +174,17 @@ describe('AttendanceScreen', () => {
     expect(await screen.findByText("Couldn't load the RSVP list.")).toBeInTheDocument();
     expect(screen.queryByText("Nobody RSVP'd to this class.")).not.toBeInTheDocument();
   });
+  it('keeps selections and offers recovery when saving attendance fails', async () => {
+    vi.mocked(api.attendance.set).mockRejectedValueOnce(new Error('offline'));
+    renderScreen();
+    const going = await screen.findByRole('checkbox', { name: /goer participated/i });
+    fireEvent.click(going);
+    fireEvent.click(screen.getByRole('button', { name: 'Save attendance' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Your selections are still here');
+    expect(going).not.toBeChecked();
+    expect(screen.getByRole('button', { name: 'Save attendance' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save attendance' }));
+    expect(await screen.findByText(/counts updated/i)).toBeInTheDocument();
+  });
+
 });

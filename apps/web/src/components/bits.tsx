@@ -29,7 +29,7 @@ export function LevelDots({
 }
 
 export function SkillChip({ children, ink = 'ink' }: { children: ReactNode; ink?: 'ink' | 'pink' | 'blue' }) {
-  const color = ink === 'ink' ? 'var(--c-ink)' : ink === 'pink' ? 'var(--c-pink)' : 'var(--c-blue)';
+  const color = ink === 'ink' ? 'var(--c-ink)' : 'var(--c-blue)';
   return (
     <span
       className="inline-flex items-center rounded-full border-[1.5px] px-2.5 py-[3px] text-[12.5px] leading-none font-medium"
@@ -59,29 +59,17 @@ export function Button({
   href?: string;
   wide?: boolean;
 }) {
-  const inkVar = `var(--c-${ink === 'ink' ? 'ink' : ink})`;
-  const base = `plate plate-press plate-${ink} display inline-flex items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold ${
-    wide ? 'w-full' : ''
-  } ${disabled ? 'opacity-45' : ''}`;
-  const style =
-    variant === 'solid'
-      ? {
-          background: inkVar,
-          // Pink and amber are light inks: they take dark type, not paper.
-          color: ink === 'pink' || ink === 'amber' ? 'var(--c-on-pink)' : 'var(--c-paper-2)',
-          borderColor: 'var(--c-ink)',
-        }
-      : { background: 'var(--c-paper-2)', color: 'var(--c-ink)' };
+  const base = `fs-button fs-button-${variant} fs-button-${ink} ${wide ? 'fs-button-wide' : ''}`;
 
   if (href) {
     return (
-      <a href={href} target="_self" className={base} style={style}>
+      <a href={href} target="_self" className={base}>
         {children}
       </a>
     );
   }
   return (
-    <button type={type} onClick={onClick} disabled={disabled} className={base} style={style}>
+    <button type={type} onClick={onClick} disabled={disabled} className={base}>
       {children}
     </button>
   );
@@ -106,7 +94,7 @@ export function ThresholdRule({ count, threshold }: { count: number; threshold: 
 }
 
 export function SectionHeading({ children }: { children: ReactNode }) {
-  return <h2 className="safe-x mt-7 mb-2.5 text-lede font-bold">{children}</h2>;
+  return <h2 className="section-heading">{children}</h2>;
 }
 
 /**

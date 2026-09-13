@@ -33,7 +33,7 @@ import { actorAgent, NoActorCredentialError } from '../../lib/actor-agent.js'
 import { NSID } from '../../lexicons/nsids.js'
 import { tid } from '../../lib/ids.js'
 import { getIndexer } from '../../index/indexer.js'
-import { getRecordByUri, listCollection, parseAtUri } from '../../index/queries.js'
+import { getRecordByUri, listCollection, parseAtUri, sidecarsForEvent } from '../../index/queries.js'
 import { getRecord } from '../../lib/pds.js'
 import { resolvePdsEndpoint } from '../../lib/identity.js'
 import { countInterested, isInterested, meetsThreshold, toggleInterest } from '../../lib/request-rsvp.js'
@@ -63,24 +63,24 @@ requests.get('/requests', async (c) => {
   // gated. One role lookup for the page, not one per row.
   const viewer = c.var.viewer
   const viewerIsSteward = viewer ? (await roleOf(viewer.did)) >= Role.Steward : false
-  const items = await Promise.all(
-    records.map(async (r) => ({
+  const items = await Promise.all(records.map(async r => {
+    const claims = await sidecarsForEvent<{ event?: { uri: string } }>(indexer, 'claim', r.uri, 'request.uri')
+    const scheduled = claims.find(claim => claim.value.event?.uri)
+    return {
       uri: r.uri,
-      // A7: never a list of who asked. Only the asker themselves and a steward (who needs
-      // it to moderate) see it.
       ...(viewerIsSteward || viewer?.did === r.did ? { askedBy: r.did } : {}),
       title: r.value.title,
       description: r.value.description,
       skill: r.value.skill,
       threshold: r.value.threshold,
-      status: r.value.status,
-      claims: r.counts?.claim ?? r.counts?.claims ?? 0,
-      // "I'm interested" — app-side (R9: no public roster), the count a `threshold`
-      // gates claiming against. Never a list of who.
+      status: r.value.status === 'closed' ? 'closed' : scheduled ? 'scheduled' : claims.length ? 'claimed' : r.value.status,
+      claims: claims.length,
+      ...(scheduled ? { scheduledEventUri: scheduled.value.event!.uri } : {}),
+      viewerClaimed: claims.some(claim => claim.did === viewer?.did),
       rsvpCount: await countInterested(r.uri),
       viewerInterested: viewer ? await isInterested(r.uri, viewer.did) : false,
-    })),
-  )
+    }
+  }))
   return c.json({ cursor, requests: items })
 })
 
@@ -140,6 +140,7 @@ requests.post('/requests/:id/claim', requireViewer, requireRole(Role.Host), asyn
   const request = await getRecordByUri<RequestRecord>(indexer, 'request', requestUri)
   const requestCid = request?.cid ?? (await cidFromPds(requestUri))
   if (!requestCid) return c.json({ error: 'NotFound', message: 'unknown request' }, 404)
+  if (request?.value.status === 'closed') return c.json({ error: 'RequestClosed' }, 409)
 
   const threshold = request?.value.threshold
   const interested = await countInterested(requestUri)
@@ -152,6 +153,10 @@ requests.post('/requests/:id/claim', requireViewer, requireRole(Role.Host), asyn
 
   let eventRef: { uri: string; cid: string } | undefined
   if (parsed.data.eventUri) {
+    const parts = parseAtUri(parsed.data.eventUri)
+    if (parts?.did !== viewer.did || parts.collection !== NSID.event) {
+      return c.json({ error: 'PermissionDenied', message: 'Connect a class you posted yourself.' }, 403)
+    }
     const ev = await getRecordByUri(indexer, 'event', parsed.data.eventUri)
     const cid = ev?.cid ?? (await cidFromPds(parsed.data.eventUri))
     if (!cid) return c.json({ error: 'InvalidRequest', message: 'unknown event' }, 400)
@@ -160,15 +165,20 @@ requests.post('/requests/:id/claim', requireViewer, requireRole(Role.Host), asyn
 
   try {
     const agent = await actorAgent(viewer)
+    // Completing the class updates the host's existing offer. Retrying a response
+    // must not turn one teacher into several claims on the needs board.
+    const previous = (await sidecarsForEvent<{ event?: { uri: string; cid: string }; note?: string }>(
+      indexer, 'claim', requestUri, 'request.uri',
+    )).find(claim => claim.did === viewer.did)
     const res = await agent.com.atproto.repo.putRecord({
       repo: viewer.did,
       collection: NSID.claim,
-      rkey: tid(),
+      rkey: previous ? parseAtUri(previous.uri)!.rkey : tid(),
       record: {
         $type: NSID.claim,
         request: { uri: requestUri, cid: requestCid },
-        ...(eventRef ? { event: eventRef } : {}),
-        ...(parsed.data.note ? { note: parsed.data.note } : {}),
+        ...(eventRef ?? previous?.value.event ? { event: eventRef ?? previous?.value.event } : {}),
+        ...(parsed.data.note ?? previous?.value.note ? { note: parsed.data.note ?? previous?.value.note } : {}),
         createdAt: new Date().toISOString(),
       } as Record<string, unknown>,
       validate: false,

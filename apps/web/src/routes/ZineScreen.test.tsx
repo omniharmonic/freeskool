@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 
@@ -54,8 +54,9 @@ describe('ZineScreen', () => {
 
     renderScreen();
 
-    expect(await screen.findByText('Sourdough basics')).toBeInTheDocument();
-    expect(screen.getByText('North Boulder')).toBeInTheDocument();
+    const page = within(await screen.findByRole('article', { name: 'Zine page 1 of 1' }));
+    expect(page.getByText('Sourdough basics')).toBeInTheDocument();
+    expect(page.getByText('North Boulder')).toBeInTheDocument();
     expect(vi.mocked(api.zine.month).mock.calls[0]?.[0]).toMatch(/^\d{4}-\d{2}$/);
   });
 
@@ -83,8 +84,9 @@ describe('ZineScreen', () => {
 
     renderScreen();
 
-    expect(await screen.findByText('Sign painting')).toBeInTheDocument();
-    expect(screen.getByText(/venue needed/i)).toBeInTheDocument();
+    const page = within(await screen.findByRole('article', { name: 'Zine page 1 of 1' }));
+    expect(page.getByText('Sign painting')).toBeInTheDocument();
+    expect(page.getByText(/venue needed/i)).toBeInTheDocument();
   });
 
   it('does not flash "nothing posted" copy while the month query is still pending', async () => {

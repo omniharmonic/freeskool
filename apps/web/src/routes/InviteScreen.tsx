@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from '@tanstack/react-router';
 import { api, ApiError } from '../lib/api';
 import { useMe } from '../lib/queries';
+import { FlowFrame } from '../components/FlowFrame';
 import { Button } from '../components/bits';
 
 type Status = 'checking' | 'redeeming' | 'redeemed' | 'error' | 'signed-out';
@@ -85,8 +86,7 @@ export function InviteScreen() {
   }, [isPending, isError, me, token, navigate]);
 
   return (
-    <div className="app-scroll">
-      <div className="safe-top safe-x pb-10 pt-10">
+    <FlowFrame title={status === 'error' ? "That invite didn't work" : "You've been invited to Free School"}>
         {status === 'checking' || status === 'redeeming' ? (
           <p className="text-body text-ink-soft">Getting you in…</p>
         ) : null}
@@ -97,7 +97,6 @@ export function InviteScreen() {
 
         {status === 'signed-out' ? (
           <>
-            <h1 className="text-large leading-[1.02] font-extrabold">You've been invited to Free School</h1>
             <p className="mt-3 max-w-[42ch] text-body text-ink-soft">
               Sign in (or create a free identity) and we'll take you straight in.
             </p>
@@ -111,7 +110,6 @@ export function InviteScreen() {
 
         {status === 'error' ? (
           <>
-            <h1 className="text-lede font-bold">That invite didn't work</h1>
             <p className="mt-2 max-w-[42ch] text-body text-ink-soft">{message}</p>
             <div className="mt-6">
               <Button href="/" ink="blue">
@@ -120,7 +118,6 @@ export function InviteScreen() {
             </div>
           </>
         ) : null}
-      </div>
-    </div>
+    </FlowFrame>
   );
 }

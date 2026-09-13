@@ -1,3 +1,4 @@
+import { LoadingState } from '../components/PageState';
 import { useEffect, useState } from 'react';
 import { useParams } from '@tanstack/react-router';
 import { Screen } from '../components/Screen';
@@ -50,6 +51,7 @@ export function AttendanceScreen() {
   const [didDraft, setDidDraft] = useState('');
   const [didError, setDidError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Never pre-list a 'notgoing' row at all — filtered out before anything
   // else touches the roster (the pre-populate effect below, the checklist,
@@ -76,7 +78,7 @@ export function AttendanceScreen() {
   if (isPending || rosterPending) {
     return (
       <Screen title="Loading…" back>
-        <div className="safe-x" />
+        <div className="safe-x"><LoadingState label="Opening the attendance list…" /></div>
       </Screen>
     );
   }
@@ -114,14 +116,15 @@ export function AttendanceScreen() {
     }));
     const rows = [...fromRoster, ...extra];
     if (rows.length === 0) return;
-    await setAttendance.mutateAsync({ eventId: id, rows });
-    setSaved(true);
+    setSaveError(null);
+    try { await setAttendance.mutateAsync({ eventId: id, rows }); setSaved(true); }
+    catch { setSaveError('Could not save attendance. Your selections are still here. Try again.'); }
   };
 
   const field = 'border-[1.5px] border-ink bg-sheet px-3 py-2.5 text-body outline-none focus-visible:outline-2';
 
   return (
-    <Screen title={event.name} standfirst="Check off who took part. Counts only — never a public roster." back>
+    <Screen layout="form" title={event.name} standfirst="Check off who took part. Counts only — never a public roster." back>
       <div className="safe-x space-y-5">
         {summary ? (
           <p className="text-caption text-ink-soft">
@@ -136,7 +139,7 @@ export function AttendanceScreen() {
         ) : (
           <>
             {rosterRows.length > 0 ? (
-              <ul className="divide-y divide-rule border-[1.5px] border-ink">
+              <ul className="attendance-list divide-y divide-rule">
                 {rosterRows.map((r) => (
                   <li key={r.did} className="flex items-center justify-between gap-3 px-3.5 py-3">
                     <div className="min-w-0">
@@ -181,7 +184,7 @@ export function AttendanceScreen() {
             </div>
 
             {extra.length > 0 ? (
-              <ul className="divide-y divide-rule border-[1.5px] border-ink">
+              <ul className="attendance-list divide-y divide-rule">
                 {extra.map((row, i) => (
                   <li key={row.did} className="flex items-center justify-between gap-3 px-3.5 py-3">
                     <p className="truncate text-body">{row.did}</p>
@@ -198,13 +201,14 @@ export function AttendanceScreen() {
               </ul>
             ) : null}
 
+            {saveError ? <p role="alert">{saveError}</p> : null}
             <Button
               wide
               ink="green"
-              disabled={rosterRows.length === 0 && extra.length === 0}
+              disabled={setAttendance.isPending || (rosterRows.length === 0 && extra.length === 0)}
               onClick={() => void onSave()}
             >
-              Save attendance
+              {setAttendance.isPending ? 'Saving…' : 'Save attendance'}
             </Button>
           </>
         )}

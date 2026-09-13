@@ -21,6 +21,8 @@
  *   OAuth session has lapsed), we return 401 rather than quietly publishing as the
  *   school: misattributing authorship is worse than an error message.
  */
+import { normalizeImage, type ImageInput } from './images.js'
+import { getPresentation, savePresentation, type PublicOverview } from './event-presentation.js'
 import type { Agent } from '@atproto/api'
 import type { Did } from '@freeschool/school-actor'
 import { NSID } from '../lexicons/nsids.js'
@@ -94,6 +96,9 @@ export async function resolveHostDids(
 }
 
 export interface CreateEventInput {
+  publicOverview?: PublicOverview
+  cover?: ImageInput | null
+  venueNeeded?: boolean
   name: string
   description?: string
   startsAt: string
@@ -249,6 +254,7 @@ export function canViewRoster(hostDid: string, viewerDid: string, viewerRole: nu
 }
 
 export async function createEventAsHost(viewer: Viewer, input: CreateEventInput): Promise<CreatedEvent> {
+  const cover = input.cover ? await normalizeImage(input.cover) : undefined
   const agent = await actorAgent(viewer)
   const now = new Date().toISOString()
   // No default: an untagged event gets no listing at all (see the doc comment on `tags`
@@ -330,6 +336,7 @@ export async function createEventAsHost(viewer: Viewer, input: CreateEventInput)
   })
 
   await setEventExtra(event.uri, input.materials ?? [], input.suppliesNote)
+  await savePresentation(event.uri, { cover, venueNeeded: input.venueNeeded, publicOverview: input.publicOverview })
 
   await bumpTally(viewer.did, { hostedEvents: 1 })
   if (input.endsAt ?? input.startsAt) await openFeedbackWindow(event.uri, input.endsAt ?? input.startsAt)
@@ -417,6 +424,13 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
   const parts = parseAtUri(eventUri)
   if (!parts) throw new EventNotFoundError(eventUri)
 
+  const oldPresentation = await getPresentation(eventUri)
+  const cover = input.cover === undefined ? oldPresentation.cover : input.cover ? await normalizeImage(input.cover) : undefined
+  const startsAt = input.startsAt ?? String(current.value.startsAt ?? '')
+  const endsAt = input.endsAt ?? current.value.endsAt
+  if (endsAt && Date.parse(String(endsAt)) <= Date.parse(startsAt)) {
+    throw Object.assign(new Error('The end time must be after the start time.'), { status: 400, code: 'InvalidDates' })
+  }
   const agent = await actorAgent(viewer)
 
   const mergedEvent: Record<string, unknown> = {
@@ -461,6 +475,7 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
   const newMaterials = input.materials !== undefined ? input.materials : existingExtra.materials
   const newSuppliesNote = input.suppliesNote !== undefined ? input.suppliesNote : existingExtra.suppliesNote
   await setEventExtra(event.uri, newMaterials, newSuppliesNote)
+  await savePresentation(event.uri, { ...oldPresentation, cover, ...(input.publicOverview !== undefined ? { publicOverview: input.publicOverview } : {}), ...(input.venueNeeded !== undefined ? { venueNeeded: input.venueNeeded } : {}) })
 
   // Replace the skill sidecars entirely when `skills` is present; leave them alone
   // otherwise. All in the HOST's own repo, same as creation.

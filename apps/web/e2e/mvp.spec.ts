@@ -35,6 +35,7 @@ const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const MAIL_LOG = process.env.DEV_MAIL_LOG || fileURLToPath(new URL('../../appview/.dev-mail.log', import.meta.url));
 
 /** Unique per run, so a re-run never reads the previous run's magic link. */
+const TEST_IMAGE = { name: 'test-poster.png', mimeType: 'image/png', buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAoElEQVRoge2SQQkAQRDDaikyKmL92zgR9wgDhQhIQ8PraaIbsAHVK7IL9S7RDdiA6hXZhXqX6AZsQPWK7EK9S3QDNqB6RXah3iW6ARtQvSK7UO8S3YANqF6RXah3iW7ABlSvyC7Uu0Q3YAOqV2QX6l2iG7AB1SuyC/Uu0Q3YgOoV2YV6l+gGbED1iuxCvUt0AzagekV2od4lugEbUL3iHz6v8XDEtGAjnQAAAABJRU5ErkJggg==", "base64") };
 const STAMP = Date.now().toString(36).slice(-5);
 const addressFor = (who: string) => `e2e-${who}-${STAMP}@example.org`;
 
@@ -119,12 +120,12 @@ async function appviewEval(code: string, env: Record<string, string> = {}): Prom
 /** Fills the class form and submits it, returning what `POST /api/events` actually wrote. */
 async function postClass(
   page: Page,
-  fields: { name: string; startsAt: Date; endsAt: Date; neighborhood?: string; venueNeeded?: boolean; weekly?: boolean },
+  fields: { name: string; startsAt: Date; endsAt: Date; neighborhood?: string; venueNeeded?: boolean; weekly?: boolean; image?: boolean; requestUri?: string },
 ): Promise<{ event: { uri: string }; series?: { uri: string }; listing?: { uri: string } }> {
-  await page.goto('/events/new');
+  await page.goto(fields.requestUri ? `/events/new?request=${encodeURIComponent(fields.requestUri)}` : '/events/new');
   await expect(page.getByRole('heading', { name: 'Post a class', level: 1 })).toBeVisible();
   await page.getByLabel('Class title').fill(fields.name);
-  await page.getByLabel('Description').fill('Bring a jar. We will talk about flour.');
+  await page.getByLabel('About this class', { exact: true }).fill('Bring a jar. We will talk about flour.');
   await page.getByLabel('Starts').fill(localValue(fields.startsAt));
   await page.getByLabel('Ends').fill(localValue(fields.endsAt));
   if (fields.venueNeeded) {
@@ -132,6 +133,10 @@ async function postClass(
   }
   if (fields.neighborhood) {
     await page.getByLabel('Neighbourhood (shown publicly, e.g. "North Boulder")').fill(fields.neighborhood);
+  }
+  if (fields.image) {
+    await page.getByLabel('Class cover image').setInputFiles(TEST_IMAGE);
+    await page.getByLabel('Image description', { exact: true }).fill('A small test poster');
   }
   // A tag the school routes on, so the school writes a `coop.lexicon.event.listing`.
   await page.getByRole('button', { name: '+ skillshare', exact: true }).click();
@@ -160,11 +165,25 @@ test('the MVP loop: sign up, ask, post, RSVP, attest, feedback, zine, policy', a
   let host: Member;
   let learners: Member[] = [];
   let eventUri = '';
+  let requestUri = '';
   const className = `E2E sourdough (${STAMP})`;
   const requestTitle = `E2E: someone teach me to sharpen things (${STAMP})`;
 
   await test.step('a new member signs up with an email and lands on Requests', async () => {
     host = await signUp(browser, 'host');
+  });
+
+  await test.step('the member signs out and returns to the same identity by email', async () => {
+    await host.page.goto('/me');
+    await host.page.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await host.page.goto('/signin');
+    await host.page.getByLabel('Your email').fill(host.address);
+    await host.page.getByRole('button', { name: /Create a new Free School identity/ }).click();
+    await expect(host.page.getByText('Check your email')).toBeVisible();
+    await host.page.goto(await magicLinkUrl(host.address));
+    await expect(host.page.getByRole('heading', { name: 'Requests', level: 1 })).toBeVisible();
+    const me = await (await host.page.request.get('/api/auth/me')).json();
+    expect(me.did).toBe(host.did);
   });
 
   await test.step('they post a request to the needs board', async () => {
@@ -178,25 +197,46 @@ test('the MVP loop: sign up, ask, post, RSVP, attest, feedback, zine, policy', a
     await expect(host.page.getByRole('dialog', { name: 'Asked' })).toBeVisible();
     await host.page.getByRole('button', { name: 'Done' }).click();
     await expect(host.page.getByRole('heading', { name: requestTitle })).toBeVisible();
+    const result = await (await host.page.request.get('/api/requests')).json();
+    requestUri = result.requests.find((r: {title: string}) => r.title === requestTitle).uri;
+    await host.page.getByRole('article').filter({ has: host.page.getByRole('heading', { name: requestTitle }) })
+      .getByRole('button', { name: 'I can teach this' }).click();
+    await expect(host.page.getByRole('heading', { name: 'Post a class', level: 1 })).toBeVisible();
   });
 
   await test.step('they post a class with no venue yet', async () => {
     // In the recent past, so attendance and the feedback window are both open — the same
     // shape `scripts/smoke.ts` uses.
-    // NO neighbourhood, deliberately: `venueNeeded` is derived as "no address AND no
-    // neighbourhood" (`isVenueNeeded`, apps/appview/src/http/visibility.ts), so a class with
-    // a neighbourhood is never flagged venue-needed even with the editor's box ticked.
     const created = await postClass(host.page, {
       name: className,
       startsAt: new Date(Date.now() - 3 * 3_600_000),
       endsAt: new Date(Date.now() - 2 * 3_600_000),
       venueNeeded: true,
+      neighborhood: 'Whittier',
+      image: true,
+      requestUri,
     });
     eventUri = created.event.uri;
     expect(eventUri).toContain(host.did); // the class lives in the HOST's repo
     expect(created.listing?.uri).toBeTruthy(); // tagged `skillshare` → the school lists it
     expect(created.listing?.uri).not.toContain(host.did); // …from the SCHOOL's repo
     await expect(host.page.getByText('Venue needed', { exact: true })).toBeVisible();
+    await expect(host.page.getByRole('img', { name: 'A small test poster' })).toBeVisible();
+    const cover = await host.page.getByRole('img', { name: 'A small test poster' }).getAttribute('src');
+    const image = await host.page.request.get(cover!);
+    expect(image.headers()['content-type']).toContain('image/webp');
+    const requests = await (await host.page.request.get('/api/requests')).json();
+    expect(requests.requests.find((r: {uri: string}) => r.uri === requestUri)).toMatchObject({
+      status: 'scheduled', claims: 1, scheduledEventUri: eventUri,
+    });
+  });
+
+  await test.step('a visitor can evaluate the class before signing in', async () => {
+    const visitor = await browser.newPage();
+    await visitor.goto(`/events/${encodeURIComponent(eventUri)}`);
+    await expect(visitor.getByText('Bring a jar. We will talk about flour.')).toBeVisible();
+    await expect(visitor.getByRole('img', { name: 'A small test poster' })).toBeVisible();
+    await visitor.close();
   });
 
   await test.step('three other members RSVP', async () => {
@@ -315,8 +355,8 @@ test('the MVP loop: sign up, ask, post, RSVP, attest, feedback, zine, policy', a
     ).padStart(2, '0')}`;
     const current = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
     if (month !== current) await host.page.getByRole('button', { name: 'Previous month' }).click();
-    await expect(host.page.getByText(className)).toBeVisible();
-    await expect(host.page.getByText('Venue needed — got a room?').first()).toBeVisible();
+    await expect(host.page.locator('.zine-sheet').getByText(className)).toBeVisible();
+    await expect(host.page.locator('.zine-sheet').getByText('Venue needed — got a room?').first()).toBeVisible();
     const zine = (await host.page.locator('body').textContent()) ?? '';
     expect(zine).not.toContain('did:');
   });
@@ -375,5 +415,50 @@ test('the MVP loop: sign up, ask, post, RSVP, attest, feedback, zine, policy', a
     await host.page.goto('/me');
     await expect(host.page.getByRole('heading', { name: 'Me', level: 1 })).toBeVisible();
     await expect(host.page.getByRole('heading', { name: 'Badges' })).toBeVisible();
+    await host.page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await host.page.getByLabel('Display name', { exact: true }).fill(`E2E notebook (${STAMP})`);
+    await host.page.getByLabel('Bio', { exact: true }).fill('A fictional profile for testing the shared notebook.');
+    await host.page.getByLabel('Share my profile publicly', { exact: true }).check();
+    await host.page.getByLabel('Profile image', { exact: true }).setInputFiles(TEST_IMAGE);
+    await expect(host.page.getByLabel('Image description (optional)')).toBeVisible();
+    await host.page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(host.page.getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
+    await host.page.reload();
+    await expect(host.page.getByRole('img', { name: 'Your profile image' })).toBeVisible();
+    await host.page.goto(`/knowledge/new?event=${encodeURIComponent(eventUri)}`);
+    await host.page.getByLabel('Title', { exact: true }).fill(`E2E field notes (${STAMP})`);
+    await host.page.getByLabel('Skill', { exact: true }).selectOption({ index: 1 });
+    await host.page.getByRole('button', {name:'Link another skill ＋',exact:true}).click();
+    await host.page.getByLabel('Additional skill 1',{exact:true}).selectOption({index:2});
+    await host.page.getByLabel('License (optional)',{exact:true}).fill('CC0');
+    await host.page.getByLabel('Field notes').fill('A useful starting point from our test class.');
+    await host.page.getByRole('checkbox', { name: /Publish this resource publicly/ }).check();
+    await host.page.getByRole('button', { name: 'Share with the community' }).click();
+    await expect(host.page.getByRole('heading', { name: `E2E field notes (${STAMP})`, exact: true })).toBeVisible();
+    const resourcePath = new URL(host.page.url()).pathname;
+    expect(decodeURIComponent(resourcePath)).toContain(host.did);
+    await host.page.getByRole('link', { name: 'Edit these notes' }).click();
+    await expect(host.page.getByLabel('License (optional)',{exact:true})).toHaveValue('CC0');
+    await expect(host.page.getByLabel('Additional skill 1',{exact:true})).not.toHaveValue('');
+    await host.page.getByLabel('Field notes').fill('Revised notes, preserved class connection.');
+    await host.page.getByRole('button', { name: 'Save changes', exact: true }).click();
+    await expect(host.page.getByText('Revised notes, preserved class connection.')).toBeVisible();
+    await expect(host.page.getByRole('link', { name: 'From this class' })).toHaveAttribute('href', `/events/${encodeURIComponent(eventUri)}`);
+    const visitor = await browser.newPage();
+    await visitor.goto(`/people/${encodeURIComponent(host.did)}`);
+    await expect(visitor.getByRole('heading', { name: `E2E notebook (${STAMP})`, exact: true })).toBeVisible();
+    await expect(visitor.getByRole('heading', { name: `E2E field notes (${STAMP})`, exact: true })).toBeVisible();
+    await host.page.goto('/me');
+    await host.page.getByRole('button', { name: 'Edit', exact: true }).click();
+    await host.page.getByLabel('Share my profile publicly', { exact: true }).uncheck();
+    await host.page.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(host.page.getByRole('button', { name: 'Edit', exact: true })).toBeVisible();
+    await visitor.reload();
+    await expect(visitor.getByRole('heading', { name: 'This profile isn’t available.' })).toBeVisible();
+    await visitor.close();
+    await host.page.getByRole('button', { name: 'Sign out', exact: true }).click();
+    await expect.poll(async () => (await (await host.page.request.get('/api/auth/me')).json()).did).toBeFalsy();
+    await host.page.goto('/me');
+    await expect(host.page.getByRole('img', { name: 'Your profile image' })).toHaveCount(0);
   });
 });

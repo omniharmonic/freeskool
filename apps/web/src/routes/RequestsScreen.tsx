@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
+import { LoadingState, PageState } from '../components/PageState';
 import { Screen } from '../components/Screen';
 import { Sheet } from '../components/Sheet';
-import { Button, SkillChip, ThresholdRule } from '../components/bits';
+import { Button, ThresholdRule } from '../components/bits';
 import { SessionGate } from '../components/SessionGate';
 import {
   useClaimRequestMutation,
@@ -28,7 +29,7 @@ function flattenSkills(nodes: SkillNode[], trail: string[] = []): Array<{ uri: s
 export function RequestsScreen() {
   const { data: me } = useMe();
   const signedIn = Boolean(me);
-  const { data, isPending } = useRequests();
+  const { data, isPending, isError, refetch } = useRequests();
   const list = data?.requests ?? [];
   const [composing, setComposing] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -63,6 +64,7 @@ export function RequestsScreen() {
   return (
     <Screen
       title="Requests"
+      layout="library"
       standfirst="Things people want to learn. When enough people want the same thing, someone turns up to teach it."
       trailing={
         signedIn ? (
@@ -72,9 +74,11 @@ export function RequestsScreen() {
         ) : null
       }
     >
-      <div className="safe-x mt-4 space-y-4">
-        {!isPending && list.length === 0 ? (
-          <div className="plate plate-amber p-4">
+      <div className="safe-x request-board">
+        {isPending ? <LoadingState label="Opening the requests board…" /> : null}
+        {isError ? <PageState title="The requests couldn’t load." error action={<Button onClick={() => void refetch()}>Try again</Button>} /> : null}
+        {!isPending && !isError && list.length === 0 ? (
+          <div className="request-note">
             <p className="text-body">Post what you'd like to learn. Someone nearby probably knows it.</p>
           </div>
         ) : null}
@@ -83,13 +87,13 @@ export function RequestsScreen() {
           const mine = request.viewerInterested;
           const count = request.rsvpCount;
           return (
-            <article key={request.uri} className="plate plate-amber p-4">
+            <article key={request.uri} className="request-note">
               <div className="flex items-start justify-between gap-3">
                 <h2 className="flex-1 text-lede leading-snug">{request.title}</h2>
                 {request.status !== 'open' ? (
-                  <SkillChip ink={request.status === 'scheduled' ? 'blue' : 'pink'}>
-                    {request.status === 'scheduled' ? 'on the calendar' : 'teacher found'}
-                  </SkillChip>
+                  <span className="request-status">
+                    {request.status === 'scheduled' ? 'On the calendar' : 'Teacher found'}
+                  </span>
                 ) : null}
               </div>
               {request.description ? (
@@ -102,11 +106,13 @@ export function RequestsScreen() {
                 </div>
               ) : null}
 
+              {request.scheduledEventUri ? <a href={`/events/${encodeURIComponent(request.scheduledEventUri)}`} className="primary-action mt-4">See the class</a> : null}
               {signedIn ? (
-                <div className="mt-4 flex flex-wrap gap-3">
+                <div className="request-note-actions">
                   <Button ink={mine ? 'green' : 'amber'} onClick={() => onJoin(request)}>
                     {mine ? "You're counted in" : 'I want this too'}
                   </Button>
+                  {request.status === 'claimed' && request.viewerClaimed ? <a href={`/events/new?request=${encodeURIComponent(request.uri)}`} className="primary-action">Finish posting your class</a> : null}
                   {request.status === 'open' ? (
                     <Button ink="ink" variant="quiet" onClick={() => void onClaim(request)}>
                       I can teach this
@@ -124,7 +130,7 @@ export function RequestsScreen() {
             </article>
           );
         })}
-        {actionError ? <p className="text-body text-pink">{actionError}</p> : null}
+        {actionError ? <p role="alert" className="text-body text-pink">{actionError}</p> : null}
       </div>
 
       <ComposerSheet open={composing} onClose={() => setComposing(false)} />

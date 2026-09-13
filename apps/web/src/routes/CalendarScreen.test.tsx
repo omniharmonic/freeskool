@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 
@@ -50,7 +50,7 @@ const oursEvent = {
 };
 
 function renderScreen() {
-  const queryClient = new QueryClient();
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
       <CalendarScreen />
@@ -76,7 +76,7 @@ describe('CalendarScreen', () => {
       events: [oursEvent],
     });
     renderScreen();
-    await screen.findByText('Sourdough basics');
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
     expect(screen.queryByText('Listed from another school')).not.toBeInTheDocument();
   });
 
@@ -98,5 +98,32 @@ describe('CalendarScreen', () => {
       'href',
       '/requests',
     );
+  });
+});
+
+
+describe('calendar discovery', () => {
+  it('moves to another month and queries its actual date range', async () => {
+    vi.mocked(api.calendar.list).mockReset().mockResolvedValue({ from: '', to: '', events: [] });
+    renderScreen();
+    await screen.findByText(/nothing on the calendar yet/i);
+    const previous = vi.mocked(api.calendar.list).mock.calls.at(-1)![0]!;
+    fireEvent.click(screen.getByRole('button', { name: 'Next month' }));
+    await waitFor(() => expect(vi.mocked(api.calendar.list).mock.calls.at(-1)![0]!.from).not.toBe(previous.from));
+    expect(new Date(vi.mocked(api.calendar.list).mock.calls.at(-1)![0]!.from!)).toEqual(new Date(previous.to!));
+  });
+  it('filters the displayed classes by their content', async () => {
+    vi.mocked(api.calendar.list).mockReset().mockResolvedValue({ from: '', to: '', events: [oursEvent, listedEvent] });
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+    fireEvent.change(screen.getByRole('searchbox'), { target: { value: 'South Boulder' } });
+    expect(screen.queryByRole('heading', { name: 'Sourdough basics' })).not.toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Lock-picking basics' })).toBeInTheDocument();
+  });
+  it('offers retry instead of calling a failed calendar empty', async () => {
+    vi.mocked(api.calendar.list).mockReset().mockRejectedValue(new Error('offline'));
+    renderScreen();
+    expect(await screen.findByRole('alert')).toHaveTextContent('couldn’t load');
+    expect(screen.queryByText(/nothing on the calendar yet/i)).not.toBeInTheDocument();
   });
 });

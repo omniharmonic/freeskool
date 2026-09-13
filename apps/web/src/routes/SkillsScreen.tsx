@@ -1,125 +1,53 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Screen } from '../components/Screen';
 import { SkillChip } from '../components/bits';
+import { FieldGlyph } from '../components/FieldGlyph';
+import { LoadingState, PageState } from '../components/PageState';
 import { useSkillTree } from '../lib/queries';
 import type { SkillNode } from '../lib/types';
 
-/**
- * The taxonomy is a tree here (one root level, each expandable), but
- * `GET /api/skills` has no notion of "domain"/"area" groupings the way the
- * mock data did — those were presentational buckets invented for the shell.
- * Real skill nodes nest directly (`children`), so roots are rendered as the
- * expandable sections and their children as the flat list beneath.
- *
- * TIER: `GET /api/skills` now carries each node's `tier` (Task 12) — a "B"
- * marks a sensitive/high-risk skill, looked up server-side from
- * `apps/appview/src/lib/skill-tiers.ts`. `SkillLink` below shows a
- * "Sensitive" chip next to any Tier B skill's label.
- */
-export function SkillsScreen() {
-  const { data, isPending } = useSkillTree();
-  const roots = data?.skills ?? [];
-  const [open, setOpen] = useState<string | null>(null);
-
-  // Open the first domain once the tree loads, rather than landing on an
-  // all-collapsed screen — only while nothing has been explicitly chosen yet.
-  useEffect(() => {
-    if (open === null && roots.length > 0) setOpen(roots[0]!.uri);
-  }, [open, roots]);
-
-  return (
-    <Screen
-      title="Skills"
-      standfirst="Everything anyone here has offered to teach, filed the way people actually talk about it."
-    >
-      <div className="safe-x mt-4 space-y-4">
-        {!isPending && roots.length === 0 ? (
-          <p className="text-body text-ink-soft">Nothing is filed in the taxonomy yet.</p>
-        ) : null}
-
-        {roots.map((domain) => {
-          const expanded = open === domain.uri;
-          return (
-            <section key={domain.uri} className="plate plate-blue overflow-hidden">
-              <button
-                type="button"
-                className="flex w-full items-start gap-3 px-4 py-3.5 text-left"
-                aria-expanded={expanded}
-                onClick={() => setOpen(expanded ? '' : domain.uri)}
-              >
-                <span className="min-w-0 flex-1">
-                  <span className="display block text-lede font-bold">{domain.label}</span>
-                  {domain.description ? (
-                    <span className="mt-0.5 block text-caption text-ink-soft">{domain.description}</span>
-                  ) : null}
-                </span>
-                <svg
-                  width="13"
-                  height="13"
-                  viewBox="0 0 14 14"
-                  aria-hidden="true"
-                  className="mt-1.5 shrink-0 text-ink-faint"
-                  style={{ rotate: expanded ? '90deg' : '0deg', transition: 'rotate 160ms ease-out' }}
-                >
-                  <path d="M4 1l7 6-7 6" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-                </svg>
-              </button>
-
-              {expanded ? (
-                <div className="border-t-[1.5px] border-rule">
-                  <SkillChildren node={domain} />
-                </div>
-              ) : null}
-            </section>
-          );
-        })}
-      </div>
-    </Screen>
-  );
+function flatten(nodes: SkillNode[], trail: string[] = []): Array<{ skill: SkillNode; path: string }> {
+  return nodes.flatMap(skill => [{ skill, path: trail.join(' / ') }, ...flatten(skill.children, [...trail, skill.label])]);
 }
 
-/** One level of a skill's `children`, grouped by that child's own children
- * (so a two-deep taxonomy reads as "area, then skills" the way the mock did). */
-function SkillChildren({ node }: { node: SkillNode }) {
-  if (node.children.length === 0) {
-    return (
-      <div className="px-4 py-3">
-        <SkillLink skill={node} />
+export function SkillsScreen() {
+  const { data, isPending, isError, refetch } = useSkillTree();
+  const roots = data?.skills ?? [];
+  const [open, setOpen] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const allSkills = useMemo(() => flatten(roots), [data]);
+  const matches = allSkills.filter(({ skill, path }) => `${skill.label} ${path} ${skill.description ?? ''}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
+  useEffect(() => { if (open === null && roots.length) setOpen(roots[0]!.uri); }, [open, roots]);
+
+  return <Screen title="Skills" layout="library" standfirst="Useful things to know. Find something you’re curious about, or something you could pass on.">
+    <div className="safe-x"><nav className="library-nav"><Link to="/skills" aria-current="page">Skills</Link><Link to="/knowledge">Knowledge</Link></nav>
+      <div className="library-toolbar">
+        <label className="library-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="Search skills" placeholder="What would you like to learn?" value={search} onChange={e => setSearch(e.target.value)} /></label>
+        <p className="library-count" aria-live="polite">{isPending ? 'Opening the library…' : search ? `${matches.length} matching skills` : `${allSkills.length} skills to explore`}</p>
       </div>
-    );
-  }
-  return (
-    <>
-      {node.children.map((area) => (
-        <div key={area.uri} className="border-b-[1.5px] border-rule px-4 py-3 last:border-b-0">
-          <p className="stamp text-[13px] text-ink-soft">{area.label}</p>
-          {area.children.length > 0 ? (
-            <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
-              {area.children.map((skill) => (
-                <li key={skill.uri}>
-                  <SkillLink skill={skill} />
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <div className="mt-2">
-              <SkillLink skill={area} />
-            </div>
-          )}
-        </div>
-      ))}
-    </>
-  );
+      {isPending ? <LoadingState label="Opening the skill library…" /> : null}
+      {isError ? <PageState title="The skill library couldn’t load." error action={<button className="primary-action" onClick={() => void refetch()}>Try again</button>}>Check your connection and try again.</PageState> : null}
+      {!isPending && !isError && !roots.length ? <PageState title="A library waiting to grow." action={<Link to="/requests" className="context-link">Ask for something you’d like to learn</Link>}>Nothing is filed in the taxonomy yet.</PageState> : null}
+      {search ? <div className="skill-results">{matches.map(({ skill, path }) => <div className="skill-result" key={skill.uri}>{path ? <small>{path}</small> : null}<SkillLink skill={skill} /></div>)}{!matches.length && !isPending && !isError ? <PageState title="No skills match that search.">Try a broader word, or ask for a class on the requests board.</PageState> : null}</div> :
+        <div className="skill-directory">{roots.map(domain => <section className="skill-folder" key={domain.uri} data-open={open === domain.uri}>
+          <button className="skill-folder-button" type="button" aria-expanded={open === domain.uri} onClick={() => setOpen(open === domain.uri ? '' : domain.uri)}>
+            <FieldGlyph seed={domain.id} /><span className="min-w-0"><span className="skill-folder-title">{domain.label}</span>{domain.description ? <span className="skill-folder-description">{domain.description}</span> : null}</span><span className="skill-folder-symbol" aria-hidden="true">{open === domain.uri ? '−' : '+'}</span>
+          </button>
+          {open === domain.uri ? <div className="skill-children"><SkillChildren node={domain} /></div> : null}
+        </section>)}</div>}
+      <div className="page-note mt-8">You don’t need to be an expert to share a skill. Being honest about what you know is a good place to start.</div>
+    </div>
+  </Screen>;
+}
+
+function SkillChildren({ node }: { node: SkillNode }) {
+  if (!node.children.length) return <div className="skill-area"><SkillLink skill={node} /></div>;
+  return <>{node.children.map(area => <div key={area.uri} className="skill-area">
+    {area.children.length ? <><p className="skill-area-title"><Link to="/skills/$skillId" params={{ skillId: area.uri }}>{area.label}</Link></p><div className="skill-links">{flatten(area.children).map(({ skill }) => <SkillLink key={skill.uri} skill={skill} />)}</div></> : <SkillLink skill={area} />}
+  </div>)}</>;
 }
 
 function SkillLink({ skill }: { skill: SkillNode }) {
-  return (
-    <Link to="/skills/$skillId" params={{ skillId: skill.uri }} className="inline-flex items-baseline gap-1.5">
-      <span className="text-body underline decoration-[1.5px] decoration-pink underline-offset-[5px]">
-        {skill.label}
-      </span>
-      {skill.tier === 'B' ? <SkillChip ink="pink">Sensitive</SkillChip> : null}
-    </Link>
-  );
+  return <Link to="/skills/$skillId" params={{ skillId: skill.uri }} className="skill-link"><span>{skill.label}</span>{skill.tier === 'B' ? <SkillChip ink="pink">Sensitive</SkillChip> : null}</Link>;
 }

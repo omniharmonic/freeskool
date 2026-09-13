@@ -17,20 +17,20 @@ export function RevealScreen() {
   const { token } = useParams({ from: '/account/reveal/$token' });
   const { data, isPending, isError, error, refetch } = useOwnershipReveal(token);
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
 
   const onCopy = () => {
     if (!data) return;
-    navigator.clipboard?.writeText(data.password).then(
-      () => setCopied(true),
-      () => undefined,
-    );
+    setCopyError(false);
+    if (!navigator.clipboard) { setCopyError(true); return; }
+    void navigator.clipboard.writeText(data.password).then(() => setCopied(true), () => setCopyError(true));
   };
 
   const code = error instanceof ApiError ? error.code : undefined;
   const knownError = code === 'Expired' || code === 'AlreadyUsed' || code === 'NotFound';
 
   return (
-    <Screen title="Your new password" back>
+    <Screen title="Your new password" layout="form" standfirst="This account is yours. Keep its credentials somewhere only you can access." back>
       <div className="safe-x">
         {isPending ? <p className="text-body text-ink-soft">Loading…</p> : null}
 
@@ -64,6 +64,7 @@ export function RevealScreen() {
               <Button ink="blue" onClick={() => void refetch()}>
                 Retry
               </Button>
+              {copyError ? <p role="alert">Copying didn’t work. Select the password above and copy it manually.</p> : null}
             </div>
           </>
         ) : null}
@@ -83,6 +84,7 @@ export function RevealScreen() {
               <Button ink="blue" onClick={onCopy}>
                 {copied ? 'Copied' : 'Copy password'}
               </Button>
+              {copyError ? <p role="alert">Copying didn’t work. Select the password above and copy it manually.</p> : null}
             </div>
             <p className="mt-4 text-caption text-ink-soft">{data.message}</p>
           </>

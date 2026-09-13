@@ -16,7 +16,7 @@ import type { HandoffAcceptResult } from '../../lib/types';
  */
 export function HandoffAcceptScreen() {
   return (
-    <SessionGate prompt="Sign in to accept this hand-off.">
+    <SessionGate screen prompt="Sign in to accept this hand-off.">
       <HandoffAcceptForm />
     </SessionGate>
   );
@@ -39,7 +39,7 @@ function HandoffAcceptForm() {
   };
 
   return (
-    <Screen title="Accept stewardship" back>
+    <Screen layout="form" title="Accept stewardship" back>
       <div className="safe-x">
         {result ? (
           <div className="plate plate-green p-4">
@@ -57,7 +57,7 @@ function HandoffAcceptForm() {
               Accepting makes you a steward of this school — able to moderate what's on the calendar, and to take
               destructive actions alongside other stewards' sign-off.
             </p>
-            {error ? <p className="mt-3 text-body text-pink">{error}</p> : null}
+            {error ? <p role="alert" className="mt-3 text-body text-pink">{error}</p> : null}
             <div className="mt-5">
               <Button wide ink="pink" onClick={() => void onAccept()} disabled={acceptMutation.isPending}>
                 Accept stewardship

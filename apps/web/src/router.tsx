@@ -1,32 +1,67 @@
-import { createRootRoute, createRoute, createRouter, Outlet, useRouterState } from '@tanstack/react-router';
+
+import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet, useRouterState } from '@tanstack/react-router';
+import { FlowFrame } from './components/FlowFrame';
+import { Button } from './components/bits';
 import { TabBar } from './components/TabBar';
 import { OfflineBanner } from './components/OfflineBanner';
 import { InstallProvider } from './components/InstallNudge';
 import { CalendarScreen } from './routes/CalendarScreen';
-import { EventRedirect, EventScreen } from './routes/EventScreen';
-import { EventEditScreen } from './routes/EventEditScreen';
-import { AttendanceScreen } from './routes/AttendanceScreen';
-import { FeedbackScreen } from './routes/FeedbackScreen';
-import { FeedbackSummaryScreen } from './routes/FeedbackSummaryScreen';
-import { SkillsScreen } from './routes/SkillsScreen';
-import { SkillScreen } from './routes/SkillScreen';
-import { RequestsScreen } from './routes/RequestsScreen';
-import { MeScreen } from './routes/MeScreen';
-import { NotificationSettingsScreen } from './routes/NotificationSettingsScreen';
-import { SignInScreen } from './routes/SignInScreen';
-import { VerifyScreen } from './routes/VerifyScreen';
-import { OAuthConfirmScreen } from './routes/OAuthConfirmScreen';
-import { ZineScreen } from './routes/ZineScreen';
-import { InviteScreen } from './routes/InviteScreen';
-import { HowItWorksScreen } from './routes/HowItWorksScreen';
-import { RevealScreen } from './routes/RevealScreen';
-import { AdminOverviewScreen } from './routes/admin/AdminLayout';
-import { PolicyScreen } from './routes/admin/PolicyScreen';
-import { ModerationScreen } from './routes/admin/ModerationScreen';
-import { PeersScreen } from './routes/admin/PeersScreen';
-import { NewsletterScreen } from './routes/admin/NewsletterScreen';
-import { HandoffScreen } from './routes/admin/HandoffScreen';
-import { HandoffAcceptScreen } from './routes/admin/HandoffAcceptScreen';
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Load each flow when it is opened; the public calendar remains immediately available.
+const KnowledgeScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'KnowledgeScreen');
+const ResourceScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'ResourceScreen');
+const NewResourceScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'NewResourceScreen');
+const EditResourceScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'EditResourceScreen');
+const PublicProfileScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'PublicProfileScreen');
+const EventRedirect = lazyRouteComponent(() => import('./routes/EventScreen'), 'EventRedirect');
+const EventScreen = lazyRouteComponent(() => import('./routes/EventScreen'), 'EventScreen');
+const EventEditScreen = lazyRouteComponent(() => import('./routes/EventEditScreen'), 'EventEditScreen');
+const AttendanceScreen = lazyRouteComponent(() => import('./routes/AttendanceScreen'), 'AttendanceScreen');
+const FeedbackScreen = lazyRouteComponent(() => import('./routes/FeedbackScreen'), 'FeedbackScreen');
+const FeedbackSummaryScreen = lazyRouteComponent(() => import('./routes/FeedbackSummaryScreen'), 'FeedbackSummaryScreen');
+const SkillsScreen = lazyRouteComponent(() => import('./routes/SkillsScreen'), 'SkillsScreen');
+const SkillScreen = lazyRouteComponent(() => import('./routes/SkillScreen'), 'SkillScreen');
+const RequestsScreen = lazyRouteComponent(() => import('./routes/RequestsScreen'), 'RequestsScreen');
+const MeScreen = lazyRouteComponent(() => import('./routes/MeScreen'), 'MeScreen');
+const NotificationSettingsScreen = lazyRouteComponent(() => import('./routes/NotificationSettingsScreen'), 'NotificationSettingsScreen');
+const SignInScreen = lazyRouteComponent(() => import('./routes/SignInScreen'), 'SignInScreen');
+const VerifyScreen = lazyRouteComponent(() => import('./routes/VerifyScreen'), 'VerifyScreen');
+const OAuthConfirmScreen = lazyRouteComponent(() => import('./routes/OAuthConfirmScreen'), 'OAuthConfirmScreen');
+const ZineScreen = lazyRouteComponent(() => import('./routes/ZineScreen'), 'ZineScreen');
+const InviteScreen = lazyRouteComponent(() => import('./routes/InviteScreen'), 'InviteScreen');
+const HowItWorksScreen = lazyRouteComponent(() => import('./routes/HowItWorksScreen'), 'HowItWorksScreen');
+const RevealScreen = lazyRouteComponent(() => import('./routes/RevealScreen'), 'RevealScreen');
+const AdminOverviewScreen = lazyRouteComponent(() => import('./routes/admin/AdminLayout'), 'AdminOverviewScreen');
+const PolicyScreen = lazyRouteComponent(() => import('./routes/admin/PolicyScreen'), 'PolicyScreen');
+const ModerationScreen = lazyRouteComponent(() => import('./routes/admin/ModerationScreen'), 'ModerationScreen');
+const PeersScreen = lazyRouteComponent(() => import('./routes/admin/PeersScreen'), 'PeersScreen');
+const NewsletterScreen = lazyRouteComponent(() => import('./routes/admin/NewsletterScreen'), 'NewsletterScreen');
+const HandoffScreen = lazyRouteComponent(() => import('./routes/admin/HandoffScreen'), 'HandoffScreen');
+const HandoffAcceptScreen = lazyRouteComponent(() => import('./routes/admin/HandoffAcceptScreen'), 'HandoffAcceptScreen');
 
 /** The zine and the sign-in flow (both doors plus the verify landing) are the
  * places without tabs. */
@@ -34,9 +69,10 @@ const CHROMELESS = ['/zine', '/signin', '/verify', '/oauth/confirm'];
 
 function Shell() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
-  const chrome = !CHROMELESS.includes(pathname);
+  const chrome = !CHROMELESS.includes(pathname) && !pathname.startsWith('/invite/');
   return (
     <InstallProvider>
+      <a className="skip-link" href="#main-content">Skip to content</a>
       {chrome ? <OfflineBanner /> : null}
       <Outlet />
       {chrome ? <TabBar /> : null}
@@ -44,9 +80,18 @@ function Shell() {
   );
 }
 
-const rootRoute = createRootRoute({ component: Shell });
+const rootRoute = createRootRoute({
+  component: Shell,
+  notFoundComponent: () => <FlowFrame title="This page wandered off" description="The link may be old, or the address may have a typo."><Button href="/">Find a class</Button></FlowFrame>,
+  errorComponent: ({ reset }) => <FlowFrame title="Something didn’t load" description="Your connection may have dropped. Try opening this page again."><Button onClick={reset}>Try again</Button></FlowFrame>,
+});
 
 const routes = [
+  createRoute({getParentRoute:()=>rootRoute,path:'/knowledge',component:KnowledgeScreen}),
+  createRoute({getParentRoute:()=>rootRoute,path:'/knowledge/new',component:NewResourceScreen}),
+  createRoute({getParentRoute:()=>rootRoute,path:'/knowledge/$id',component:ResourceScreen}),
+  createRoute({getParentRoute:()=>rootRoute,path:'/knowledge/$id/edit',component:EditResourceScreen}),
+  createRoute({getParentRoute:()=>rootRoute,path:'/people/$did',component:PublicProfileScreen}),
   createRoute({ getParentRoute: () => rootRoute, path: '/', component: CalendarScreen }),
   // Pre-Task-4 path, kept working: it forwards to `/events/$id` (see
   // `EventRedirect`'s doc comment in `EventScreen.tsx`).
@@ -89,6 +134,7 @@ const routes = [
 export const router = createRouter({
   routeTree: rootRoute.addChildren(routes),
   defaultPreload: 'intent',
+  defaultPendingComponent: () => <FlowFrame title="Opening the next page" description="Just a moment…">{null}</FlowFrame>,
   scrollRestoration: false,
 });
 

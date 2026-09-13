@@ -1,3 +1,4 @@
+import { LoadingState, PageState } from '../../components/PageState';
 import { useState } from 'react';
 import { AdminLayout } from './AdminLayout';
 import { adminErrorSentence } from './adminErrors';
@@ -28,7 +29,7 @@ const looksLikeUrl = (s: string) => /^https?:\/\//i.test(s.trim());
  */
 export function PeersScreen() {
   const [probe, setProbe] = useState(false);
-  const { data, isPending, isFetching } = usePeers(probe);
+  const { data, isPending, isFetching, isError, refetch } = usePeers(probe);
   const setPeersMutation = useSetPeersMutation();
 
   const [hostInput, setHostInput] = useState('');
@@ -74,7 +75,7 @@ export function PeersScreen() {
               placeholder="https://pds.example.com"
             />
           </label>
-          {addError ? <p className="text-body text-pink">{addError}</p> : null}
+          {addError ? <p role="alert" className="text-body text-pink">{addError}</p> : null}
           <Button onClick={() => void onAdd()} disabled={setPeersMutation.isPending || !hostInput.trim()}>
             Add peer
           </Button>
@@ -89,13 +90,14 @@ export function PeersScreen() {
               type="button"
               className="text-caption font-bold text-blue disabled:opacity-40"
               disabled={isFetching}
-              onClick={() => setProbe(true)}
+              onClick={() => { if (probe) void refetch(); else setProbe(true); }}
             >
               {isFetching && probe ? 'Checking…' : 'Check reachability'}
             </button>
           </div>
-          {isPending ? <p className="text-body text-ink-soft">Loading…</p> : null}
-          {!isPending && peers.length === 0 ? <p className="text-body text-ink-soft">No peers registered yet.</p> : null}
+          {isPending ? <LoadingState label="Loading the peer list…" /> : null}
+          {isError ? <PageState title="The peer list couldn’t load." error action={<button className="primary-action" onClick={() => void refetch()}>Try again</button>} /> : null}
+          {!isPending && !isError && peers.length === 0 ? <p className="text-body text-ink-soft">No peers registered yet.</p> : null}
           <ul className="divide-y divide-rule border-[1.5px] border-ink">
             {peers.map((p) => {
               const probed = probedByHost.get(p.host);

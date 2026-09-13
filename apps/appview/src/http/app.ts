@@ -10,6 +10,7 @@
  *     and `.ics` and should never be treated as a document host.
  */
 import { Hono } from 'hono'
+import { bodyLimit } from 'hono/body-limit'
 import { cors } from 'hono/cors'
 import { config } from '../config.js'
 import { withViewer, type AppEnv } from './session.js'
@@ -29,6 +30,7 @@ import { invites } from './routes/invites.js'
 import { zine } from './routes/zine.js'
 import { school } from './routes/school.js'
 import { newsletterRoutes } from './routes/newsletter.js'
+import { knowledge } from './routes/knowledge.js'
 import { handoffRoutes } from './routes/handoff.js'
 
 export function createApp() {
@@ -40,6 +42,9 @@ export function createApp() {
     c.header('X-Content-Type-Options', 'nosniff')
     c.header('Cross-Origin-Opener-Policy', 'same-origin')
     c.header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'")
+    // Only the public calendar is deliberately kept offline. Session-specific
+    // details, rosters, profiles and magic-link responses must not survive sign-out.
+    if (c.req.path !== '/api/calendar') c.header('Cache-Control', 'private, no-store')
   })
 
   // The PWA is a separate origin in development; it must send its session cookie.
@@ -53,6 +58,7 @@ export function createApp() {
     }),
   )
 
+  app.use('/api/*', bodyLimit({ maxSize: 12 * 1024 * 1024, onError: c => c.json({ error: 'ImageTooLarge', message: 'Choose an image under 8 MB.' }, 413) }))
   app.use('*', withViewer)
 
   app.route('/', health)
@@ -63,6 +69,7 @@ export function createApp() {
   app.route('/api', rsvps)
   app.route('/api', requests)
   app.route('/api', skills)
+  app.route('/api', knowledge)
   app.route('/api', feedbackRoutes)
   app.route('/api/admin', admin)
   app.route('/api', notifications)

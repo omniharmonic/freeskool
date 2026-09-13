@@ -5,6 +5,8 @@
  * `GET /api/calendar` (neighborhood only, never the street, never a host DID) — so the
  * zine cannot become a second place that leaks what the calendar protects.
  */
+import { resolveHostDids } from '../../lib/events.js'
+import { getPresentations, presentationFields } from '../../lib/event-presentation.js'
 import { Hono } from 'hono'
 import type { AppEnv } from '../session.js'
 import { getIndexer } from '../../index/indexer.js'
@@ -78,7 +80,9 @@ zine.get('/zine/:yyyyMm', async (c) => {
   const events = await eventsInWindow(indexer, range.fromIso, range.toIso, 500)
 
   // One batched membership lookup for the whole month, not one per event (N+1).
-  const ownDids = await isOwnMemberSet(events.map((e) => e.did))
+  const hosts = await resolveHostDids(events)
+  const presentations = await getPresentations(events.map(e => e.uri))
+  const ownDids = await isOwnMemberSet([...events.map((e) => e.did), ...hosts.values()])
 
   const projected: PublicCalendarEntry[] = []
   for (const e of events) {
@@ -88,14 +92,15 @@ zine.get('/zine/:yyyyMm', async (c) => {
     ])
     const inputs = { listings: listings.map((l) => l.value), configs: configs.map((x) => x.value) }
     // Same authorship-based inclusion as the calendar (see http/visibility.ts).
-    const { show } = calendarInclusion(ownDids.has(e.did), inputs)
+    const { show } = calendarInclusion(ownDids.has(e.did) || ownDids.has(hosts.get(e.uri) ?? e.did), inputs)
     if (!show) continue
     // 'public': this endpoint has no session at all, by design (R9 — no public endpoint
     // enumerates members, and the zine is for anyone to print).
-    projected.push(projectEvent(toCalendarEvent(e.uri, e.did, e.value), inputs, 'public'))
+    projected.push({ ...projectEvent(toCalendarEvent(e.uri, e.did, e.value), inputs, 'public'), ...presentationFields(e.uri, presentations.get(e.uri)) })
   }
 
   return c.json({
+    truncated: events.length === 500,
     month: c.req.param('yyyyMm'),
     school: await schoolInfo(),
     days: groupByDay(projected),

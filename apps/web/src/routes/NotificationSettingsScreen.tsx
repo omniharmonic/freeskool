@@ -1,3 +1,4 @@
+import { LoadingState, PageState } from '../components/PageState';
 import { useState } from 'react';
 import { Screen } from '../components/Screen';
 import { Button } from '../components/bits';
@@ -17,6 +18,7 @@ const CATEGORY_LABEL: Record<string, string> = {
   'event.reminder': "Reminders for classes you're going to",
   'event.changed': "When a class you're going to changes",
   'event.cancelled': "When a class you're going to is cancelled",
+  'rsvp.promoted': 'When a place opens up for you',
   'rsvp.received': 'When someone RSVPs to a class you host',
   'offering.published': 'New classes posted',
   'member.joined': 'When someone new joins',
@@ -48,7 +50,7 @@ function routeFor(category: string, prefs: NotificationPref[]): Route {
 
 export function NotificationSettingsScreen() {
   return (
-    <SessionGate prompt="Sign in to change your notification settings.">
+    <SessionGate screen prompt="Sign in to change your notification settings.">
       <NotificationSettingsForm />
     </SessionGate>
   );
@@ -56,9 +58,9 @@ export function NotificationSettingsScreen() {
 
 function NotificationSettingsForm() {
   const { surface, permission, remindersOn, turnOnReminders, openInstallSheet } = useInstallFlow();
-  const { data: prefsData } = useNotificationPrefs();
+  const { data: prefsData, isPending, isError, refetch } = useNotificationPrefs();
   const setPrefsMutation = useSetNotificationPrefsMutation();
-  const { data: newsletter } = useNewsletterSubscription();
+  const { data: newsletter, isPending: newsletterPending, isError: newsletterLoadError, refetch: refetchNewsletter } = useNewsletterSubscription();
   const setNewsletterMutation = useSetNewsletterMutation();
   const [newsletterError, setNewsletterError] = useState<string | null>(null);
 
@@ -96,7 +98,7 @@ function NotificationSettingsForm() {
   };
 
   return (
-    <Screen title="Notifications" back>
+    <Screen title="Notifications" layout="form" standfirst="Stay in the loop, on your terms. Choose where class updates find you." back>
       <div className="safe-x">
         <div className="plate p-3.5">
           <p className="text-body">Reminders on this device</p>
@@ -117,13 +119,17 @@ function NotificationSettingsForm() {
         </div>
 
         <h2 className="mt-7 mb-2.5 text-lede font-bold">By category</h2>
-        <ul className="space-y-3">
+        {isPending ? <LoadingState label="Loading your notification choices…" /> : null}
+        {isError ? <PageState title="Your preferences couldn’t load." error action={<button className="primary-action" onClick={() => void refetch()}>Try again</button>} /> : null}
+        {setPrefsMutation.isError ? <p role="alert">Could not save that notification choice. Try again.</p> : null}
+        {setPrefsMutation.isSuccess ? <p role="status" className="mb-3 text-caption text-green">Notification choice saved.</p> : null}
+        <ul className="settings-list">
           {categories.map((category) => {
             const route = routeFor(category, prefs);
             return (
-              <li key={category} className="plate p-3.5">
+              <li key={category}>
                 <p className="text-body">{CATEGORY_LABEL[category] ?? category}</p>
-                <div className="mt-2.5 flex flex-wrap gap-1.5" role="group" aria-label={`Route for ${category}`}>
+                <div className="settings-routes" role="group" aria-label={`Route for ${category}`}>
                   {(['inbox', 'push', 'email'] as Route[]).map((option) => {
                     const disabled = option === 'push' && !canRequestPush();
                     const active = route === option;
@@ -131,7 +137,7 @@ function NotificationSettingsForm() {
                       <button
                         key={option}
                         type="button"
-                        disabled={disabled}
+                        disabled={disabled || setPrefsMutation.isPending}
                         aria-pressed={active}
                         onClick={() => setRoute(category, option)}
                         className="border-[1.5px] border-ink px-3 py-1.5 text-caption font-medium capitalize disabled:opacity-40"
@@ -166,12 +172,14 @@ function NotificationSettingsForm() {
           <Button
             ink={newsletter?.subscribed ? 'ink' : 'blue'}
             variant={newsletter?.subscribed ? 'quiet' : 'solid'}
+            disabled={setNewsletterMutation.isPending || newsletterPending || newsletterLoadError}
             onClick={() => void onToggleNewsletter(!newsletter?.subscribed)}
           >
             {newsletter?.subscribed ? 'Unsubscribe' : 'Subscribe'}
           </Button>
         </div>
-        {newsletterError ? <p className="mt-2 text-body text-pink">{newsletterError}</p> : null}
+        {newsletterLoadError ? <PageState title="Your subscription couldn’t load." error action={<Button onClick={() => void refetchNewsletter()}>Try again</Button>} /> : null}
+        {newsletterError ? <p role="alert" className="mt-2 text-body text-pink">{newsletterError}</p> : null}
       </div>
     </Screen>
   );

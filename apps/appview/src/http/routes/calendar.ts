@@ -2,13 +2,13 @@
  * `GET /api/calendar?from&to&school`
  *
  * Public, unauthenticated. Returns only `listed` events, and only
- * title / time / mode / neighborhood. A viewer who is the host, has RSVP'd, has
- * confirmed attendance, or is a steward additionally gets the precise location — see
- * ../visibility.ts, which holds the rules and is unit-tested on its own.
+ * title / time / mode / neighborhood and class covers. Exact locations are only
+ * returned by the separately authorized event-detail endpoint, never this offline feed.
  *
  * There is deliberately no `?host=` or `?attendee=` parameter: no public endpoint
  * enumerates members (R9).
  */
+import { getPresentations, presentationFields } from '../../lib/event-presentation.js'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { AppEnv } from '../session.js'
@@ -18,7 +18,6 @@ import { isOwnMemberSet } from '../../lib/roles.js'
 import { resolveHostDids } from '../../lib/events.js'
 import type { EventConfig, EventListing } from '../../lexicons/coop.js'
 import { calendarInclusion, projectEvent, type CalendarEvent, type ViewerRelation } from '../visibility.js'
-import { viewerRelation } from '../relation.js'
 
 export const calendar = new Hono<AppEnv>()
 
@@ -26,7 +25,7 @@ const query = z.object({
   from: z.string().optional(),
   to: z.string().optional(),
   school: z.string().optional(),
-  limit: z.coerce.number().int().min(1).max(200).default(100),
+  limit: z.coerce.number().int().min(1).max(1000).default(500),
 })
 
 calendar.get('/calendar', async (c) => {
@@ -39,7 +38,7 @@ calendar.get('/calendar', async (c) => {
 
   const indexer = await getIndexer()
   const events = await eventsInWindow(indexer, fromIso, toIso, limit)
-  const viewer = c.var.viewer
+  const presentations = await getPresentations(events.map(e => e.uri))
 
   // A8: the HOST of each event. A materialized occurrence's record author is the SCHOOL;
   // its host is the series author. One query for the whole page, not one per event.
@@ -70,11 +69,12 @@ calendar.get('/calendar', async (c) => {
     const { show, origin } = calendarInclusion(ownDids.has(e.did) || ownDids.has(hostDid), inputs)
     if (!show) continue
 
-    const relation: ViewerRelation = viewer ? await viewerRelation(viewer, e.uri, hostDid) : 'public'
-    out.push({ ...projectEvent(toCalendarEvent(e.uri, hostDid, e.value), inputs, relation), origin })
+    // Offline calendar is always public. Precise addresses belong only in the uncached detail API.
+    const relation: ViewerRelation = 'public'
+    out.push({ ...projectEvent(toCalendarEvent(e.uri, hostDid, e.value), inputs, relation), ...presentationFields(e.uri, presentations.get(e.uri)), origin })
   }
 
-  return c.json({ from: fromIso, to: toIso, events: out })
+  return c.json({ from: fromIso, to: toIso, events: out, truncated: events.length === limit })
 })
 
 export function toCalendarEvent(uri: string, hostDid: string, value: Record<string, unknown>): CalendarEvent {

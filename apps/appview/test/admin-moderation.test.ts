@@ -24,7 +24,7 @@ import { createApp } from '../src/http/app.js'
 import { createSession } from '../src/http/session.js'
 import { signSessionId } from '../src/lib/crypto.js'
 import { config } from '../src/config.js'
-import { attendance, attendanceTally, custodialAccount, moderationQueue, steward } from '../src/db/schema.js'
+import { appMeta, attendance, attendanceTally, custodialAccount, moderationQueue, steward } from '../src/db/schema.js'
 import { rowId } from '../src/lib/ids.js'
 import { eq } from 'drizzle-orm'
 import { isListed } from '../src/http/visibility.js'
@@ -43,6 +43,7 @@ beforeAll(async () => {
 beforeEach(async () => {
   if (!available) return
   await truncate(
+    'fs_app_meta',
     'fs_moderation_queue',
     'fs_audit',
     'fs_steward',
@@ -77,10 +78,10 @@ async function cookieFor(did: string): Promise<string> {
 
 /** A REAL `AppCustodyAdapter` (threshold = 1, so one steward's own approval suffices),
  * with only the PDS session faked so the write record can be inspected. */
-function wirePort(captured: Array<Record<string, unknown>>) {
+function wirePort(captured: Array<Record<string, unknown>>, threshold = 1) {
   return new AppCustodyAdapter({
     roles: { async roleOf() { return Role.Steward } },
-    policy: { async destructiveActionStewards() { return 1 } },
+    policy: { async destructiveActionStewards() { return threshold } },
     audit: new PostgresAuditSink(),
     session: {
       async call(i) {
@@ -307,4 +308,23 @@ describe('POST /api/admin/moderation/:id/execute', () => {
     const tally = await testDb().select().from(attendanceTally).where(eq(attendanceTally.did, subject))
     expect(tally[0]?.attendedConfirmed).toBe(0)
   })
+})
+
+it('requires the school approval threshold to hide knowledge, and supports audited restoration',async()=>{
+ if(!available)return
+ const captured:Array<Record<string,unknown>>=[]
+ setSchoolActor(wirePort(captured,2))
+ const app=createApp(),cookie=await cookieFor(STEWARD_A),subjectUri=`at://${SUBJECT}/freeschool.draft.resource/one`
+ const headers={Cookie:cookie,'Content-Type':'application/json'}
+ const proposed=await (await app.request('/api/admin/moderation',{method:'POST',headers,body:JSON.stringify({action:'remove-resource',subjectUri,reason:'A private moderation reason'})})).json()
+ expect((await app.request(`/api/admin/moderation/${proposed.id}/execute`,{method:'POST',headers})).status).toBe(403)
+ expect(await testDb().select().from(appMeta).where(eq(appMeta.key,`resource-hidden:${subjectUri}`))).toHaveLength(0)
+ await testDb().update(moderationQueue).set({approvals:[{stewardDid:STEWARD_A,at:new Date().toISOString()},{stewardDid:'did:plc:steward-b',at:new Date().toISOString()}]}).where(eq(moderationQueue.id,proposed.id))
+ expect((await app.request(`/api/admin/moderation/${proposed.id}/execute`,{method:'POST',headers})).status).toBe(200)
+ expect((await testDb().select().from(appMeta).where(eq(appMeta.key,`resource-hidden:${subjectUri}`)))[0]?.value).toBe(true)
+ expect(JSON.stringify(captured)).not.toContain(subjectUri)
+ expect(JSON.stringify(captured)).not.toContain('A private moderation reason')
+ const restore=await (await app.request('/api/admin/moderation',{method:'POST',headers,body:JSON.stringify({action:'restore-resource',subjectUri,reason:'Resolved and ready to restore'})})).json()
+ expect((await app.request(`/api/admin/moderation/${restore.id}/execute`,{method:'POST',headers})).status).toBe(200)
+ expect((await testDb().select().from(appMeta).where(eq(appMeta.key,`resource-hidden:${subjectUri}`)))[0]?.value).toBe(false)
 })

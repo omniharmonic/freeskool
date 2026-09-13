@@ -14,7 +14,7 @@ export function TabBar() {
     <nav className="tab-bar glass app-chrome" aria-label="Sections">
       <div className="flex items-stretch justify-around px-1 pt-1.5">
         {tabs.map(({ to, label, glyph: Glyph }) => {
-          const active = to === '/' ? pathname === '/' || pathname.startsWith('/event') : pathname.startsWith(to);
+          const active = to === '/' ? pathname === '/' || pathname.startsWith('/event') : pathname.startsWith(to) || (to === '/skills' && pathname.startsWith('/knowledge')) || (to === '/me' && pathname.startsWith('/people'));
           return (
             <Link
               key={to}

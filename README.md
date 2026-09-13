@@ -89,7 +89,7 @@ Running a second stack beside a first (the e2e suite does this): `APPVIEW_PORT=4
 ### 6. Check it
 
 ```bash
-pnpm -r test            # unit/integration (live Postgres; 563 tests across the workspace)
+pnpm -r test            # unit/integration (live Postgres; see docs/plans/final-polish.md for the latest verification)
 pnpm -r typecheck
 pnpm lexicons:validate
 
@@ -104,9 +104,12 @@ It can still report violations against a dev PDS that has been around a while, a
 
 `pnpm e2e` drives a real browser through the whole MVP — sign up, ask for a class, post one, RSVP from three other members, check off attendance, three anonymous ballots, the k=3 summary, a materialized weekly series, the zine, and a steward policy change that re-derives a role. It needs the stack from steps 1–5 **already running**, Chromium (`pnpm --filter @freeschool/web exec playwright install chromium`), and the same exported env (two steps shell out to the AppView package). It takes a few minutes: the materializer ends in a full peer backfill.
 
+Production hosting and launch checks: [deployment guide](docs/deployment.md). The [final polish report](docs/plans/final-polish.md) records verified behavior and remaining launch requirements.
+
 ## What is in v1
 
 - One custodied school DID; email-first sign-in that mints a Free School identity on the school's own PDS; take-ownership of that account whenever you want it.
+- Classes with photo/poster uploads and metadata stripping, a searchable month calendar, private profile images, and completed request-to-class links.
 - Classes (one-off and recurring), location tiers (neighbourhood public, address to people who RSVP), capacity and waitlist, materials, invite links, `.ics`.
 - Skill taxonomy with Tier A/B visibility rules, skill claims, the needs board with interest thresholds and "I can teach this".
 - App-side RSVPs, attendance attestation, anonymous host feedback with a k-anonymous summary, derived roles and badges (counts and presence, never averages).

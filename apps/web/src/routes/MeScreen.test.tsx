@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -15,6 +16,7 @@ if (!HTMLDialogElement.prototype.showModal) {
 
 const navigateSpy = vi.fn();
 vi.mock('@tanstack/react-router', () => ({
+  Link: ({to,children}: {to:string;children:ReactNode}) => <a href={to}>{children}</a>,
   useNavigate: vi.fn(() => navigateSpy),
   useRouter: vi.fn(() => ({ history: { back: vi.fn() } })),
 }));
@@ -123,7 +125,7 @@ describe('MeScreen', () => {
     fireEvent.change(await screen.findByLabelText(/search the skill taxonomy/i), { target: { value: 'de-esc' } });
     fireEvent.click(await screen.findByRole('button', { name: 'De-escalation' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Public' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Add to the list below' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add this skill' }));
   }
 
   it("a Tier B claim cannot be set public without the confirm dialog, and confirming resends with confirmTierB: true", async () => {
@@ -244,7 +246,7 @@ describe('MeScreen', () => {
     // Tier B default: "School only" is the active toggle without being clicked.
     expect(screen.getByRole('button', { name: 'School only' })).toHaveAttribute('aria-pressed', 'true');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Add to the list below' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add this skill' }));
 
     expect(await screen.findByText('Sensitive')).toBeInTheDocument();
   });

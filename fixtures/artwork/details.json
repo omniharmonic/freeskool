@@ -1,0 +1,56 @@
+[
+  {
+    "publicOverview": {
+      "description": "Turn curiosity about fungi into a small growing project of your own. We’ll explore how oyster mushrooms grow, look at different growing materials, and walk through setting up and caring for a starter kit together.\n\nExpect a short introduction, a hands-on table session, and plenty of time for questions. You’ll leave with a simple care plan and a clearer sense of what you need to keep learning at home.\n\nThis is a fictional design-demo class with AI-generated artwork, not a scheduled gathering.",
+      "audience": "Curious beginners and people who have tried a grow kit before. No gardening experience needed. This is about cultivation, not identifying wild mushrooms.",
+      "accessibility": "Example arrangements: seated and standing work options, step-free entry, and a quiet corner for breaks. Teaching in English. Growing materials can be earthy and dusty; participants can observe any part of the practical session."
+    },
+    "materials": ["A notebook or phone for notes", "A reusable bag for your starter kit"],
+    "suppliesNote": "Example: growing materials and shared tools provided. No purchase or special equipment needed."
+  },
+  {
+    "publicOverview": {
+      "description": "Get to know your bicycle with neighbors who like keeping things moving. We’ll work through a basic check, identify useful tools, and practise patching a tube on a spare wheel. Bring your questions and learn by doing, with time to watch before you try.\n\nThis is a fictional design-demo class with AI-generated artwork, not a scheduled gathering.",
+      "audience": "First-time fixers welcome. Bring a bicycle if you have one; you can learn on the demonstration bike too.",
+      "accessibility": "Example arrangements: outdoor courtyard, step-free access and chairs available. Expect occasional tool noise and greasy hands."
+    },
+    "materials": ["Your bicycle, if you want to work on it", "Clothes you don’t mind getting messy"],
+    "suppliesNote": "Example: shared tools and spare practice wheels provided."
+  },
+  {
+    "publicOverview": {
+      "description": "Make a little more room for next season. We’ll compare different seed shapes, practise sorting and labeling, and make simple paper seed packets together. Bring something you’ve saved or simply come to learn; sharing stories is part of the exchange.\n\nThis is a fictional design-demo class with AI-generated artwork, not a scheduled gathering.",
+      "audience": "All experience levels, including people growing in pots and on windowsills. No seeds required to participate.",
+      "accessibility": "Example arrangements: seated table work, large-print labels and a step-free greenhouse entrance. Some handling of soil and dried plant material."
+    },
+    "materials": ["Seeds to share, if you have some", "A pencil or marker"],
+    "suppliesNote": "Example: paper, envelopes and a small shared seed collection provided."
+  },
+  {
+    "publicOverview": {
+      "description": "A slow afternoon around a kitchen table, exploring the cultures behind everyday fermentation. We’ll compare equipment, talk about keeping notes, and look at examples at different stages. The session combines a demonstration, conversation and questions.\n\nThis is a fictional design-demo class with AI-generated artwork, not a scheduled gathering.",
+      "audience": "Curious home cooks and complete beginners. You’re welcome to observe without handling or tasting anything.",
+      "accessibility": "Example arrangements: seated work, step-free entrance and breaks throughout. A shared kitchen can contain common food allergens; ingredient information is available before participating."
+    },
+    "materials": ["A clean jar to discuss with the group", "A notebook"],
+    "suppliesNote": "Example: demonstration ingredients and utensils provided."
+  },
+  {
+    "publicOverview": {
+      "description": "Good invitations don’t need perfect photographs. This sample uses a tiny, heavily compressed kitchen image to test how the platform gives everyday content a considered frame.\n\nImagine a beginner-friendly gathering with a short demonstration, time for hands-on exploration, and an open conversation around the table.\n\nThis is a fictional design-demo class, not a scheduled gathering.",
+      "audience": "A sample invitation for curious beginners. No previous knowledge assumed.",
+      "accessibility": "Sample access notes belong here so people can decide whether the session works for them before signing up."
+    },
+    "materials": ["Your curiosity", "Something to take notes with"],
+    "suppliesNote": "A low-resolution image should never make a thoughtful invitation feel second-rate."
+  },
+  {
+    "publicOverview": {
+      "description": "Everyone knows something someone else would love to learn. This sample gathering starts with a round of introductions, makes room for short demonstrations, and ends with an invitation to turn one shared interest into a future class.\n\nNo image was uploaded: the platform gives the title its own simple poster.\n\nThis is a fictional design-demo class, not a scheduled gathering.",
+      "audience": "Anyone with a skill, a question, or a little curiosity. Listening is participating too.",
+      "accessibility": "Example arrangements: a seated circle, room to step out for a break, and no expectation to speak in front of the group."
+    },
+    "materials": [],
+    "suppliesNote": "Example: nothing to buy or prepare. Bring a small object to explain a skill if you like."
+  }
+]

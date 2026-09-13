@@ -1,6 +1,7 @@
-import { useMemo, useState } from 'react';
+import { LoadingState, PageState } from '../components/PageState';
+import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { formatTime, formatTimeRange } from '../lib/dates';
+import { ZinePages } from '../components/ZinePages';
 import { useZineMonth } from '../lib/queries';
 
 type Trim = 'letter' | 'a4';
@@ -21,14 +22,6 @@ function monthLabel(yyyyMm: string): string {
   return new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' }).format(new Date(y, m - 1, 1));
 }
 
-/** `yyyy-mm-dd`, parsed as a LOCAL day — never `new Date('yyyy-mm-dd')`, which
- * jsdom and every browser parse as UTC midnight and can shift a day backward
- * in any timezone west of UTC. */
-function localDateFromDayString(yyyyMmDd: string): Date {
-  const [y, m, d] = yyyyMmDd.split('-').map(Number) as [number, number, number];
-  return new Date(y, m - 1, d);
-}
-
 /**
  * The monthly print zine: a photocopied free-school calendar, now on
  * `GET /api/zine/:yyyy-mm` (`api.zine.month`) instead of the mock pool.
@@ -46,24 +39,22 @@ function localDateFromDayString(yyyyMmDd: string): Date {
 export function ZineScreen() {
   const [trim, setTrim] = useState<Trim>('letter');
   const [month, setMonth] = useState(currentYyyyMm());
-  const { data, isPending } = useZineMonth(month);
-  const days = data?.days ?? [];
-  const schoolName = data?.school.name ?? 'Free School';
-  const weekdayFormat = useMemo(() => new Intl.DateTimeFormat('en-US', { weekday: 'long' }), []);
+  const { data, isPending, isError, refetch } = useZineMonth(month);
 
   return (
     <div className="app-scroll" style={{ background: 'var(--c-paper-3)' }}>
-      <div className="no-print safe-top safe-x flex flex-wrap items-center justify-between gap-3 pb-3">
+      {data?.truncated ? <p role="status" className="safe-x py-3 text-body">This month has more classes than the zine can hold. The printed calendar may be incomplete.</p> : null}
+      <div className="zine-toolbar no-print safe-top safe-x flex flex-wrap items-center justify-between gap-3 pb-3">
         <Link to="/" className="display text-caption font-bold text-blue">
           Back to the calendar
         </Link>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="zine-controls flex flex-wrap items-center gap-2">
           <div className="flex items-center gap-1.5" role="group" aria-label="Month">
             <button
               type="button"
               onClick={() => setMonth((m) => shiftMonth(m, -1))}
               aria-label="Previous month"
-              className="border-[1.5px] border-ink px-2 py-1 text-caption"
+              className="min-h-[44px] min-w-[44px] border-[1.5px] border-ink px-2 py-1 text-caption"
             >
               ‹
             </button>
@@ -72,7 +63,7 @@ export function ZineScreen() {
               type="button"
               onClick={() => setMonth((m) => shiftMonth(m, 1))}
               aria-label="Next month"
-              className="border-[1.5px] border-ink px-2 py-1 text-caption"
+              className="min-h-[44px] min-w-[44px] border-[1.5px] border-ink px-2 py-1 text-caption"
             >
               ›
             </button>
@@ -84,7 +75,7 @@ export function ZineScreen() {
                 type="button"
                 onClick={() => setTrim(option)}
                 aria-pressed={trim === option}
-                className="border-[1.5px] border-ink px-2.5 py-1 text-caption font-medium"
+                className="min-h-[44px] min-w-[44px] border-[1.5px] border-ink px-2.5 py-1 text-caption font-medium"
                 style={{
                   background: trim === option ? 'var(--c-ink)' : 'transparent',
                   color: trim === option ? 'var(--c-paper-2)' : 'var(--c-ink)',
@@ -97,6 +88,7 @@ export function ZineScreen() {
           <button
             type="button"
             onClick={() => window.print()}
+            disabled={isPending || isError}
             className="border-[1.5px] border-ink bg-pink px-3 py-1 text-caption font-bold"
             style={{ color: 'var(--c-on-pink)' }}
           >
@@ -113,110 +105,9 @@ export function ZineScreen() {
       )}
 
       <div className="px-3 pb-10">
-        <article
-          className="zine-page mx-auto"
-          style={{
-            width: '100%',
-            maxWidth: trim === 'a4' ? '182mm' : '7.5in',
-            padding: '28px 26px 34px',
-            border: '1.5px solid #101010',
-          }}
-        >
-          {/* Masthead: stencilled, misregistered, photocopied twice. */}
-          <header style={{ borderBottom: '4px solid #101010', paddingBottom: 14 }}>
-            <p className="stamp" style={{ fontSize: 13, letterSpacing: '0.08em' }}>
-              {monthLabel(month)}. No fees, no grades, no sign-up sheet at the door.
-            </p>
-            <h1
-              className="display"
-              style={{
-                fontSize: 'clamp(38px, 11vw, 64px)',
-                lineHeight: 0.92,
-                fontWeight: 800,
-                marginTop: 6,
-                textShadow: '3px 3px 0 #ff4d8d',
-              }}
-            >
-              FREE
-              <br />
-              SCHOOL
-            </h1>
-            <p style={{ marginTop: 10, maxWidth: '52ch', fontSize: 13.5, lineHeight: 1.45 }}>
-              Every class below is taught by somebody who lives near {schoolName}. Turn up. If you can teach
-              something, {data?.howToPost ?? 'ask a steward how to post one.'}
-            </p>
-          </header>
-
-          <div
-            style={{
-              columnCount: 2,
-              columnGap: 22,
-              columnRule: '1px solid #101010',
-              marginTop: 16,
-            }}
-          >
-            {!isPending && days.length === 0 ? (
-              <p className="text-caption text-ink-soft">Nothing posted for {monthLabel(month)} yet.</p>
-            ) : null}
-            {days.map((day) => (
-              <section key={day.date} className="zine-class" style={{ marginBottom: 16 }}>
-                <h2
-                  className="stamp"
-                  style={{
-                    fontSize: 15,
-                    borderBottom: '2px solid #101010',
-                    paddingBottom: 3,
-                    marginBottom: 7,
-                  }}
-                >
-                  {weekdayFormat.format(localDateFromDayString(day.date))} {localDateFromDayString(day.date).getDate()}
-                </h2>
-                {day.events.map((event) => (
-                  <div key={event.uri} className="zine-class" style={{ marginBottom: 11 }}>
-                    <p className="stamp" style={{ fontSize: 12.5 }}>
-                      {event.startsAt && event.endsAt
-                        ? formatTimeRange(event.startsAt, event.endsAt)
-                        : event.startsAt
-                          ? formatTime(event.startsAt)
-                          : 'Time TBD'}
-                    </p>
-                    <p className="display" style={{ fontSize: 15.5, lineHeight: 1.12, fontWeight: 700 }}>
-                      {event.name}
-                    </p>
-                    <p style={{ fontSize: 11, lineHeight: 1.3, marginTop: 3 }}>
-                      {event.venueNeeded ? 'Venue needed — got a room?' : (event.neighborhood ?? 'Location: ask a steward')}
-                    </p>
-                    {event.tags && event.tags.length > 0 ? (
-                      <p style={{ fontSize: 10.5, lineHeight: 1.3, marginTop: 2, color: '#50506a' }}>
-                        {event.tags.join(' · ')}
-                      </p>
-                    ) : null}
-                  </div>
-                ))}
-              </section>
-            ))}
-          </div>
-
-          <footer
-            style={{
-              borderTop: '4px solid #101010',
-              marginTop: 10,
-              paddingTop: 12,
-              display: 'flex',
-              flexWrap: 'wrap',
-              gap: 10,
-              alignItems: 'baseline',
-              justifyContent: 'space-between',
-            }}
-          >
-            <p className="display" style={{ fontSize: 19, fontWeight: 800, letterSpacing: '-0.02em' }}>
-              everybody's a teacher, everybody's a student
-            </p>
-            <p className="stamp" style={{ fontSize: 11.5 }}>
-              freeschool.boulder. Ask for a class, offer a class.
-            </p>
-          </footer>
-        </article>
+        {isPending ? <div className="mx-auto max-w-xl"><LoadingState label="Preparing the monthly zine…" /></div> : null}
+        {isError ? <div className="mx-auto max-w-xl"><PageState title="The zine couldn’t load." error action={<button className="primary-action" onClick={() => void refetch()}>Try again</button>}>Wait until the calendar loads before printing.</PageState></div> : null}
+        {data ? <ZinePages data={data} trim={trim} /> : null}
       </div>
     </div>
   );

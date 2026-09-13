@@ -8,24 +8,13 @@ import type { NewsletterDraft } from '../../lib/types';
 
 const thisMonth = () => new Date().toISOString().slice(0, 7);
 
-/**
- * `/admin/newsletter` — compose this month's digest, then send it.
- *
- * EDITING IS PREVIEW-ONLY: `POST /api/admin/newsletter/:id/send` sends
- * exactly the row `composeNewsletterIssue` stored (`apps/appview/src/jobs/
- * newsletter.ts`) — there is no `PUT`/`PATCH` to persist an edited body back
- * onto the draft. So the textarea below lets a steward read the composed
- * text closely before deciding whether to send, but changes typed into it
- * are local only and are NOT what gets mailed. The copy under the field says
- * this rather than implying an edit-and-send flow the backend doesn't have.
- */
+/** A read-only preview of the exact stored draft that will be sent. */
 export function NewsletterScreen() {
   const composeMutation = useComposeNewsletterMutation();
   const sendMutation = useSendNewsletterMutation();
 
   const [period, setPeriod] = useState(thisMonth());
   const [draft, setDraft] = useState<NewsletterDraft | null>(null);
-  const [previewText, setPreviewText] = useState('');
   const [composeError, setComposeError] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
@@ -38,7 +27,6 @@ export function NewsletterScreen() {
     try {
       const result = await composeMutation.mutateAsync(period);
       setDraft(result);
-      setPreviewText(result.body);
     } catch (err) {
       setComposeError(err instanceof ApiError ? err.message : 'Could not compose a draft. Try again.');
     }
@@ -70,8 +58,8 @@ export function NewsletterScreen() {
               onChange={(e) => setPeriod(e.target.value)}
             />
           </label>
-          {composeError ? <p className="text-body text-pink">{composeError}</p> : null}
-          <Button onClick={() => void onCompose()} disabled={composeMutation.isPending}>
+          {composeError ? <p role="alert" className="text-body text-pink">{composeError}</p> : null}
+          <Button onClick={() => void onCompose()} disabled={composeMutation.isPending || !/^\d{4}-\d{2}$/.test(period)}>
             Compose draft
           </Button>
         </div>
@@ -86,24 +74,24 @@ export function NewsletterScreen() {
                 <p className="text-body font-bold">{draft.subject}</p>
                 <label className="block">
                   <span className="text-caption text-ink-soft">
-                    Read it closely before sending — editing here does not change what gets mailed (there is no
-                    save-edits endpoint yet).
+                    Review the digest before sending it to subscribers.
                   </span>
                   <textarea
                     className="mt-1.5 min-h-[180px] w-full resize-y border-[1.5px] border-ink bg-sheet px-3 py-2 text-body outline-none"
-                    value={previewText}
-                    onChange={(e) => setPreviewText(e.target.value)}
+                    aria-label="Newsletter preview"
+                    readOnly
+                    value={draft.body}
                   />
                 </label>
               </div>
             </section>
 
             {sentCount !== null ? (
-              <p className="text-body text-green">Sent — reached {sentCount} subscriber{sentCount === 1 ? '' : 's'}.</p>
+              <p role="status" className="text-body text-green">Sent — reached {sentCount} subscriber{sentCount === 1 ? '' : 's'}.</p>
             ) : null}
-            {sendError ? <p className="text-body text-pink">{sendError}</p> : null}
+            {sendError ? <p role="alert" className="text-body text-pink">{sendError}</p> : null}
 
-            <Button wide ink="blue" onClick={() => setConfirmOpen(true)} disabled={sendMutation.isPending}>
+            <Button wide ink="blue" onClick={() => setConfirmOpen(true)} disabled={sendMutation.isPending || sentCount !== null}>
               Send to subscribers
             </Button>
           </>

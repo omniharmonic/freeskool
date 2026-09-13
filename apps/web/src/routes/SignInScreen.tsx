@@ -1,8 +1,10 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link } from '@tanstack/react-router';
-import { school } from '../lib/mock';
+import { FlowFrame } from '../components/FlowFrame';
 import { Button } from '../components/bits';
 import { api, ApiError } from '../lib/api';
+
+import { rememberSignInReturn } from '../lib/signin-return';
 
 type Status = 'idle' | 'sending' | 'sent' | 'error';
 
@@ -17,6 +19,7 @@ type Status = 'idle' | 'sending' | 'sent' | 'error';
  * link. `VerifyScreen` (`/verify`) is where that link lands.
  */
 export function SignInScreen() {
+  useEffect(() => rememberSignInReturn(window.location.search), []);
   const [email, setEmail] = useState('');
   const [status, setStatus] = useState<Status>('idle');
   const [errorMessage, setErrorMessage] = useState('');
@@ -34,19 +37,9 @@ export function SignInScreen() {
   };
 
   return (
-    <div className="app-scroll">
-      <div className="safe-top safe-x pb-10">
-        <div className="pt-10">
-          <p className="stamp text-[13px] text-pink">{school.monthLabel}</p>
-          <h1 className="mt-2 text-large leading-[1.02] font-extrabold">{school.name}</h1>
-          <p className="mt-3 max-w-[42ch] text-body text-ink-soft">
-            Free classes taught by people who live here. You need a name to RSVP under — that's the only
-            reason to sign in.
-          </p>
-        </div>
-
+    <FlowFrame title="Come as you are" description="Free classes taught by people who live here. Sign in to join a class, ask for something new, or share what you know.">
         {status === 'sent' ? (
-          <div className="mt-8 plate plate-green p-4">
+          <div role="status" className="plate plate-green p-5">
             <p className="text-body font-bold">Check your email</p>
             <p className="mt-1.5 text-caption text-ink-soft">
               We sent a link to {email}. Open it on this device to finish signing in.
@@ -79,6 +72,7 @@ export function SignInScreen() {
               <Button type="submit" wide disabled={status === 'sending' || email.trim().length < 3}>
                 {status === 'sending' ? 'Sending…' : 'Create a new Free School identity (recommended)'}
               </Button>
+              <p className="mt-3 text-caption text-ink-soft">Already joined? Use the same email to sign back in.</p>
               <p className="mt-2 text-caption text-ink-soft">
                 Your Free School records stay on the school's own server and are not attached to any account you
                 already have.
@@ -89,13 +83,6 @@ export function SignInScreen() {
 
         <hr className="rule my-8" />
 
-        {/*
-          A client-side `Link`, not a plain `<a>`: the dev proxy forwards any
-          `/oauth/*` request to the AppView (`vite.config.ts`, for the real
-          `/oauth/callback` etc.), which has no `/oauth/confirm` route and
-          would 404 a full navigation here. Router-level navigation never
-          touches the network, so it lands on the real screen regardless.
-        */}
         <Link
           to="/oauth/confirm"
           className="text-body font-medium text-blue underline decoration-[1.5px] underline-offset-[5px]"
@@ -105,7 +92,6 @@ export function SignInScreen() {
         <p className="mt-2 max-w-[48ch] text-caption text-ink-soft">
           For people who already have a Bluesky or other ATProto handle and want Free School on it.
         </p>
-      </div>
-    </div>
+    </FlowFrame>
   );
 }

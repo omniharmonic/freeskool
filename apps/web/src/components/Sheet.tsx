@@ -8,6 +8,7 @@ interface SheetProps {
   hideTitle?: boolean;
   children: ReactNode;
   footer?: ReactNode;
+  panelClassName?: string;
 }
 
 /**
@@ -16,7 +17,7 @@ interface SheetProps {
  * iOS has no `closedby` and no `CloseWatcher`, and background scroll-lock behind
  * a modal is not automatic — so dismissal and the lock are both manual here.
  */
-export function Sheet({ open, onClose, title, hideTitle, children, footer }: SheetProps) {
+export function Sheet({ open, onClose, title, hideTitle, children, footer, panelClassName = '' }: SheetProps) {
   const ref = useRef<HTMLDialogElement>(null);
 
   useEffect(() => {
@@ -52,16 +53,16 @@ export function Sheet({ open, onClose, title, hideTitle, children, footer }: She
         if (event.target === ref.current) onClose(); // tap outside the panel
       }}
     >
-      <div className="sheet-panel">
-        <div className="flex justify-center pt-2.5 pb-1">
+      <div className={`sheet-panel ${panelClassName}`}>
+        <div className="sheet-handle flex justify-center pt-2.5 pb-1">
           <div className="grabber" />
         </div>
-        <div className="flex items-start gap-3 px-5 pt-1">
+        <div className="sheet-heading flex items-start gap-3 px-5 pt-1">
           <h2 className={hideTitle ? 'sr-only' : 'flex-1 text-title'}>{title}</h2>
           <button
             type="button"
             onClick={onClose}
-            className="-mr-1 -mt-1 shrink-0 p-2 text-ink-faint"
+            className="sheet-close shrink-0 text-ink-soft"
             aria-label="Close"
           >
             <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
@@ -69,8 +70,8 @@ export function Sheet({ open, onClose, title, hideTitle, children, footer }: She
             </svg>
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-4">{children}</div>
-        {footer ? <div className="border-t-[1.5px] border-rule px-5 pt-3">{footer}</div> : null}
+        <div className="sheet-body min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 pb-4">{children}</div>
+        {footer ? <div className="sheet-footer border-t border-rule px-5 pt-3">{footer}</div> : null}
       </div>
     </dialog>
   );

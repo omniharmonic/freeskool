@@ -1,3 +1,4 @@
+import { FlowFrame } from '../components/FlowFrame';
 import { useState } from 'react';
 import { api } from '../lib/api';
 import { Button } from '../components/bits';
@@ -52,13 +53,7 @@ export function OAuthConfirmScreen() {
   };
 
   return (
-    <div className="app-scroll">
-      <div className="safe-top safe-x pb-10">
-        <div className="pt-10">
-          <h1 className="text-large leading-[1.02] font-extrabold">Use an existing AT Protocol account</h1>
-          <p className="mt-3 max-w-[48ch] text-body">{CONFIRM_COPY}</p>
-        </div>
-
+    <FlowFrame title="Use an existing AT Protocol account" description={<p className="page-note">{CONFIRM_COPY}</p>}>
         <label className="mt-8 block">
           <span className="text-caption text-ink-soft">Your handle, like name.bsky.social</span>
           <input
@@ -91,7 +86,6 @@ export function OAuthConfirmScreen() {
             Go back and create a new identity
           </Button>
         </div>
-      </div>
-    </div>
+    </FlowFrame>
   );
 }

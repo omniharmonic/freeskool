@@ -50,6 +50,18 @@ export async function signup(input: { email: string; inviterDid?: string; newsle
     throw new SignupError('that does not look like an email address', 400, 'InvalidEmail')
   }
 
+  // A returning member uses the same email door. Minting another PDS account
+  // fails on its unique email constraint and would lose the member's history.
+  const [existing] = await getDb().select().from(custodialAccount)
+    .where(eq(custodialAccount.email, email)).limit(1)
+  if (existing) {
+    if (!existing.isCustodial) {
+      throw new SignupError('You own this account now. Sign in with your existing AT Protocol account below.', 409, 'AccountOwned')
+    }
+    const { url } = await sendVerificationEmail(existing.did, existing.email)
+    return { did: existing.did, handle: existing.handle, ...(c.SMTP_URL ? {} : { verifyUrl: url }) }
+  }
+
   const code = await createInviteCode(1)
   const password = randomPassword(32)
 

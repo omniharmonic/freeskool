@@ -19,6 +19,8 @@ export type SchoolAction =
   | 'curate-listing'
   | 'remove-listing'
   | 'restore-listing'
+  | 'remove-resource'
+  | 'restore-resource'
   | 'set-role'
   | 'suspend-role'
   | 'write-policy'
@@ -54,7 +56,7 @@ export type SchoolAction =
  * so any steward changing the threshold (or anything else) is visible to the community.
  */
 export const DESTRUCTIVE_ACTIONS: ReadonlySet<SchoolAction> = new Set<SchoolAction>([
-  'remove-listing', 'suspend-role', 'void-attendance',
+  'remove-listing', 'remove-resource', 'suspend-role', 'void-attendance',
 ])
 
 export interface Approval { stewardDid: Did; at: string; sig?: string }

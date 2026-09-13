@@ -1,14 +1,18 @@
+import { KnowledgeShelf } from '../components/KnowledgeShelf';
 import { useEffect, useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { Link, Navigate, useParams } from '@tanstack/react-router';
+import { LoadingState, PageState } from '../components/PageState';
+import { ClassHero } from '../components/ClassArtwork';
 import { Screen } from '../components/Screen';
 import { Sheet } from '../components/Sheet';
 import { Button, SkillChip, Toggle } from '../components/bits';
 import { SessionGate } from '../components/SessionGate';
 import { useInstallFlow } from '../components/InstallNudge';
-import { api } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import { formatDayStamp, formatTime, formatTimeRange } from '../lib/dates';
 import { useEvent, useMyRsvp, useRsvpClearMutation, useRsvpMutation } from '../lib/queries';
-import type { EventDetail, EventLocation } from '../lib/types';
+import type { EventDetail, EventLocation, SkillLevelRef } from '../lib/types';
 
 /** Verbatim from the plan's global constraints — do not paraphrase. */
 const PERMANENCE_SENTENCE =
@@ -40,14 +44,18 @@ function formatAddress(location: EventLocation): string {
 
 export function EventScreen() {
   const { id } = useParams({ from: '/events/$id' });
-  const { data: event, isPending, isError } = useEvent(id);
+  const { data: event, isPending, isError, error, refetch } = useEvent(id);
 
   if (isPending) {
     return (
       <Screen title="Loading…" back>
-        <div className="safe-x" />
+        <div className="safe-x"><LoadingState label="Finding this class…" /></div>
       </Screen>
     );
+  }
+
+  if (isError && !(error instanceof ApiError && error.status === 404)) {
+    return <Screen title="Couldn’t load this class" back><div className="safe-x"><PageState title="Let’s try that again." error action={<Button onClick={() => void refetch()}>Try again</Button>}>Please check your connection and try again.</PageState></div></Screen>;
   }
 
   if (isError || !event) {
@@ -72,142 +80,57 @@ export function EventScreen() {
   const endsAt = event.endsAt ? new Date(event.endsAt) : start;
   const isPast = Boolean(endsAt && endsAt.getTime() < Date.now());
 
+  const cancelled = event.status?.endsWith('#cancelled');
   return (
-    <Screen title={event.name} back>
+    <Screen title={event.name} layout="detail" back>
       <div className="safe-x">
-        {/* Hero: the class's ink plate, stamped with when it happens. A fixed
-            ink rather than a per-class one — real events carry no colour, and
-            inventing one from the data would be decoration pretending to be
-            information. */}
-        <div
-          className="plate plate-blue halftone overflow-hidden px-4 pt-7 pb-4"
-          style={{ '--ht': 'var(--c-blue)' } as React.CSSProperties}
-        >
-          <p className="stamp text-[15px]" style={{ color: 'var(--c-paper-2)' }}>
-            {start ? formatDayStamp(start) : 'Date to be announced'}
-          </p>
-          <p className="stamp mt-1 text-[30px] leading-none" style={{ color: 'var(--c-paper-2)' }}>
-            {event.startsAt && event.endsAt
-              ? formatTimeRange(event.startsAt, event.endsAt)
-              : event.startsAt
-                ? formatTime(event.startsAt)
-                : 'Time to be announced'}
-          </p>
-        </div>
-
-        <div className="mt-4 flex flex-wrap items-center gap-2">
-          {event.origin === 'listed' ? <SkillChip ink="ink">Listed from another school</SkillChip> : null}
-          {event.venueNeeded ? <SkillChip ink="pink">Venue needed</SkillChip> : null}
-          {(event.tags ?? []).map((tag) => (
-            <SkillChip key={tag} ink="blue">
-              {tag}
-            </SkillChip>
-          ))}
-        </div>
-
-        {event.description ? <p className="mt-4 max-w-[62ch] text-body">{event.description}</p> : null}
-
-        <dl className="mt-5 space-y-2">
-          <div className="flex gap-3">
-            <dt className="w-[72px] shrink-0 text-caption text-ink-faint">Where</dt>
-            <dd className="text-body">
-              {event.locationRedacted ? (
-                <span className="text-ink-soft">
-                  {event.neighborhood
-                    ? `Somewhere in ${event.neighborhood}. `
-                    : "This class's host hasn't shared a neighbourhood yet. "}
-                  The exact address shows up here once you RSVP.
-                </span>
-              ) : locations.length > 0 ? (
-                locations.map((location, i) => <div key={i}>{formatAddress(location)}</div>)
-              ) : (
-                <span className="text-ink-soft">No address yet — check back, or offer one if you have a room.</span>
-              )}
-            </dd>
-          </div>
-        </dl>
-
-        {event.materials.length > 0 || event.suppliesNote ? (
-          <div className="mt-5">
-            <h2 className="mb-2 text-lede font-bold">What to bring</h2>
-            {event.materials.length > 0 ? (
-              <ul className="list-disc space-y-1 pl-5 text-body">
-                {event.materials.map((m, i) => (
-                  <li key={`${m}-${i}`}>{m}</li>
-                ))}
-              </ul>
-            ) : null}
-            {event.suppliesNote ? <p className="mt-2 text-body text-ink-soft">{event.suppliesNote}</p> : null}
-          </div>
-        ) : null}
-
-        <h2 className="mt-7 mb-2.5 text-lede font-bold">Who's coming</h2>
-        <div className="plate plate-green p-3.5">
-          <p className="text-body">
-            {event.rsvps.going} going
-            {event.rsvps.interested ? `, ${event.rsvps.interested} interested` : ''}
-          </p>
-        </div>
-
-        <SessionGate prompt="Sign in to RSVP, invite a friend, or turn on reminders.">
-          <EventActions event={event} />
-        </SessionGate>
-
-        {/* Task 7: an attendee may leave one anonymous ballot, once the class
-            has happened and the host checked them off (`viewerRelation` is
-            only ever 'attendee' once attendance is confirmed — see
-            `relation.ts`). The server is the real gate; this is just when to
-            show the door. */}
-        {event.viewerRelation === 'attendee' && isPast ? (
-          <div className="mt-6">
-            <Link
-              to="/events/$id/feedback"
-              params={{ id: event.uri }}
-              className="plate plate-press plate-pink display inline-flex w-full items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
-              style={{ background: 'var(--c-pink)', color: 'var(--c-on-pink)' }}
-            >
-              Leave feedback
-            </Link>
-          </div>
-        ) : null}
-
-        {/* Task 5: host-only management. `viewerRelation` already comes straight
-            from `GET /api/events/:id` (`projectEvent`), so there is nothing
-            further to gate on here. */}
-        {event.viewerRelation === 'host' ? (
-          <div className="mt-6 space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <Link
-                to="/events/$id/edit"
-                params={{ id: event.uri }}
-                className="plate plate-press plate-ink display inline-flex items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
-                style={{ background: 'var(--c-paper-2)', color: 'var(--c-ink)' }}
-              >
-                Edit this class
-              </Link>
-              <Link
-                to="/events/$id/attendance"
-                params={{ id: event.uri }}
-                className="plate plate-press plate-ink display inline-flex items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
-                style={{ background: 'var(--c-paper-2)', color: 'var(--c-ink)' }}
-              >
-                Check off attendance
-              </Link>
+        {cancelled ? <p className="event-notice" role="status">This class has been cancelled. Check the calendar for other ways to learn together.</p> : null}
+        <a href="#class-details" className="event-jump context-link">Time, place &amp; RSVP ↓</a>
+        <ClassHero cover={event.cover} name={event.name} />
+        <div className="event-layout">
+          <div className="event-story">
+            <div className="flex flex-wrap items-center gap-2 mb-5">
+              {event.origin === 'listed' ? <SkillChip ink="ink">Listed from another school</SkillChip> : null}
+              {event.venueNeeded ? <SkillChip ink="pink">Venue needed</SkillChip> : null}
+              {(event.tags ?? []).map(tag => <SkillChip key={tag} ink="blue">{tag}</SkillChip>)}
             </div>
-            {/* Task 7: the host's only view of feedback — a k-anonymous summary, never raw rows. */}
-            <Link
-              to="/events/$id/feedback-summary"
-              params={{ id: event.uri }}
-              className="plate plate-press plate-ink display inline-flex w-full items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
-              style={{ background: 'var(--c-paper-2)', color: 'var(--c-ink)' }}
-            >
-              See feedback summary
-            </Link>
+            <section className="event-section"><h2>About this class</h2>
+              <p className="event-description">{event.publicOverview?.description || 'The host hasn’t added a public overview yet.'}</p>
+            </section>
+            {event.publicOverview?.audience ? <section className="event-section"><h2>Who it’s for</h2><p className="event-description">{event.publicOverview.audience}</p></section> : null}
+            {event.publicOverview?.accessibility ? <section className="event-section"><h2>Access &amp; comfort</h2><p className="event-description">{event.publicOverview.accessibility}</p></section> : null}
+            {event.description && !event.locationRedacted ? <section className="event-section"><h2>For attendees</h2><p className="event-description">{event.description}</p></section> : null}
+            {event.skills.length ? <section className="event-section"><h2>What you’ll learn</h2><div className="class-skill-list">{event.skills.map((skill,i)=><ClassSkill key={`${skill.skill}-${i}`} skill={skill}/>)}</div></section> : null}
+            {event.materials.length > 0 || event.suppliesNote ? <section className="event-section"><h2>What to bring</h2>
+              {event.materials.length ? <ul className="list-disc space-y-2 pl-5 text-body">{event.materials.map((m,i) => <li key={`${m}-${i}`}>{m}</li>)}</ul> : null}
+              {event.suppliesNote ? <p className="mt-3 text-body text-ink-soft">{event.suppliesNote}</p> : null}
+            </section> : null}
+            <KnowledgeShelf event={event.uri} allowContribute={event.viewerRelation === 'host' && event.listed}/>{event.viewerRelation === 'host' && event.listed ? <a href={`/knowledge/new?${new URLSearchParams({event:event.uri, ...(event.skills[0] ? {skill:event.skills[0].skill} : {})})}`} className="context-link">Add class notes or a resource ↗</a> : null}
+            {event.viewerRelation === 'attendee' && isPast ? <div className="event-section"><h2>How did it go?</h2><p className="mb-4 text-body text-ink-soft">A few anonymous words help the host teach it better next time.</p><Link to="/events/$id/feedback" params={{id:event.uri}} className="primary-action">Leave feedback</Link></div> : null}
+            {event.viewerRelation === 'host' ? <section className="event-host-tools"><h2>Your class, your tools</h2><div className="grid grid-cols-2 gap-3">
+              <Link to="/events/$id/edit" params={{id:event.uri}} className="fs-button fs-button-quiet">Edit this class</Link>
+              <Link to="/events/$id/attendance" params={{id:event.uri}} className="fs-button fs-button-quiet">Check off attendance</Link>
+              <Link to="/events/$id/feedback-summary" params={{id:event.uri}} className="fs-button fs-button-quiet col-span-2">See feedback summary</Link>
+            </div></section> : null}
           </div>
-        ) : null}
+          <aside id="class-details" className="event-rail" aria-label="Class details and RSVP">
+            <p className="event-cost">Always free <span>·</span> {event.mode?.endsWith('#virtual') ? 'Online' : event.mode?.endsWith('#hybrid') ? 'In person + online' : 'In person'}</p>
+            <div className="event-date"><p>{start ? formatDayStamp(start) : 'Date to be announced'}</p><p>{event.startsAt && event.endsAt ? formatTimeRange(event.startsAt,event.endsAt) : event.startsAt ? formatTime(event.startsAt) : 'Time to be announced'}</p></div>
+            <dl className="event-location"><dt>Where</dt><dd>{event.mode?.endsWith('#virtual') ? <span>{event.locationRedacted ? 'Online. RSVP to see the meeting link.' : 'Online. Use the meeting link below; if none is listed, check back for details.'}</span> : event.venueNeeded ? <span>We’re looking for a space{event.neighborhood ? ` in ${event.neighborhood}` : ''}. No address yet — check back, or offer one if you have a room.</span> : event.locationRedacted ? <span>{event.neighborhood ? `Somewhere in ${event.neighborhood}. ` : "This class's host hasn't shared a neighbourhood yet. "}The exact address shows up here once you RSVP.</span> : locations.length ? locations.map((location,i) => <div key={i}>{formatAddress(location)}</div>) : <span>No address yet — check back, or offer one if you have a room.</span>}</dd></dl>
+            {!event.locationRedacted && event.uris?.length ? <div className="class-meeting-links">{event.uris.filter(link=>{try{return ['http:','https:'].includes(new URL(link.uri).protocol);}catch{return false;}}).map((link,i)=><a key={`${link.uri}-${i}`} href={link.uri} target="_blank" rel="noopener noreferrer" className="context-link">{link.name || 'Class link'} ↗</a>)}</div> : null}
+            <h2 className="mt-6 text-body font-bold">Who's coming</h2><p className="mt-2 text-body text-ink-soft">{event.rsvps.going} going{event.rsvps.interested ? `, ${event.rsvps.interested} interested` : ''}</p>
+            <div className="mt-5"><SessionGate prompt="Sign in to RSVP, invite a friend, or turn on reminders."><EventActions event={event} /></SessionGate></div>
+          </aside>
+        </div>
       </div>
     </Screen>
   );
+}
+
+function ClassSkill({skill}:{skill:SkillLevelRef}) {
+  const query=useQuery({queryKey:['skill',skill.skill],queryFn:()=>api.skills.get(skill.skill),enabled:Boolean(api.skills)});
+  const levels={1:'Introductory · no experience assumed',2:'Intermediate · some familiarity helpful',3:'Advanced · for practiced learners'};
+  return <div className="class-skill"><Link to="/skills/$skillId" params={{skillId:skill.skill}}>{query.data?.label??'Explore this skill'} ↗</Link><p>{levels[skill.level]}</p>{skill.prerequisites?<p className="class-prerequisites">Before you come: {skill.prerequisites}</p>:null}</div>;
 }
 
 function EventActions({ event }: { event: EventDetail }) {
@@ -218,6 +141,8 @@ function EventActions({ event }: { event: EventDetail }) {
 
   const [alsoPublicRecord, setAlsoPublicRecord] = useState(false);
   const [warningOpen, setWarningOpen] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [shared, setShared] = useState<string | null>(null);
   const [remindersOn, setRemindersOn] = useState(false);
   const [reminderNote, setReminderNote] = useState<string | null>(null);
@@ -233,36 +158,37 @@ function EventActions({ event }: { event: EventDetail }) {
   const currentStatus = myRsvpData?.rsvp?.status ?? null;
 
   const onConfirmPublic = (next: boolean) => {
+    setActionError(null);
     setAlsoPublicRecord(next);
     if (currentStatus === 'going' || currentStatus === 'interested') {
-      rsvpMutation.mutate({ eventId: event.uri, status: currentStatus, alsoPublicRecord: next });
+      rsvpMutation.mutate({ eventId: event.uri, status: currentStatus, alsoPublicRecord: next }, { onError: () => { setAlsoPublicRecord(myRsvpData?.rsvp?.alsoPublicRecord ?? false); setActionError('Could not update your RSVP visibility. Try again.'); } });
     }
   };
 
   const onTapStatus = (status: 'going' | 'interested') => {
+    setActionError(null);
     // Tapping "I'll be there" again while already waitlisted leaves the
     // waitlist — `currentStatus` is 'waitlisted', not 'going', but it is
     // still the same request the button represents.
     if (currentStatus === status || (status === 'going' && currentStatus === 'waitlisted')) {
-      clearMutation.mutate(event.uri);
+      clearMutation.mutate(event.uri, { onError: () => setActionError('Could not withdraw your RSVP. Try again.') });
       return;
     }
     rsvpMutation.mutate(
       { eventId: event.uri, status, alsoPublicRecord },
-      { onSuccess: () => afterRsvp() }, // the install nudge fires only on a REAL, successful RSVP
+      { onSuccess: () => afterRsvp(), onError: () => setActionError('Could not save your RSVP. Check your connection and try again.') }, // the install nudge fires only on a REAL, successful RSVP
     );
   };
 
   const onInvite = async () => {
-    const minted = await api.invites.mint({ eventUri: event.uri }).catch(() => null);
-    if (!minted) return;
-    if (navigator.share) {
-      navigator.share({ title: event.name, url: minted.url }).catch(() => undefined);
-    } else {
-      navigator.clipboard?.writeText(minted.url).then(
-        () => setShared('Invite link copied'),
-        () => undefined,
-      );
+    setActionError(null);
+    try {
+      const minted = await api.invites.mint({ eventUri: event.uri });
+      setInviteUrl(minted.url);
+      if (navigator.share) await navigator.share({ title: event.name, url: minted.url });
+      else if (navigator.clipboard) { await navigator.clipboard.writeText(minted.url); setShared('Invite link copied'); }
+    } catch (err) {
+      if (!(err instanceof Error && err.name === 'AbortError')) setActionError('Could not share the invite. You can copy the link below if it was created.');
     }
   };
 
@@ -295,15 +221,17 @@ function EventActions({ event }: { event: EventDetail }) {
       if (!json.endpoint || !json.keys?.p256dh || !json.keys.auth) return;
       await api.push.subscribe({ endpoint: json.endpoint, keys: { p256dh: json.keys.p256dh, auth: json.keys.auth } });
       setRemindersOn(true);
-    })();
+    })().catch(() => setReminderNote('Could not turn on reminders. Check your device settings and try again.'));
   };
 
   return (
-    <div className="mt-8 space-y-3">
+    <div className="event-actions space-y-3">
+      {actionError ? <p role="alert">{actionError}</p> : null}
       <div className="grid grid-cols-2 gap-3">
         <Button
           wide
           onClick={() => onTapStatus('going')}
+          disabled={rsvpMutation.isPending || clearMutation.isPending || Boolean(event.status?.endsWith('#cancelled'))}
           ink={currentStatus === 'going' ? 'green' : currentStatus === 'waitlisted' ? 'amber' : 'pink'}
         >
           {currentStatus === 'going'
@@ -316,6 +244,7 @@ function EventActions({ event }: { event: EventDetail }) {
           wide
           variant="quiet"
           onClick={() => onTapStatus('interested')}
+          disabled={rsvpMutation.isPending || clearMutation.isPending || Boolean(event.status?.endsWith('#cancelled'))}
           ink={currentStatus === 'interested' ? 'green' : 'blue'}
         >
           {currentStatus === 'interested' ? "You're interested" : 'Interested'}
@@ -360,7 +289,8 @@ function EventActions({ event }: { event: EventDetail }) {
           Bring a friend
         </Button>
       </div>
-      {shared ? <p className="text-caption text-ink-soft">{shared}</p> : null}
+      {shared ? <p role="status" className="text-caption text-ink-soft">{shared}</p> : null}
+      {inviteUrl ? <label className="block text-caption text-ink-soft">Invite link<input readOnly value={inviteUrl} className="mt-2 w-full px-3 py-2" onFocus={e => e.currentTarget.select()} /></label> : null}
 
       <Sheet open={warningOpen} onClose={() => setWarningOpen(false)} title="Make this RSVP public?">
         <p className="text-body">{PERMANENCE_SENTENCE}</p>

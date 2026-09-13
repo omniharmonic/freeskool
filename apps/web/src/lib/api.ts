@@ -19,6 +19,7 @@
  * `/me/newsletter`).
  */
 import type {
+  KnowledgeResource, PublicProfile,
   AdminPolicyInput,
   AdminPolicyResponse,
   AdminPolicyWriteResult,
@@ -154,6 +155,16 @@ const put = <T>(path: string, body?: unknown) => request<T>(path, { method: 'PUT
 const del = <T>(path: string, query?: Record<string, QueryValue>) => request<T>(path, { method: 'DELETE', query });
 
 export const api = {
+  knowledge: {
+    mine: () => get<{resources: KnowledgeResource[]}>('/api/my-resources'),
+    list: (filters: {skill?:string;author?:string;event?:string} = {}) => get<{resources:KnowledgeResource[]}>('/api/resources',filters),
+    get: (id:string) => request<KnowledgeResource>(`/api/resources/${encodeURIComponent(id)}`),
+    create: (body: {title:string;description?:string;skills:string[];uri?:string;license?:string;event?:{uri:string;cid:string}}) => request<{id:string}>('/api/resources',{method:'POST',body}),
+    update: (id:string,body: {title:string;description?:string;skills:string[];uri?:string;license?:string;event?:{uri:string;cid:string}}) => request<{id:string}>(`/api/resources/${encodeURIComponent(id)}`,{method:'PUT',body}),
+    remove: (id:string) => request<{ok:true}>(`/api/resources/${encodeURIComponent(id)}`,{method:'DELETE'}),
+    profile: (did:string) => request<PublicProfile>(`/api/profiles/${encodeURIComponent(did)}`),
+    practitioners: (skill:string) => request<{profiles:Array<{did:string;displayName:string;bio:string;level:string}>}>(`/api/practitioners?${new URLSearchParams({skill})}`),
+  },
   auth: {
     signup: (body: { email: string; inviterDid?: string }) => post<SignupResult>('/api/auth/signup', body),
     verify: (token: string) =>

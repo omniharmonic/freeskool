@@ -1,3 +1,4 @@
+import { LoadingState, PageState } from '../components/PageState';
 import { useParams } from '@tanstack/react-router';
 import { Screen } from '../components/Screen';
 import { useEvent, useFeedbackSummary } from '../lib/queries';
@@ -44,12 +45,12 @@ function AspectDots({ mean }: { mean: number }) {
 export function FeedbackSummaryScreen() {
   const { id } = useParams({ from: '/events/$id/feedback-summary' });
   const { data: event, isPending: eventPending } = useEvent(id);
-  const { data: summary, isPending: summaryPending } = useFeedbackSummary(id);
+  const { data: summary, isPending: summaryPending, isError: summaryError, refetch } = useFeedbackSummary(id);
 
   if (eventPending || summaryPending) {
     return (
       <Screen title="Loading…" back>
-        <div className="safe-x" />
+        <div className="safe-x"><LoadingState label="Gathering the class summary…" /></div>
       </Screen>
     );
   }
@@ -68,18 +69,20 @@ export function FeedbackSummaryScreen() {
 
   return (
     <Screen
+      layout="form"
       title={event.name}
       standfirst="Counts and presence only — never who said what, or a single row of ratings."
       back
     >
       <div className="safe-x space-y-5">
-        <div className="plate p-4">
+        {summaryError ? <PageState title="The feedback summary couldn’t load." error action={<button className="primary-action" onClick={() => void refetch()}>Try again</button>} /> : null}
+        {!summaryError ? <div className="plate p-4">
           <p className="text-body">
             {summary?.count ?? 0} {(summary?.count ?? 0) === 1 ? 'person has' : 'people have'} left feedback.
           </p>
-        </div>
+        </div> : null}
 
-        {summary?.released ? (
+        {summaryError ? null : summary?.released ? (
           <>
             <div className="plate plate-green p-4">
               <p className="text-body">
@@ -124,7 +127,7 @@ export function FeedbackSummaryScreen() {
             )}
           </>
         ) : (
-          <p className="text-caption text-ink-faint">The summary stays sealed until enough people respond.</p>
+          <PageState title="A little more feedback is needed.">The summary stays sealed until enough people respond.</PageState>
         )}
       </div>
     </Screen>

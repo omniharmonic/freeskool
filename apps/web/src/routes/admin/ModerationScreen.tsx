@@ -1,3 +1,4 @@
+import { LoadingState, PageState } from '../../components/PageState';
 import { useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { AdminLayout } from './AdminLayout';
@@ -11,6 +12,8 @@ const ACTION_LABEL: Record<ModerationAction, string> = {
   'curate-listing': 'Curate a listing',
   'remove-listing': 'Remove a listing',
   'restore-listing': 'Restore a listing',
+  'remove-resource': 'Hide a knowledge resource',
+  'restore-resource': 'Restore a knowledge resource',
   'set-role': "Set someone's role",
   'suspend-role': "Suspend someone's role",
   'close-request': 'Close a request',
@@ -37,14 +40,14 @@ const MIN_REASON_LENGTH = 10;
  */
 export function ModerationScreen() {
   const { data: me } = useMe();
-  const { data, isPending } = useModerationQueue();
+  const { data, isPending, isError, refetch } = useModerationQueue();
   const queryClient = useQueryClient();
   const proposeMutation = useProposeModerationMutation();
   const approveMutation = useApproveModerationMutation();
   const executeMutation = useExecuteModerationMutation();
 
-  const [action, setAction] = useState<ModerationAction>('curate-listing');
-  const [subjectUri, setSubjectUri] = useState('');
+  const [action, setAction] = useState<ModerationAction>(()=>{const selected=new URLSearchParams(window.location.search).get('action');return ACTIONS.includes(selected as ModerationAction)?selected as ModerationAction:'curate-listing';});
+  const [subjectUri, setSubjectUri] = useState(()=>new URLSearchParams(window.location.search).get('subject')??'');
   const [subjectDid, setSubjectDid] = useState('');
   const [reason, setReason] = useState('');
   const [proposeError, setProposeError] = useState<string | null>(null);
@@ -152,7 +155,7 @@ export function ModerationScreen() {
               onChange={(e) => setReason(e.target.value)}
             />
           </label>
-          {proposeError ? <p className="text-body text-pink">{proposeError}</p> : null}
+          {proposeError ? <p role="alert" className="text-body text-pink">{proposeError}</p> : null}
           <Button wide onClick={() => void onPropose()} disabled={!canPropose || proposeMutation.isPending}>
             Open item
           </Button>
@@ -163,8 +166,9 @@ export function ModerationScreen() {
         <h2 id="queue-heading" className="mb-2.5 text-lede font-bold">
           Queue
         </h2>
-        {isPending ? <p className="text-body text-ink-soft">Loading…</p> : null}
-        {!isPending && items.length === 0 ? <p className="text-body text-ink-soft">Nothing open right now.</p> : null}
+        {isPending ? <LoadingState label="Loading the moderation queue…" /> : null}
+          {isError ? <PageState title="The moderation queue couldn’t load." error action={<button className="primary-action" onClick={() => void refetch()}>Try again</button>} /> : null}
+        {!isPending && !isError && items.length === 0 ? <p className="text-body text-ink-soft">Nothing open right now.</p> : null}
         <ul className="space-y-3">
           {items.map((item) => (
             <QueueItemCard
@@ -248,7 +252,7 @@ function QueueItemCard({
         </div>
       ) : null}
       {!met && !resolved ? <p className="text-caption text-ink-faint">Needs {requiredApprovals - approvalCount} more approval(s) before it can run.</p> : null}
-      {error ? <p className="text-body text-pink">{error}</p> : null}
+      {error ? <p role="alert" className="text-body text-pink">{error}</p> : null}
       {result ? <p className="text-body text-green">{result}</p> : null}
     </li>
   );

@@ -1,6 +1,11 @@
+import { useQueryClient } from '@tanstack/react-query';
+import { LoadingState, PageState } from '../components/PageState';
+import { ImagePicker } from '../components/ImagePicker';
+import type { ImageInput } from '../lib/types';
 import { useEffect, useState } from 'react';
-import { useNavigate } from '@tanstack/react-router';
+import { Link, useNavigate } from '@tanstack/react-router';
 import { applyPrefs, readPrefs, writePrefs, type ThemeChoice } from '../lib/prefs';
+import { SessionGate } from '../components/SessionGate';
 import { Screen } from '../components/Screen';
 import { Button, SkillChip, Toggle } from '../components/bits';
 import { Sheet } from '../components/Sheet';
@@ -89,15 +94,21 @@ function flattenSkills(nodes: SkillNode[], trail: string[] = []): Array<{ uri: s
 }
 
 export function MeScreen() {
+  return <SessionGate screen prompt="Sign in to keep track of your skills, classes, and preferences."><MeContent /></SessionGate>;
+}
+
+function MeContent() {
   const [prefs, setPrefs] = useState(readPrefs);
   const { surface, permission, remindersOn, turnOnReminders, openInstallSheet } = useInstallFlow();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const [signoutError, setSignoutError] = useState('');
 
   const { data: me } = useMe();
-  const { data: meProfile } = useMeProfile();
+  const { data: meProfile, isPending: profilePending, isError: profileLoadError, refetch: refetchProfile } = useMeProfile();
   const { data: badges } = useMeBadges();
-  const { data: visibilityDefaults } = useVisibilityDefaults();
-  const { data: claimsData } = useMyClaims();
+  const { data: visibilityDefaults, isPending: visibilityPending, isError: visibilityError, refetch: refetchVisibility } = useVisibilityDefaults();
+  const { data: claimsData, isPending: claimsPending, isError: claimsLoadError, refetch: refetchClaims } = useMyClaims();
   const { data: skillTree } = useSkillTree();
   const flatSkills = flattenSkills(skillTree?.skills ?? []);
 
@@ -115,12 +126,15 @@ export function MeScreen() {
   const [editingProfile, setEditingProfile] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [bio, setBio] = useState('');
+  const [publicListing, setPublicListing] = useState(false);
+  const [avatar, setAvatar] = useState<ImageInput | null | undefined>();
   const [profileError, setProfileError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!meProfile || editingProfile) return;
     setDisplayName(meProfile.profile.displayName ?? '');
     setBio(meProfile.profile.bio ?? '');
+    setPublicListing(meProfile.profile.publicListing ?? false);
   }, [meProfile, editingProfile]);
 
   // `displayName`/`bio` also carry `maxLength` on their inputs below, matching
@@ -131,8 +145,10 @@ export function MeScreen() {
   const saveProfile = async () => {
     setProfileError(null);
     try {
-      await updateProfileMutation.mutateAsync({ displayName: displayName.trim(), bio: bio.trim() });
+      await updateProfileMutation.mutateAsync({ displayName: displayName.trim(),
+        ...(avatar !== undefined ? { avatar } : {}), bio: bio.trim(), publicListing });
       setEditingProfile(false);
+      setAvatar(undefined);
     } catch (err) {
       setProfileError(err instanceof ApiError ? err.message : 'Could not save your profile. Try again.');
     }
@@ -222,26 +238,27 @@ export function MeScreen() {
           ? 'Turned off in iOS Settings'
           : 'Not asked yet';
 
+  if (profilePending || claimsPending || visibilityPending) return <Screen title="Me" layout="account"><div className="safe-x"><LoadingState label="Opening your notebook…" /></div></Screen>;
+  if (profileLoadError || claimsLoadError || visibilityError) return <Screen title="Me" layout="account"><div className="safe-x"><PageState title="Your notebook couldn’t load." error action={<Button onClick={() => { void refetchProfile(); void refetchClaims(); void refetchVisibility(); }}>Try again</Button>}>Your saved profile and skills are still there. Please try again before making changes.</PageState></div></Screen>;
+
   return (
-    <Screen title="Me" standfirst={meProfile?.profile.bio}>
-      <div className="safe-x">
-        <div className="plate plate-pink flex items-center gap-3.5 p-4">
-          <div
-            className="halftone halftone-dense grid h-14 w-14 shrink-0 place-items-center"
-            style={{ '--ht': 'var(--c-pink)' } as React.CSSProperties}
-          >
-            <span className="stamp text-[18px]" style={{ color: 'var(--c-paper-2)' }}>
-              {(meProfile?.profile.displayName ?? me?.handle ?? '??').slice(0, 2).toUpperCase()}
-            </span>
+    <Screen title="Me" layout="account" standfirst="Your own corner of the school. What you’re learning, what you can share, and how you want to stay connected.">
+      <nav className="safe-x editor-nav" aria-label="Account sections"><a href="#my-profile">Profile</a><a href="#my-skills">Skills</a><a href="#my-badges">Badges</a><a href="#my-settings">Settings</a></nav>
+      <div className="safe-x account-layout"><div className="account-main">
+        <div className="profile-card" id="my-profile">
+          <div className="profile-monogram">
+            {meProfile?.profile.avatarUrl ? <img src={meProfile.profile.avatarUrl} alt="Your profile image" /> : <span>{(meProfile?.profile.displayName ?? me?.handle ?? 'You').slice(0,2).toUpperCase()}</span>}
           </div>
           <div className="min-w-0 flex-1">
             <p className="display text-lede font-bold">{meProfile?.profile.displayName || me?.handle || 'You'}</p>
             {me?.handle ? <p className="text-caption text-ink-soft">{me.handle}</p> : null}
+            {meProfile?.profile.bio ? <p className="mt-3 text-body text-ink-soft">{meProfile.profile.bio}</p> : null}
           </div>
           <button
             type="button"
             onClick={() => {
               setProfileError(null);
+              setAvatar(undefined);
               setEditingProfile((v) => !v);
             }}
             className="shrink-0 text-caption font-bold text-blue"
@@ -252,6 +269,7 @@ export function MeScreen() {
 
         {editingProfile ? (
           <div className="plate mt-3 space-y-3 p-3.5">
+            <ImagePicker avatar value={avatar} existingUrl={meProfile?.profile.avatarUrl} onChange={setAvatar} />
             <label className="block">
               <span className="text-caption text-ink-soft">Display name</span>
               <input
@@ -270,25 +288,28 @@ export function MeScreen() {
                 onChange={(e) => setBio(e.target.value)}
               />
             </label>
+            <label className="public-profile-choice"><input type="checkbox" aria-describedby="profile-sharing-details" checked={publicListing} disabled={oauthLocked && !publicListing} onChange={e=>setPublicListing(e.target.checked)}/><span><strong>Share my profile publicly</strong></span></label><p id="profile-sharing-details" className="text-caption text-ink-soft">Share my name, bio, photo, public skill claims, and contributed resources. Show me on related skill pages. Attendance and school-only skills stay private.</p>
             {profileError ? <p className="text-body text-pink">{profileError}</p> : null}
-            <Button wide onClick={() => void saveProfile()}>
+            <Button wide disabled={updateProfileMutation.isPending} onClick={() => void saveProfile()}>
               Save
             </Button>
           </div>
         ) : null}
 
-        <div className="mt-4 grid grid-cols-2 gap-3">
-          <div className="plate plate-blue px-3.5 py-3">
+        <Link to="/knowledge" search={{mine:true}} className="context-link">My knowledge contributions ↗</Link>
+        {meProfile?.profile.publicListing && me ? <Link to="/people/$did" params={{did:me.did}} className="context-link">View your public notebook ↗</Link> : null}
+        <div className="activity-counts">
+          <div className="activity-count">
             <p className="stamp text-[26px] leading-none">{badges?.counts.attended ?? 0}</p>
             <p className="mt-1 text-caption text-ink-soft">classes attended</p>
           </div>
-          <div className="plate plate-green px-3.5 py-3">
+          <div className="activity-count">
             <p className="stamp text-[26px] leading-none">{badges?.counts.hosted ?? 0}</p>
             <p className="mt-1 text-caption text-ink-soft">classes taught</p>
           </div>
         </div>
 
-        <h2 className="mt-7 mb-2.5 text-lede font-bold">What you say you can do</h2>
+        <h2 id="my-skills" className="mt-7 mb-2.5 text-lede font-bold">What you say you can do</h2>
         {oauthLocked ? (
           <p className="mb-2.5 border-l-[3px] border-amber pl-3 text-caption text-ink-soft">
             Signed in with an existing account: claims here stay school-only and can't be made public in v1.
@@ -444,7 +465,7 @@ export function MeScreen() {
           </div>
 
           <Button variant="quiet" ink="ink" onClick={addClaim} disabled={!draftSkillUri}>
-            Add to the list below
+            Add this skill
           </Button>
         </div>
 
@@ -460,9 +481,9 @@ export function MeScreen() {
           </Button>
         </div>
 
-        <h2 className="mt-7 mb-2.5 text-lede font-bold">Badges</h2>
+        <h2 id="my-badges" className="mt-7 mb-2.5 text-lede font-bold">Badges</h2>
         {badges && badges.badges.length > 0 ? (
-          <ul className="space-y-1.5">
+          <ul className="badge-list">
             {badges.badges.map((badge) => (
               <li key={badge} className="text-body">
                 {badge}
@@ -476,7 +497,7 @@ export function MeScreen() {
           Badges are labels for things you did. They are not points and nothing ranks them.
         </p>
 
-        <h2 className="mt-8 mb-2.5 text-lede font-bold">Settings</h2>
+        </div><aside className="account-side" aria-label="Account preferences"><h2 id="my-settings" className="mb-4 text-lede font-bold">Settings</h2>
         <div className="plate divide-y-[1.5px] divide-rule">
           <div className="p-3.5">
             <p className="text-body">Appearance</p>
@@ -551,22 +572,30 @@ export function MeScreen() {
           </div>
         </div>
 
+        {me && me.role >= 40 ? <a href="/admin" className="context-link mt-5">Open steward tools</a> : null}
         {me?.isCustodial ? <TakeOwnershipSection /> : null}
 
         <div className="mt-6 mb-2">
+          {signoutError ? <p role="alert" className="mb-3 text-caption">{signoutError}</p> : null}
           <Button
             wide
             variant="quiet"
             ink="ink"
             onClick={() => {
-              void api.auth.logout().catch(() => undefined);
-              void navigate({ to: '/signin' });
+              void (async () => {
+                try {
+                  await api.auth.logout();
+                  await queryClient.cancelQueries();
+                  queryClient.clear();
+                  void navigate({ to: '/signin' });
+                } catch { setSignoutError('Could not sign out. Check your connection and try again.'); }
+              })();
             }}
           >
             Sign out
           </Button>
         </div>
-      </div>
+      </aside></div>
 
       <Sheet
         open={tierBConfirmOpen}
@@ -630,7 +659,7 @@ function TakeOwnershipSection() {
   return (
     <>
       <h2 className="mt-8 mb-2.5 text-lede font-bold">Take ownership of this account</h2>
-      <div className="plate p-3.5">
+      <div className="plate ownership-panel p-3.5">
         <p className="text-body">
           Right now this app holds the password to your account so it can publish on your behalf. Taking ownership
           gives you that password directly — after that, the app can no longer act for you, and it never keeps a

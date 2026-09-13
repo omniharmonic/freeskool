@@ -78,14 +78,14 @@ export function FeedbackScreen() {
   };
 
   return (
-    <Screen title="Feedback" standfirst={ANONYMITY_SENTENCE} back>
-      <div className="safe-x space-y-5">
+    <Screen layout="form" title="Feedback" standfirst={ANONYMITY_SENTENCE} back>
+      <div className="safe-x"><div className="feedback-form space-y-5">
         <SessionGate prompt="Sign in to leave feedback.">
           {sent ? (
-            <div className="plate plate-green p-4">
+            <div role="status" className="feedback-success">
               <p className="text-body">
                 Thanks — this helps {event?.name ?? 'the host'} teach it better next time.
-              </p>
+              </p><Button href={`/events/${encodeURIComponent(id)}`} variant="quiet">Back to the class</Button>
             </div>
           ) : alreadyVoted ? (
             <div className="plate plate-amber p-4">
@@ -133,6 +133,7 @@ export function FeedbackScreen() {
                 <span className="text-caption text-ink-soft">Anything else? (optional)</span>
                 <textarea
                   className="mt-1.5 min-h-[88px] w-full resize-none border-[1.5px] border-ink bg-sheet px-3 py-2.5 text-body outline-none focus-visible:outline-2"
+                  maxLength={4000}
                   value={note}
                   onChange={(e) => setNote(e.target.value)}
                   placeholder="Whatever would help next time."
@@ -151,7 +152,7 @@ export function FeedbackScreen() {
             </>
           )}
         </SessionGate>
-      </div>
+      </div></div>
     </Screen>
   );
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, within, fireEvent } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 
@@ -87,4 +87,16 @@ describe('SkillsScreen', () => {
     expect(within(tierALink).queryByText('Sensitive')).not.toBeInTheDocument();
     expect(within(tierBLink).getByText('Sensitive')).toBeInTheDocument();
   });
+  it('finds nested skills and shows a useful no-match state', async () => {
+    vi.mocked(api.skills.tree).mockReset().mockResolvedValue(skillTree);
+    renderScreen();
+    await screen.findByRole('link', { name: 'Basic first aid' });
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search skills' }), { target: { value: 'first aid' } });
+    expect(screen.getByRole('link', { name: 'Basic first aid' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /De-escalation/ })).not.toBeInTheDocument();
+    expect(screen.getByText('1 matching skills')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Search skills' }), { target: { value: 'nomatchhere' } });
+    expect(screen.getByText('No skills match that search.')).toBeInTheDocument();
+  });
+
 });

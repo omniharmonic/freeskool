@@ -1,29 +1,35 @@
+import { KnowledgeShelf, PractitionerShelf } from '../components/KnowledgeShelf';
+import { ApiError } from '../lib/api';
 import { Link, useParams } from '@tanstack/react-router';
 import { Screen } from '../components/Screen';
 import { Button, SkillChip, ThresholdRule } from '../components/bits';
 import { useEvent, useRequests, useSkill } from '../lib/queries';
-import { formatTime, formatTimeRange } from '../lib/dates';
+import { ContentCard } from '../components/ContentCard';
+import { FieldGlyph } from '../components/FieldGlyph';
+import { LoadingState, PageState } from '../components/PageState';
 
 /**
  * TIER: `GET /api/skills/:id` now carries `tier` (Task 12) — a "Sensitive"
  * chip renders under the title for a Tier B skill (`apps/appview/src/lib/
  * skill-tiers.ts`).
  *
- * NOT SHOWN: a "resources" section (zines, tool-library links) — there is
- * no backend route for skill resources; the mock-era section read from
- * `lib/mock.ts` data that nothing real replaces yet.
+ * Resources and opt-in practitioners share the same stable skill URI.
  */
 export function SkillScreen() {
   const { skillId } = useParams({ from: '/skills/$skillId' });
-  const { data: skill, isPending, isError } = useSkill(skillId);
+  const { data: skill, isPending, isError, error, refetch } = useSkill(skillId);
   const { data: requestsData } = useRequests();
 
   if (isPending) {
     return (
       <Screen title="Loading…" back>
-        <div className="safe-x" />
+        <div className="safe-x"><LoadingState label="Finding this skill…" /></div>
       </Screen>
     );
+  }
+
+  if (isError && !(error instanceof ApiError && error.status === 404)) {
+    return <Screen title="Couldn’t load this skill" back><div className="safe-x"><PageState title="Let’s try that again." error action={<Button onClick={() => void refetch()}>Try again</Button>}>Please check your connection and try again.</PageState></div></Screen>;
   }
 
   if (isError || !skill) {
@@ -46,14 +52,17 @@ export function SkillScreen() {
   );
 
   return (
-    <Screen title={skill.label} back>
+    <Screen title={skill.label} layout="library" back>
       <div className="safe-x">
+        <nav className="breadcrumbs" aria-label="Skill ancestry"><Link to="/skills">Skills</Link>{skill.ancestors?.map(a => <span key={a.uri}> / <Link to="/skills/$skillId" params={{skillId:a.uri}}>{a.label}</Link></span>)}</nav>
+        <div className="skill-detail-intro"><FieldGlyph seed={skill.id} /><div>
         {skill.tier === 'B' ? (
           <div className="mb-3">
             <SkillChip ink="pink">Sensitive — kept off public listings by default</SkillChip>
           </div>
         ) : null}
-        {skill.description ? <p className="max-w-[60ch] text-body">{skill.description}</p> : null}
+        {skill.description ? <p className="max-w-[60ch] text-body">{skill.description}</p> : <p className="text-body">Learn it together. Pass it on.</p>}</div></div>
+        {skill.children?.length ? <section className="mb-7"><h2 className="section-heading">Explore this skill</h2><div className="skill-links">{skill.children.map(child => <Link key={child.uri} to="/skills/$skillId" params={{skillId:child.uri}} className="skill-link">{child.label}</Link>)}</div></section> : null}
 
         {skill.taughtIn.length === 0 ? (
           <div className="mt-5">
@@ -74,8 +83,8 @@ export function SkillScreen() {
 
       {skill.taughtIn.length > 0 ? (
         <>
-          <h2 className="safe-x mt-7 mb-2.5 text-lede font-bold">Coming up</h2>
-          <div className="safe-x space-y-4">
+          <h2 className="safe-x mt-7 mb-2.5 text-lede font-bold">Classes sharing this skill</h2>
+          <div className="safe-x content-grid">
             {skill.taughtIn
               .filter((t): t is { event: string; level: number } => Boolean(t.event))
               .map((t) => (
@@ -102,6 +111,7 @@ export function SkillScreen() {
           </div>
         </>
       ) : null}
+      <div className="safe-x"><KnowledgeShelf skill={skill.uri}/><PractitionerShelf skill={skill.uri}/></div>
     </Screen>
   );
 }
@@ -113,23 +123,5 @@ function TaughtInEventCard({ eventUri }: { eventUri: string }) {
   const { data: event, isPending } = useEvent(eventUri);
   if (isPending || !event) return null;
 
-  return (
-    <Link to="/events/$id" params={{ id: event.uri }} className="plate plate-press plate-blue block overflow-hidden">
-      <div className="halftone px-3.5 pt-3 pb-2" style={{ '--ht': 'var(--c-blue)' } as React.CSSProperties}>
-        <span className="stamp text-[18px] leading-none" style={{ color: 'var(--c-paper-2)' }}>
-          {event.startsAt && event.endsAt
-            ? formatTimeRange(event.startsAt, event.endsAt)
-            : event.startsAt
-              ? formatTime(event.startsAt)
-              : 'Time TBD'}
-        </span>
-      </div>
-      <div className="px-3.5 pt-2.5 pb-3.5">
-        <h3 className="text-lede leading-snug">{event.name}</h3>
-        <p className="mt-1 text-caption text-ink-soft">
-          {event.venueNeeded ? 'Venue needed' : event.neighborhood ?? 'Location shared after you RSVP'}
-        </p>
-      </div>
-    </Link>
-  );
+  return <ContentCard event={event} />;
 }

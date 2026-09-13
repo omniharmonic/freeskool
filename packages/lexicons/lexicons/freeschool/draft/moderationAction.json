@@ -29,6 +29,8 @@
             "knownValues": [
               "remove-listing",
               "restore-listing",
+              "remove-resource",
+              "restore-resource",
               "suspend-role",
               "restore-role",
               "require-approval",

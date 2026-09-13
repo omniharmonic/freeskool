@@ -1,0 +1,26 @@
+{
+  "generator": "Built-in image_gen",
+  "purpose": "AI-generated artwork for local design-test events, not actual gatherings",
+  "assets": [
+    {
+      "name": "mushroom-flyer",
+      "prompt": "Use case: ads-marketing. Create a portrait 2:3 raster artwork for a fictional test event on a community skill-sharing website. A striking Berlin DIY risograph workshop flyer: giant sculptural oyster mushrooms, black botanical ink linework, acid yellow and deep forest green, paper grain, eccentric but beautifully legible typography. Exact main text 'GROW TOGETHER', smaller text 'Mushroom growing workshop', small footer 'FREE SKILLS / OPEN TO ALL'. Composition fills the poster, keep all words inside edges with modest margins. Buckminster Fuller drafting diagram hints, underground ecology zine warmth. Flat scan of poster, no mockup, no frame, no watermarks. This is the class image itself, not website UI.",
+      "source": "/Users/benjaminlife/.codex/generated_images/01a09b41-866c-77b1-87aa-c9c834ff4f5b/exec-f5d6811c-d492-4f65-8ef0-a1f02ffa68b7.png"
+    },
+    {
+      "name": "repair-photo",
+      "prompt": "Use case: photorealistic-natural. Create a wide 3:2 candid editorial photograph for a fictional bicycle repair skill-sharing event. Diverse adults' hands working together to repair a vivid red bicycle at a neighborhood courtyard workbench, beautifully messy real tools, blue workwear, sunlit plants, late afternoon Berlin courtyard light. Close lively human composition with wheel and hands clearly visible. Natural texture and warmth, documentary analog film feel, no text, no logos, no website UI.",
+      "source": "/Users/benjaminlife/.codex/generated_images/01a09b41-866c-77b1-87aa-c9c834ff4f5b/exec-74403fe5-31ff-4e3a-8af2-2bad1a37a64d.png"
+    },
+    {
+      "name": "botanical-square",
+      "prompt": "Use case: illustration-story. Create a square hand-painted gouache and colored-pencil illustration for a fictional seed-sharing class image. Expressive oversized nasturtium leaves, bright vermilion flowers, cobalt blue seed packets with no words, small hands tending a seedling at the bottom, warm cream paper ground. Beautiful contemporary independent zine illustration, bold flat shapes with imperfect tactile edges. Content-rich full frame but no border, no text, no logo, no UI.",
+      "source": "/Users/benjaminlife/.codex/generated_images/01a09b41-866c-77b1-87aa-c9c834ff4f5b/exec-b3347d69-a31a-432c-8a11-27b419f335db.png"
+    },
+    {
+      "name": "rough-phone-photo",
+      "prompt": "Use case: photorealistic-natural. Create a wide 16:9 intentionally low-quality amateur phone snapshot to test a community class website's image layout. A kitchen table holding jars of red cabbage fermentation and a hand-written scrap of paper saying 'FERMENT!', a person's hand at frame edge. Poor indoor evening light, visible coarse sensor noise, slightly out of focus, washed-out highlights, cheap old phone camera compression appearance. Warm charming everyday scene, authentic imperfect composition, not editorial photography, no website UI, no watermark.",
+      "source": "/Users/benjaminlife/.codex/generated_images/01a09b41-866c-77b1-87aa-c9c834ff4f5b/exec-ceaba5c9-7b3a-4435-9364-6b58bbd7e3a6.png"
+    }
+  ]
+}

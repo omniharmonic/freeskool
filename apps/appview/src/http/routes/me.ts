@@ -34,6 +34,7 @@
  *     body before a public claim for it is written, for any session. 400
  *     `TierBConfirmRequired`.
  */
+import { normalizeImage, type StoredImage } from '../../lib/images.js'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { and, eq } from 'drizzle-orm'
@@ -62,6 +63,8 @@ me.use('*', requireViewer)
 export const PROFILE_KEY = (did: string) => `profile:${did}`
 
 export interface Profile {
+  publicListing?: boolean
+  avatar?: StoredImage
   displayName?: string
   bio?: string
 }
@@ -88,7 +91,7 @@ me.get('/', async (c) => {
     evidence,
     thresholds,
     rsvps: rsvps.map((r) => ({ eventUri: r.eventUri, status: r.status, alsoPublicRecord: r.alsoPublicRecord })),
-    profile,
+    profile: visibleProfile(profile),
   })
 })
 
@@ -99,6 +102,8 @@ me.get('/', async (c) => {
  */
 const profileBody = z
   .object({
+    publicListing: z.boolean().optional(),
+    avatar: z.object({ data: z.string().max(11_200_000), alt: z.string().max(300) }).nullable().optional(),
     displayName: z.string().trim().max(120).optional(),
     bio: z.string().trim().max(2000).optional(),
   })
@@ -108,9 +113,12 @@ me.put('/', async (c) => {
   const parsed = profileBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400)
   const viewer = c.var.viewer!
+  if (parsed.data.publicListing && viewer.kind === 'oauth') return c.json({error:'PublicTogglesLocked',message:'Public profile publishing is not enabled for this sign-in method yet.'},403)
   const existing = await loadProfile(viewer.did)
   const profile: Profile = {
     ...existing,
+    ...(parsed.data.publicListing !== undefined ? {publicListing: parsed.data.publicListing} : {}),
+    ...(parsed.data.avatar !== undefined ? { avatar: parsed.data.avatar ? await normalizeImage(parsed.data.avatar, true) : undefined } : {}),
     ...(parsed.data.displayName !== undefined ? { displayName: parsed.data.displayName } : {}),
     ...(parsed.data.bio !== undefined ? { bio: parsed.data.bio } : {}),
   }
@@ -118,7 +126,20 @@ me.put('/', async (c) => {
     .insert(appMeta)
     .values({ key: PROFILE_KEY(viewer.did), value: profile, updatedAt: new Date() })
     .onConflictDoUpdate({ target: appMeta.key, set: { value: profile, updatedAt: new Date() } })
-  return c.json({ did: viewer.did, profile })
+  return c.json({ did: viewer.did, profile: visibleProfile(profile) })
+})
+
+function visibleProfile(profile: Profile) {
+  const { avatar, ...fields } = profile
+  return { ...fields, ...(avatar ? { avatarUrl: `/api/me/avatar?v=${avatar.revision}` } : {}) }
+}
+
+me.get('/avatar', async c => {
+  const avatar = (await loadProfile(c.var.viewer!.did)).avatar
+  if (!avatar) return c.json({ error: 'NotFound' }, 404)
+  c.header('Content-Type', 'image/webp')
+  c.header('Cache-Control', 'private, no-store')
+  return c.body(new Uint8Array(Buffer.from(avatar.data, 'base64')))
 })
 
 me.get('/visibility-defaults', async (c) => {

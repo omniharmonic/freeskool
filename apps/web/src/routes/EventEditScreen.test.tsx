@@ -35,7 +35,7 @@ vi.mock('../lib/api', () => {
       events: { get: vi.fn(), create: vi.fn(), update: vi.fn() },
       auth: { me: vi.fn() },
       skills: { tree: vi.fn() },
-      requests: { list: vi.fn() },
+      requests: { list: vi.fn(), claim: vi.fn() },
     },
     ApiError,
   };
@@ -89,6 +89,7 @@ describe('EventEditScreen', () => {
     vi.mocked(api.events.update).mockReset();
     vi.mocked(api.events.get).mockReset();
     vi.mocked(api.requests.list).mockReset().mockResolvedValue({ requests: [] });
+    vi.mocked(api.requests.claim).mockReset().mockResolvedValue({ uri: 'at://did:plc:host1/freeschool.draft.claim/one', cid: 'cid3' });
     window.history.pushState({}, '', '/events/new');
   });
 
@@ -109,7 +110,7 @@ describe('EventEditScreen', () => {
     expect(body.name).toBe('Sourdough basics');
   });
 
-  it('B1: ticking "venue needed" clears and disables the address and neighbourhood fields; unticking re-enables them', async () => {
+  it('venue needed clears the exact address and preserves an editable neighbourhood', async () => {
     renderScreen();
 
     await screen.findByLabelText(/class title/i);
@@ -124,10 +125,10 @@ describe('EventEditScreen', () => {
     expect(screen.getByLabelText(/town or city/i)).toBeDisabled();
     expect(screen.getByLabelText(/^region$/i)).toBeDisabled();
     expect(screen.getByLabelText(/postal code/i)).toBeDisabled();
-    expect(screen.getByLabelText(/^neighbourhood/i)).toHaveValue('');
-    expect(screen.getByLabelText(/^neighbourhood/i)).toBeDisabled();
+    expect(screen.getByLabelText(/^neighbourhood/i)).toHaveValue('North Boulder');
+    expect(screen.getByLabelText(/^neighbourhood/i)).not.toBeDisabled();
     // One-line explanation of why the fields went dead.
-    expect(screen.getByText(/venue needed.*location.*fields|location fields.*venue needed/i)).toBeInTheDocument();
+    expect(screen.getByText(/address fields are off while venue needed/i)).toBeInTheDocument();
 
     fireEvent.click(screen.getByLabelText(/venue needed/i));
 
@@ -135,7 +136,7 @@ describe('EventEditScreen', () => {
     expect(screen.getByLabelText(/^neighbourhood/i)).not.toBeDisabled();
   });
 
-  it('B1: submits neither address nor neighbourhood when "venue needed" is checked, even if previously filled in', async () => {
+  it('submits the suggested neighbourhood and explicit venue call without an exact address', async () => {
     renderScreen();
 
     fireEvent.change(await screen.findByLabelText(/class title/i), { target: { value: 'Sourdough basics' } });
@@ -149,7 +150,8 @@ describe('EventEditScreen', () => {
     await waitFor(() => expect(api.events.create).toHaveBeenCalled());
     const body = vi.mocked(api.events.create).mock.calls[0]![0];
     expect(body.locations).toBeUndefined();
-    expect(body.neighborhood).toBeUndefined();
+    expect(body.neighborhood).toBe('North Boulder');
+    expect(body.venueNeeded).toBe(true);
   });
 
   it('B1: edit prefills the "venue needed" checkbox from the loaded event, and the fields load disabled', async () => {
@@ -174,7 +176,7 @@ describe('EventEditScreen', () => {
 
     expect(screen.getByLabelText(/venue needed/i)).toBeChecked();
     expect(screen.getByLabelText(/street/i)).toBeDisabled();
-    expect(screen.getByLabelText(/^neighbourhood/i)).toBeDisabled();
+    expect(screen.getByLabelText(/^neighbourhood/i)).not.toBeDisabled();
   });
 
   it('submits a body shape matching CreateEventInput: required fields, timezone from the browser, and no series for "one time"', async () => {
@@ -197,6 +199,17 @@ describe('EventEditScreen', () => {
     expect('series' in body).toBe(false);
 
     await waitFor(() => expect(navigateSpy).toHaveBeenCalled());
+  });
+
+  it('lets the host publish an online class with an attendee meeting link',async()=>{
+    renderScreen();
+    fireEvent.change(await screen.findByLabelText(/class title/i),{target:{value:'An online skill share'}});
+    fireEvent.change(screen.getByLabelText(/^starts$/i),{target:{value:'2026-10-01T18:00'}});
+    fireEvent.change(screen.getByLabelText('How we’ll meet'),{target:{value:'community.lexicon.calendar.event#virtual'}});
+    fireEvent.change(screen.getByLabelText(/Meeting link/),{target:{value:'https://example.org/class'}});
+    fireEvent.click(screen.getByRole('button',{name:/post this class/i}));
+    await waitFor(()=>expect(api.events.create).toHaveBeenCalled());
+    expect(vi.mocked(api.events.create).mock.calls[0]![0]).toMatchObject({mode:'community.lexicon.calendar.event#virtual',venueNeeded:false,uris:[{uri:'https://example.org/class',name:'Class meeting link'}]});
   });
 
   it('builds a weekly series and sends it only on create', async () => {
@@ -384,7 +397,10 @@ describe('EventEditScreen', () => {
 
     fireEvent.change(await screen.findByLabelText(/class title/i), { target: { value: 'Sourdough basics' } });
     fireEvent.change(screen.getByLabelText(/^starts$/i), { target: { value: '2026-10-01T18:00' } });
-    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: 'Bring your own starter.' } });
+    fireEvent.change(screen.getByLabelText('About this class'), { target: { value: 'Learn to bake a loaf together.' } });
+    fireEvent.change(screen.getByLabelText('Who it’s for'), { target: { value: 'Beginners welcome.' } });
+    fireEvent.change(screen.getByLabelText('Access & comfort'), { target: { value: 'Seated work.' } });
+    fireEvent.change(screen.getByLabelText(/additional attendee details/i), { target: { value: 'Bring your own starter.' } });
     fireEvent.click(screen.getByLabelText(/venue needed/i));
 
     fireEvent.change(screen.getByPlaceholderText('A mixing bowl'), { target: { value: 'A mixing bowl' } });
@@ -399,6 +415,7 @@ describe('EventEditScreen', () => {
     expect(body.suppliesNote).toBe('Flour provided.');
     // Never composed into the description — that was the old workaround.
     expect(body.description).toBe('Bring your own starter.');
+    expect(body.publicOverview).toEqual({ description: 'Learn to bake a loaf together.', audience: 'Beginners welcome.', accessibility: 'Seated work.' });
   });
 
   it('edit: prefills materials, suppliesNote, and the raw visibility enum from the host view', async () => {
@@ -415,6 +432,7 @@ describe('EventEditScreen', () => {
       skills: [],
       materials: ['A mixing bowl', 'A scale'],
       suppliesNote: 'Flour provided.',
+      publicOverview: { description: 'Public invitation', audience: 'Beginners', accessibility: 'Seating available' },
       visibility: 'unlisted',
       rsvps: { going: 0, interested: 0 },
       viewerRelation: 'host' as const,
@@ -441,6 +459,23 @@ describe('EventEditScreen', () => {
     // edit" rule as tags/locations/skills.
     expect(body.materials).toEqual(['A mixing bowl', 'A scale']);
     expect(body.suppliesNote).toBe('Flour provided.');
+    expect(body.publicOverview).toEqual({ description: 'Public invitation', audience: 'Beginners', accessibility: 'Seating available' });
+  });
+
+  it('retries a failed request connection without publishing a second class', async () => {
+    const requestUri = 'at://did:plc:asker1/freeschool.draft.request/req1';
+    window.history.pushState({}, '', `/events/new?request=${encodeURIComponent(requestUri)}`);
+    vi.mocked(api.requests.claim).mockRejectedValueOnce(new Error('offline'));
+    renderScreen();
+    fireEvent.change(await screen.findByLabelText(/class title/i), { target: { value: 'Sharpening together' } });
+    fireEvent.change(screen.getByLabelText(/^starts$/i), { target: { value: '2026-10-01T18:00' } });
+    fireEvent.click(screen.getByRole('button', { name: /post this class/i }));
+    expect(await screen.findByText(/Your class is published/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /post this class/i }));
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalled());
+    expect(api.events.create).toHaveBeenCalledTimes(1);
+    expect(api.requests.claim).toHaveBeenCalledTimes(2);
+    expect(api.requests.claim).toHaveBeenLastCalledWith(requestUri, { eventUri: EVENT_URI });
   });
 
   it('shows an explanation that a waitlist forms once capacity fills', async () => {

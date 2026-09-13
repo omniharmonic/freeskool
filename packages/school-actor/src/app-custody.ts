@@ -8,6 +8,8 @@ const MIN_ROLE: Record<SchoolAction, Role> = {
   'close-request': Role.Facilitator,
   'remove-listing': Role.Steward,
   'restore-listing': Role.Steward,
+  'remove-resource': Role.Steward,
+  'restore-resource': Role.Steward,
   'set-role': Role.Steward,
   'suspend-role': Role.Steward,
   'write-policy': Role.Steward,

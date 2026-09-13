@@ -21,7 +21,7 @@ import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireRole, requireViewer } from '../session.js'
 import { getDb } from '../../db/index.js'
-import { attendance, moderationQueue, newsletterIssue } from '../../db/schema.js'
+import { appMeta, attendance, moderationQueue, newsletterIssue } from '../../db/schema.js'
 import { rowId, tid } from '../../lib/ids.js'
 import { bumpTally } from '../../lib/roles.js'
 import { schoolActor, schoolDid } from '../../lib/school-actor.js'
@@ -182,6 +182,8 @@ const moderationBody = z.object({
     'curate-listing',
     'remove-listing',
     'restore-listing',
+    'remove-resource',
+    'restore-resource',
     'set-role',
     'suspend-role',
     'close-request',
@@ -261,6 +263,7 @@ admin.post('/moderation/:id/execute', async (c) => {
   if (!row) return c.json({ error: 'NotFound' }, 404)
   if (row.status !== 'open') return c.json({ error: 'AlreadyResolved', status: row.status }, 409)
 
+  if ((row.action === 'remove-resource' || row.action === 'restore-resource') && !row.subjectUri?.includes(`/${NSID.resource}/`)) return c.json({error:'InvalidRequest',message:'Choose a resource record to moderate.'},400)
   const approvals = asApprovals(row.approvals)
   try {
     const result = await schoolActor().putRecordAsSchool({
@@ -308,6 +311,12 @@ admin.post('/moderation/:id/execute', async (c) => {
         })
         .catch(() => undefined)
       effects.listing = listing ? { uri: listing.uri, status } : null
+    }
+
+    if ((row.action === 'remove-resource' || row.action === 'restore-resource') && row.subjectUri) {
+      const hidden = row.action === 'remove-resource'
+      await getDb().insert(appMeta).values({key:`resource-hidden:${row.subjectUri}`,value:hidden,updatedAt:new Date()}).onConflictDoUpdate({target:appMeta.key,set:{value:hidden,updatedAt:new Date()}})
+      effects.resource = { hidden }
     }
 
     // A3: void-attendance actually voids it. The subject is the app-side row's

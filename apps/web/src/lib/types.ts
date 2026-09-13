@@ -88,7 +88,13 @@ export interface EventUriRef {
  * confirmed attendance, or is a steward) — everyone else gets the coarser
  * public entry.
  */
+export interface ImageInput { data: string; alt: string }
+
+export interface PublicOverview { description: string; audience?: string; accessibility?: string }
+
 export interface CalendarEvent {
+  publicOverview?: PublicOverview;
+  cover?: { url: string; alt: string };
   uri: string;
   name: string;
   startsAt?: string;
@@ -110,6 +116,7 @@ export interface CalendarEvent {
 }
 
 export interface CalendarResponse {
+  truncated?: boolean;
   from: string;
   to: string;
   events: CalendarEvent[];
@@ -159,6 +166,9 @@ export interface EventSeriesInput {
 }
 
 export interface CreateEventInput {
+  publicOverview?: PublicOverview;
+  cover?: ImageInput | null;
+  venueNeeded?: boolean;
   name: string;
   description?: string;
   startsAt: string;
@@ -290,6 +300,8 @@ export interface AttendanceSummary {
 // ── requests ─────────────────────────────────────────────────────────────
 
 export interface RequestItem {
+  scheduledEventUri?: string;
+  viewerClaimed?: boolean;
   uri: string;
   /** Omitted by the API for a non-asker viewer — never assume this is present. */
   askedBy?: string;
@@ -421,6 +433,8 @@ export interface SkillClaimsResponse {
 }
 
 export interface MeProfile {
+  publicListing?: boolean;
+  avatarUrl?: string;
   displayName?: string;
   bio?: string;
 }
@@ -438,6 +452,8 @@ export interface MeResponse {
  * in `apps/appview/src/http/routes/me.ts`): app-side display fields only,
  * never a real-name prompt. */
 export interface UpdateProfileInput {
+  publicListing?: boolean;
+  avatar?: ImageInput | null;
   displayName?: string;
   bio?: string;
 }
@@ -635,6 +651,8 @@ export type ModerationAction =
   | 'curate-listing'
   | 'remove-listing'
   | 'restore-listing'
+  | 'remove-resource'
+  | 'restore-resource'
   | 'set-role'
   | 'suspend-role'
   | 'close-request'
@@ -772,8 +790,12 @@ export interface HowItWorksResponse {
 }
 
 export interface ZineMonthResponse {
+  truncated?: boolean;
   month: string;
   school: { name: string; region?: string };
   days: Array<{ date: string; events: CalendarEvent[] }>;
   howToPost: string;
 }
+
+export interface KnowledgeResource { libraryStatus?: 'moderated'|'class-unlisted'; id: string; title: string; description?: string; skills: string[]; uri?: string; license?: string; event?: {uri:string;cid:string}; authorDid: string; authorName: string; authorHasProfile: boolean; createdAt?: string }
+export interface PublicProfile { did:string;displayName:string;bio:string;avatarUrl?:string;claims:Array<{skill:string;level:string;note?:string}>;resources:KnowledgeResource[] }

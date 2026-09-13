@@ -1,8 +1,12 @@
-import { useCallback, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useCallback, useRef, useState, type ReactNode } from 'react';
+import { SchoolMark } from './SchoolMark';
 import { useRouter } from '@tanstack/react-router';
 
 interface ScreenProps {
   title: string;
+  wide?: boolean;
+  layout?: 'standard' | 'library' | 'detail' | 'form' | 'account' | 'reading' | 'admin';
+  intro?: ReactNode;
   /** One line under the large title. Not a label — a sentence. */
   standfirst?: string;
   trailing?: ReactNode;
@@ -19,7 +23,8 @@ const COLLAPSE_AT = 28;
  * iOS large-title screen: the big title lives in the scroll content and slides
  * under a frosted nav bar, which fades its own compact title in as it goes.
  */
-export function Screen({ title, standfirst, trailing, back, beneathTitle, children }: ScreenProps) {
+export function Screen({ title, standfirst, trailing, back, beneathTitle, children, wide = false, intro, layout = 'standard' }: ScreenProps) {
+  useEffect(() => { document.title = `${title} · Free School`; }, [title]);
   const [collapsed, setCollapsed] = useState(false);
   const frame = useRef<number | null>(null);
   const router = useRouter();
@@ -36,7 +41,7 @@ export function Screen({ title, standfirst, trailing, back, beneathTitle, childr
   return (
     <>
       <div className="lt-wrap glass app-chrome" data-collapsed={collapsed}>
-        <div className="safe-top safe-x flex h-[46px] items-center gap-2 pb-2">
+        <div className="screen-nav safe-top safe-x flex items-center gap-2">
           {back ? (
             <button
               type="button"
@@ -49,7 +54,7 @@ export function Screen({ title, standfirst, trailing, back, beneathTitle, childr
               </svg>
               <span className="text-caption">Back</span>
             </button>
-          ) : null}
+          ) : <a href="/" className="school-brand"><SchoolMark /><span>{wide ? title : 'Free School'}</span></a>}
           <span
             className="display flex-1 truncate text-center text-[17px] transition-opacity duration-200"
             style={{ opacity: collapsed ? 1 : 0 }}
@@ -61,15 +66,18 @@ export function Screen({ title, standfirst, trailing, back, beneathTitle, childr
         </div>
       </div>
 
-      <div className="app-scroll" onScroll={onScroll}>
+      <div className={`app-scroll ${wide ? 'screen-wide' : 'screen-standard'} page-${layout}`} onScroll={onScroll}>
         <div className="pad-header" />
-        <div className="safe-x pt-1 pb-2">
+        <main className="screen-content" id="main-content" tabIndex={-1}>
+        {intro ?? <div className="page-heading safe-x">
           <h1 className="lt-title text-large font-extrabold">{title}</h1>
-          {standfirst ? <p className="mt-1.5 max-w-[46ch] text-caption text-ink-soft">{standfirst}</p> : null}
+          {standfirst ? <p className="page-standfirst">{standfirst}</p> : null}
         </div>
+        }
         {beneathTitle}
         {children}
         <div className="pad-tabbar" />
+        </main>
       </div>
     </>
   );

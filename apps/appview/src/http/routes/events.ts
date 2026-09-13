@@ -10,6 +10,7 @@
  * `:id` is a URL-encoded AT-URI. An AppView-local opaque id would be prettier but would
  * also be a second namespace to keep in sync; the AT-URI is already the identity.
  */
+import { getPresentation, presentationFields } from '../../lib/event-presentation.js'
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
@@ -46,10 +47,13 @@ import { PROFILE_KEY, type Profile } from './me.js'
 export const events = new Hono<AppEnv>()
 
 const createBody = z.object({
-  name: z.string().min(1).max(300),
+  publicOverview: z.object({ description: z.string().trim().max(6000), audience: z.string().trim().max(1000).optional(), accessibility: z.string().trim().max(1000).optional() }).optional(),
+  cover: z.object({ data: z.string().max(11_200_000), alt: z.string().trim().min(1).max(300) }).nullable().optional(),
+  venueNeeded: z.boolean().optional(),
+  name: z.string().trim().min(1).max(300),
   description: z.string().max(20_000).optional(),
-  startsAt: z.string(),
-  endsAt: z.string().optional(),
+  startsAt: z.string().datetime({ offset: true }),
+  endsAt: z.string().datetime({ offset: true }).optional(),
   mode: z.string().optional(),
   locations: z.array(z.unknown()).optional(),
   uris: z.array(z.object({ uri: z.string(), name: z.string().optional() })).optional(),
@@ -94,6 +98,9 @@ events.post('/events', requireViewer, requireRole(Role.Host), async (c) => {
     return c.json({ error: 'InvalidRequest', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400)
   }
   try {
+    if (parsed.data.endsAt && Date.parse(parsed.data.endsAt) <= Date.parse(parsed.data.startsAt)) {
+      return c.json({ error: 'InvalidDates', message: 'The end time must be after the start time.' }, 400)
+    }
     const created = await createEventAsHost(c.var.viewer!, parsed.data)
     return c.json(created, 201)
   } catch (err) {
@@ -172,6 +179,19 @@ events.get('/events/:id{.+\\.ics}', async (c) => {
   return c.body(ics)
 })
 
+events.get('/events/:id/image', async (c) => {
+  const uri = decodeURIComponent(c.req.param('id'))
+  const loaded = await loadEvent(uri)
+  if (!loaded) return c.json({ error: 'NotFound' }, 404)
+  const relation = c.var.viewer ? await viewerRelation(c.var.viewer, uri, loaded.hostDid) : 'public'
+  if (!loaded.listed && relation === 'public') return c.json({ error: 'NotFound' }, 404)
+  const image = (await getPresentation(uri)).cover
+  if (!image) return c.json({ error: 'NotFound' }, 404)
+  c.header('Content-Type', 'image/webp')
+  c.header('Cache-Control', 'private, no-store')
+  return c.body(new Uint8Array(Buffer.from(image.data, 'base64')))
+})
+
 events.get('/events/:id', async (c) => {
   const uri = decodeURIComponent(c.req.param('id'))
   const loaded = await loadEvent(uri)
@@ -187,6 +207,7 @@ events.get('/events/:id', async (c) => {
   const canSeeRawVisibility = viewer ? canViewRoster(loaded.hostDid, viewer.did, await roleOf(viewer.did)) : false
   return c.json({
     ...projectEvent(loaded.event, loaded.inputs, relation),
+    ...presentationFields(uri, await getPresentation(uri)),
     listed: loaded.listed,
     skills: loaded.skillLevels,
     materials: loaded.extra.materials,

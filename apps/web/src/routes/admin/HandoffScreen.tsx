@@ -55,7 +55,7 @@ export function HandoffScreen() {
       current="handoff"
       standfirst="Any steward can hand stewardship to another member at any time, so this school never depends on one person staying forever."
     >
-      <div className="space-y-5">
+      <div className="plate space-y-5">
         <label className="block">
           <span className="block text-caption text-ink-soft">Hand it to someone specific (optional)</span>
           <input
@@ -66,7 +66,7 @@ export function HandoffScreen() {
           />
         </label>
 
-        {error ? <p className="text-body text-pink">{error}</p> : null}
+        {error ? <p role="alert" className="text-body text-pink">{error}</p> : null}
 
         <Button wide onClick={() => void onCreate()} disabled={startMutation.isPending}>
           Create hand-off link

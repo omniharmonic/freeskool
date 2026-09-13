@@ -126,6 +126,10 @@ export function useUpdateProfileMutation() {
     mutationFn: (body: UpdateProfileInput) => api.me.updateProfile(body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['me-profile'] });
+      queryClient.removeQueries({queryKey:['public-profile']});
+      void queryClient.invalidateQueries({queryKey:['practitioners']});
+      void queryClient.invalidateQueries({queryKey:['resources']});
+      void queryClient.invalidateQueries({queryKey:['resource']});
     },
   });
 }
@@ -140,6 +144,8 @@ export function useSetSkillClaimsMutation() {
     retry: false,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['my-claims'] });
+      void queryClient.invalidateQueries({ queryKey: ['public-profile'] });
+      void queryClient.invalidateQueries({ queryKey: ['practitioners'] });
     },
   });
 }
@@ -276,6 +282,9 @@ export function useProposeModerationMutation() {
     mutationFn: (body: ModerationProposeInput) => api.admin.moderation.propose(body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['moderation-queue'] });
+      void queryClient.invalidateQueries({ queryKey: ['resources'] });
+      void queryClient.invalidateQueries({ queryKey: ['resource'] });
+      void queryClient.invalidateQueries({ queryKey: ['public-profile'] });
     },
   });
 }
@@ -291,6 +300,9 @@ export function useApproveModerationMutation() {
     retry: false,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['moderation-queue'] });
+      void queryClient.invalidateQueries({ queryKey: ['resources'] });
+      void queryClient.invalidateQueries({ queryKey: ['resource'] });
+      void queryClient.invalidateQueries({ queryKey: ['public-profile'] });
     },
   });
 }
@@ -304,6 +316,9 @@ export function useExecuteModerationMutation() {
     retry: false,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['moderation-queue'] });
+      void queryClient.invalidateQueries({ queryKey: ['resources'] });
+      void queryClient.invalidateQueries({ queryKey: ['resource'] });
+      void queryClient.invalidateQueries({ queryKey: ['public-profile'] });
     },
   });
 }

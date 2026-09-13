@@ -22,9 +22,9 @@ export default defineConfig({
       manifest: false,
       injectRegister: null,
       workbox: {
-        globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+        globPatterns: ['**/*.{js,css,html,svg,png,woff2,ttf}'],
         navigateFallback: '/index.html',
-        navigateFallbackDenylist: [/^\/api\//],
+        navigateFallbackDenylist: [/^\/api\//, /^\/oauth\/(callback|jwks|client-metadata)/],
         cleanupOutdatedCaches: true,
         runtimeCaching: [
           {
@@ -33,18 +33,9 @@ export default defineConfig({
             urlPattern: ({ url }) => url.pathname.startsWith('/api/calendar'),
             handler: 'NetworkFirst',
             options: {
-              cacheName: 'fs-calendar-v1',
+              cacheName: 'fs-calendar-public-v2',
               networkTimeoutSeconds: 6,
               expiration: { maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 * 30 },
-              cacheableResponse: { statuses: [0, 200] },
-            },
-          },
-          {
-            urlPattern: ({ url }) => url.origin === 'https://fonts.gstatic.com',
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'fs-fonts-v1',
-              expiration: { maxEntries: 8, maxAgeSeconds: 60 * 60 * 24 * 365 },
               cacheableResponse: { statuses: [0, 200] },
             },
           },

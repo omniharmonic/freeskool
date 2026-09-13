@@ -175,7 +175,12 @@ function requireExistingPassword(): string {
 }
 
 if (isMain(import.meta.url)) {
-  const result = await createSchool({ stewardDid: process.env.FOUNDER_DID })
+  const result = await createSchool({
+    name: process.env.SCHOOL_NAME || undefined,
+    region: process.env.SCHOOL_REGION || undefined,
+    email: process.env.SCHOOL_EMAIL || undefined,
+    stewardDid: process.env.FOUNDER_DID,
+  })
   console.log(result.reused ? '\nReused the existing school account.\n' : '\nCreated the school account.\n')
   console.log('Paste these into .env:\n')
   console.log(`SCHOOL_DID=${result.did}`)

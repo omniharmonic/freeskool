@@ -1,0 +1,7 @@
+User-agent: *
+Disallow: /people/
+Disallow: /me
+Disallow: /admin
+Disallow: /account/
+Disallow: /invite/
+Disallow: /verify

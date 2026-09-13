@@ -1,3 +1,4 @@
+import { LoadingState, PageState } from '../components/PageState';
 import { Screen } from '../components/Screen';
 import { Button } from '../components/bits';
 import { useHowItWorks } from '../lib/queries';
@@ -14,10 +15,11 @@ const dateFormat = new Intl.DateTimeFormat('en-US', { year: 'numeric', month: 'l
  * essential inside the chrome that print already hides.
  */
 export function HowItWorksScreen() {
-  const { data, isPending, isError } = useHowItWorks();
+  const { data, isPending, isError, refetch } = useHowItWorks();
 
   return (
     <Screen
+      layout="reading"
       title={data?.title ?? 'How this skool works'}
       back
       trailing={
@@ -28,10 +30,10 @@ export function HowItWorksScreen() {
         </Button>
       }
     >
-      <div className="safe-x space-y-6 pb-4">
-        {isPending ? <p className="text-body text-ink-soft">Loading…</p> : null}
+      <div className="safe-x reading-sections pb-4">
+        {isPending ? <LoadingState label="Opening the school’s shared agreements…" /> : null}
         {isError ? (
-          <p className="text-body text-ink-soft">Could not load this page right now. Try again in a moment.</p>
+          <PageState title="Could not load this page right now." error action={<button className="primary-action" onClick={() => void refetch()}>Try again</button>}>Try again in a moment.</PageState>
         ) : null}
 
         {data?.sections.map((section) => (

@@ -1,0 +1,15 @@
+.git
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+**/*.env
+**/.dev-mail.log
+**/data
+**/test-results
+**/playwright-report
+.claude
+.codex
+.agents
+.superpowers
+.DS_Store

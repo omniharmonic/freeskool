@@ -1,6 +1,9 @@
+import { ImagePicker } from '../components/ImagePicker';
+import type { ImageInput } from '../lib/types';
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
+import { LoadingState } from '../components/PageState';
 import { Screen } from '../components/Screen';
 import { Button, SectionHeading } from '../components/bits';
 import { SessionGate } from '../components/SessionGate';
@@ -75,7 +78,7 @@ function isoToLocal(iso: string | undefined): string {
 
 export function EventEditScreen() {
   return (
-    <SessionGate prompt="Sign in to post or edit a class.">
+    <SessionGate screen prompt="Sign in to post or edit a class.">
       <EventEditForm />
     </SessionGate>
   );
@@ -97,6 +100,9 @@ function EventEditForm() {
 
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
+  const [overview, setOverview] = useState('');
+  const [audience, setAudience] = useState('');
+  const [accessibility, setAccessibility] = useState('');
   const [materials, setMaterials] = useState<string[]>([]);
   const [materialDraft, setMaterialDraft] = useState('');
   const [suppliesNote, setSuppliesNote] = useState('');
@@ -114,6 +120,9 @@ function EventEditForm() {
   // radio; `onSubmit` must not send it otherwise, or editing any OTHER field
   // would silently re-publish a private/unlisted class as listed.
   const [visibilityTouched, setVisibilityTouched] = useState(false);
+  const [mode, setMode] = useState('community.lexicon.calendar.event#inperson');
+  const [meetingLink, setMeetingLink] = useState('');
+  const [prerequisites, setPrerequisites] = useState('');
   const [venueNeeded, setVenueNeeded] = useState(false);
   const [locationName, setLocationName] = useState('');
   const [street, setStreet] = useState('');
@@ -126,6 +135,8 @@ function EventEditForm() {
   const [tagDraft, setTagDraft] = useState('');
   const [tagError, setTagError] = useState<string | null>(null);
   const [recurrence, setRecurrence] = useState<RecurrenceState>(NO_RECURRENCE);
+  const [publishedEvent, setPublishedEvent] = useState<string>();
+  const [cover, setCover] = useState<ImageInput | null | undefined>();
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -154,11 +165,16 @@ function EventEditForm() {
     if (!existing) return;
     setName(existing.name ?? '');
     setDescription(existing.description ?? '');
+    setOverview(existing.publicOverview?.description ?? '');
+    setAudience(existing.publicOverview?.audience ?? '');
+    setAccessibility(existing.publicOverview?.accessibility ?? '');
     setMaterials(existing.materials ?? []);
     setSuppliesNote(existing.suppliesNote ?? '');
     setStartLocal(isoToLocal(existing.startsAt));
     setEndLocal(isoToLocal(existing.endsAt));
     setVenueNeeded(Boolean(existing.venueNeeded));
+    setMode(existing.mode ?? 'community.lexicon.calendar.event#inperson');
+    setMeetingLink(existing.uris?.[0]?.uri ?? '');
     setNeighborhood(existing.neighborhood ?? '');
     setTags(existing.tags ?? []);
     // The raw enum (Task 12) — present only for the host/a steward, which an
@@ -178,6 +194,7 @@ function EventEditForm() {
     if (firstSkill) {
       setSkillUri(firstSkill.skill);
       setLevel(firstSkill.level);
+      setPrerequisites(firstSkill.prerequisites ?? '');
     }
   }, [existing]);
 
@@ -197,11 +214,8 @@ function EventEditForm() {
     ? flatSkills.filter((s) => s.path.toLowerCase().includes(skillSearch.trim().toLowerCase())).slice(0, 8)
     : [];
 
-  // B1: the server derives "venue needed" as no address AND no neighbourhood
-  // (`isVenueNeeded`, `apps/appview/src/http/visibility.ts`) — so ticking this
-  // box has to actually clear every field that derivation looks at, not just
-  // hide them, or a host could tick it while a stale address/neighbourhood
-  // still sits in state and submit a body that isn't venue-needed at all.
+  // A host can be looking for a room in a known neighborhood. Clear the exact
+  // address while preserving the public area; venueNeeded is stored explicitly.
   const onVenueNeededChange = (checked: boolean) => {
     setVenueNeeded(checked);
     if (checked) {
@@ -210,7 +224,6 @@ function EventEditForm() {
       setLocality('');
       setRegion('');
       setPostalCode('');
-      setNeighborhood('');
     }
   };
 
@@ -258,6 +271,9 @@ function EventEditForm() {
     const startsAt = localToIso(startLocal);
     if (!name.trim() || !startsAt) return;
     const endsAt = localToIso(endLocal);
+    if (endsAt && Date.parse(endsAt) <= Date.parse(startsAt)) {
+      setError('The end time must be after the start time.'); return;
+    }
 
     const locations = venueNeeded
       ? undefined
@@ -284,6 +300,11 @@ function EventEditForm() {
     // `visibilityTouched` above.
     const body: CreateEventInput = {
       name: name.trim(),
+      venueNeeded: mode.endsWith('#virtual') ? false : venueNeeded,
+      mode,
+      ...(isEdit || meetingLink.trim() ? {uris:[...(meetingLink.trim() ? [{uri:meetingLink.trim(),name:existing?.uris?.[0]?.name ?? 'Class meeting link'}] : []),...(existing?.uris?.slice(1)??[])]}:{}),
+      ...(cover !== undefined ? { cover } : {}),
+      publicOverview: { description: overview.trim(), audience: audience.trim(), accessibility: accessibility.trim() },
       ...(isEdit || description.trim() ? { description: description.trim() } : {}),
       startsAt,
       ...(endsAt ? { endsAt } : {}),
@@ -292,7 +313,7 @@ function EventEditForm() {
       ...(!isEdit || visibilityTouched ? { visibility } : {}),
       ...(isEdit || neighborhood.trim() ? { neighborhood: neighborhood.trim() } : {}),
       ...(isEdit || tags.length > 0 ? { tags } : {}),
-      ...(isEdit || skillUri ? { skills: skillUri ? [{ skill: skillUri, level }] : [] } : {}),
+      ...(isEdit || skillUri ? { skills: [...(skillUri ? [{ skill: skillUri, level, ...(prerequisites.trim()?{prerequisites:prerequisites.trim()}:{}) }] : []),...(existing?.skills?.slice(1)??[])] } : {}),
       ...(isEdit || locations ? { locations: locations ?? [] } : {}),
       ...(isEdit || materials.length > 0 ? { materials } : {}),
       ...(isEdit || suppliesNote.trim() ? { suppliesNote: suppliesNote.trim() } : {}),
@@ -313,8 +334,13 @@ function EventEditForm() {
           setSubmitting(false);
           return;
         }
-        const created = await createMutation.mutateAsync(series ? { ...body, series } : body);
-        void navigate({ to: '/events/$id', params: { id: created.event.uri } });
+        const uri = publishedEvent ?? (await createMutation.mutateAsync(series ? { ...body, series } : body)).event.uri;
+        setPublishedEvent(uri);
+        if (requestId) {
+          try { await api.requests.claim(requestId, { eventUri: uri }); }
+          catch { setError('Your class is published. We couldn’t connect it to the request. Submit again to retry the connection without posting another class.'); return; }
+        }
+        void navigate({ to: '/events/$id', params: { id: uri } });
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Something went wrong posting this class.');
@@ -326,7 +352,7 @@ function EventEditForm() {
   if (isEdit && loadingExisting) {
     return (
       <Screen title="Loading…" back>
-        <div className="safe-x" />
+        <div className="safe-x"><LoadingState label="Opening your class…" /></div>
       </Screen>
     );
   }
@@ -347,9 +373,10 @@ function EventEditForm() {
   }
 
   return (
-    <Screen title={isEdit ? 'Edit class' : 'Post a class'} back>
-      <form className="safe-x space-y-6 pb-4" onSubmit={(e) => void onSubmit(e)}>
-        <div>
+    <Screen title={isEdit ? 'Edit class' : 'Post a class'} layout="form" standfirst="A clear invitation is a good beginning. Say what you’ll share, who it’s for, and what people should bring." back>
+      <nav className="safe-x editor-nav" aria-label="Class form sections"><a href="#class-about">The invitation</a><a href="#class-when">When</a><a href="#class-where">Where</a><a href="#class-materials">What to bring</a><a href="#class-recurrence">Repeat</a></nav>
+      <form className="safe-x class-editor pb-4" onSubmit={(e) => void onSubmit(e)}>
+        <div className="editor-opening" id="class-about">
           <label className="block">
             <span className={labelText}>Class title</span>
             <input
@@ -358,20 +385,34 @@ function EventEditForm() {
               onChange={(e) => setName(e.target.value)}
               placeholder="Sourdough basics"
               required
+              maxLength={300}
             />
           </label>
+          <p className="mt-5 text-caption text-ink-soft">The following overview is visible before someone signs in or RSVPs. Keep addresses and meeting links in the location fields.</p>
+          <label className="mt-4 block"><span className={labelText}>About this class</span>
+            <textarea className={`${field} min-h-[150px]`} value={overview} onChange={e => setOverview(e.target.value)} maxLength={6000} placeholder="What will you explore together? What will people learn, make, or take home?" />
+          </label>
+          <label className="mt-4 block"><span className={labelText}>Who it’s for</span>
+            <textarea className={field} value={audience} onChange={e => setAudience(e.target.value)} maxLength={1000} placeholder="Experience level, prerequisites, and anything newcomers should know." />
+          </label>
+          <label className="mt-4 block"><span className={labelText}>Access &amp; comfort</span>
+            <textarea className={field} value={accessibility} onChange={e => setAccessibility(e.target.value)} maxLength={1000} placeholder="Step-free access, seating, languages, noise, or sensory considerations. Share what you know." />
+          </label>
           <label className="mt-4 block">
-            <span className={labelText}>Description</span>
+            <span className={labelText}>Additional attendee details</span>
             <textarea
               className={`${field} min-h-[88px] resize-none`}
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="What happens in this class, and who it's for."
+              placeholder="Extra notes for people attending. Shown after RSVP on this school’s pages."
+              maxLength={20000}
             />
           </label>
         </div>
 
-        <div>
+        <ImagePicker value={cover} existingUrl={existing?.cover?.url} onChange={setCover} />
+
+        <div id="class-skill">
           <SectionHeading>Skill</SectionHeading>
           <div className="safe-x -mx-4">
             {selectedSkill ? (
@@ -414,7 +455,7 @@ function EventEditForm() {
             {selectedSkill ? (
               <div className="mt-3">
                 <span className={labelText}>Depth</span>
-                <div className="mt-1.5 flex items-center gap-2">
+                <div className="mt-1.5 flex flex-wrap items-center gap-2">
                   {([1, 2, 3] as const).map((n) => (
                     <button
                       key={n}
@@ -422,9 +463,9 @@ function EventEditForm() {
                       aria-pressed={level === n}
                       aria-label={`Level ${n}`}
                       onClick={() => setLevel(n)}
-                      className="h-[18px] w-[18px] border-[1.5px] border-ink"
-                      style={{ background: n <= level ? 'var(--c-ink)' : 'transparent' }}
-                    />
+                      className="level-choice border border-rule px-3 text-caption"
+                      style={{ background: n === level ? 'var(--c-ink)' : 'transparent', color: n === level ? 'var(--c-paper-2)' : 'var(--c-ink)' }}
+                    >{['New to it', 'Some practice', 'Go deeper'][n - 1]}</button>
                   ))}
                 </div>
               </div>
@@ -432,9 +473,10 @@ function EventEditForm() {
           </div>
         </div>
 
-        <div>
+        <div id="class-when">
+          <label className="block mb-6"><span className={labelText}>Before learners come (optional)</span><textarea className={field} maxLength={256} value={prerequisites} onChange={e=>setPrerequisites(e.target.value)} placeholder="Any prior experience, tools, or preparation for this skill"/><span className="text-caption text-ink-soft">Shown publicly alongside the selected skill.</span></label>
           <SectionHeading>When</SectionHeading>
-          <div className="safe-x -mx-4 grid grid-cols-2 gap-3">
+          <div className="safe-x -mx-4 date-fields grid grid-cols-2 gap-3">
             <label className="block">
               <span className={labelText}>Starts</span>
               <input
@@ -458,10 +500,12 @@ function EventEditForm() {
           <p className="mt-1.5 text-caption text-ink-faint">Times use your device's timezone ({timezone}).</p>
         </div>
 
-        <div>
+        <div id="class-where">
           <SectionHeading>Where</SectionHeading>
+          <label className="block mb-4"><span className={labelText}>How we’ll meet</span><select aria-label="How we’ll meet" className={field} value={mode} onChange={e=>setMode(e.target.value)}><option value="community.lexicon.calendar.event#inperson">In person</option><option value="community.lexicon.calendar.event#virtual">Online</option><option value="community.lexicon.calendar.event#hybrid">In person + online</option></select></label>
+          <label className="block mb-5"><span className={labelText}>Meeting link (optional)</span><input type="url" pattern="https?://.*" className={field} value={meetingLink} onChange={e=>setMeetingLink(e.target.value)} placeholder="https://…"/><span className="text-caption text-ink-soft">Available to attendees after they RSVP.</span></label>
           <div className="safe-x -mx-4">
-            <label className="flex items-center gap-2.5">
+            <label className="flex items-center gap-2.5" hidden={mode.endsWith('#virtual')}>
               <input
                 type="checkbox"
                 checked={venueNeeded}
@@ -473,10 +517,10 @@ function EventEditForm() {
 
             {venueNeeded ? (
               <p className="mt-2 text-caption text-ink-faint">
-                Location fields are off while venue needed is checked — they're what "no venue" means.
+                Address fields are off while venue needed is checked. You can still suggest a neighbourhood.
               </p>
             ) : null}
-            <div className="mt-3 space-y-3">
+            <div className="mt-3 space-y-3" hidden={mode.endsWith('#virtual')}>
               <label className="block">
                 <span className={labelText}>Place name</span>
                 <input
@@ -533,7 +577,6 @@ function EventEditForm() {
                 className={field}
                 value={neighborhood}
                 onChange={(e) => setNeighborhood(e.target.value)}
-                disabled={venueNeeded}
               />
             </label>
 
@@ -605,7 +648,7 @@ function EventEditForm() {
           </div>
         </div>
 
-        <div>
+        <div id="class-materials">
           <SectionHeading>Materials &amp; supplies</SectionHeading>
           <div className="safe-x -mx-4 space-y-3">
             <div>
@@ -613,6 +656,7 @@ function EventEditForm() {
               <div className="mt-1.5 flex gap-2">
                 <input
                   className={field}
+                  aria-label="What to bring"
                   value={materialDraft}
                   onChange={(e) => setMaterialDraft(e.target.value)}
                   placeholder="A mixing bowl"
@@ -657,7 +701,7 @@ function EventEditForm() {
           </div>
         </div>
 
-        <div>
+        <div id="class-tags">
           <SectionHeading>Tags</SectionHeading>
           <div className="safe-x -mx-4">
             <div className="flex flex-wrap gap-2">
@@ -670,6 +714,7 @@ function EventEditForm() {
             <div className="mt-2 flex gap-2">
               <input
                 className={field}
+                aria-label="Add a tag"
                 value={tagDraft}
                 onChange={(e) => setTagDraft(e.target.value)}
                 placeholder="another-tag"
@@ -694,7 +739,7 @@ function EventEditForm() {
           </div>
         </div>
 
-        <div>
+        <div id="class-recurrence">
           <SectionHeading>Recurrence</SectionHeading>
           <div className="safe-x -mx-4">
             {isEdit ? (
@@ -801,9 +846,9 @@ function EventEditForm() {
           </p>
         ) : null}
 
-        <Button type="submit" wide disabled={submitting}>
-          {isEdit ? 'Save changes' : 'Post this class'}
-        </Button>
+        <div className="editor-publish"><p>{isEdit ? "Changes are shared with people looking at this class." : "Your class will appear according to the visibility you chose. You can edit the details after posting."}</p><Button type="submit" wide disabled={submitting}>
+          {submitting ? 'Saving…' : isEdit ? 'Save changes' : 'Post this class'}
+        </Button></div>
       </form>
     </Screen>
   );
@@ -827,7 +872,7 @@ function VisibilityOption({
   detail: string;
 }) {
   return (
-    <label className="flex items-start gap-2.5">
+    <label className="visibility-choice flex items-start gap-2.5">
       <input
         type="radio"
         name="visibility"

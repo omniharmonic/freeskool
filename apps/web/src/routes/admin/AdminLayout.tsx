@@ -1,5 +1,7 @@
 import type { ReactNode } from 'react';
 import { Link, useRouterState } from '@tanstack/react-router';
+import { FieldGlyph } from '../../components/FieldGlyph';
+import { LoadingState } from '../../components/PageState';
 import { Screen } from '../../components/Screen';
 import { SessionGate } from '../../components/SessionGate';
 import { useMe } from '../../lib/queries';
@@ -14,30 +16,28 @@ const STEWARD_ROLE = 40;
 
 type AdminTab = 'overview' | 'policy' | 'moderation' | 'peers' | 'newsletter' | 'handoff';
 
-const TABS: ReadonlyArray<{ key: AdminTab; to: string; label: string }> = [
-  { key: 'policy', to: '/admin/policy', label: 'Policy' },
-  { key: 'moderation', to: '/admin/moderation', label: 'Moderation' },
-  { key: 'peers', to: '/admin/peers', label: 'Peers' },
-  { key: 'newsletter', to: '/admin/newsletter', label: 'Newsletter' },
-  { key: 'handoff', to: '/admin/handoff', label: 'Hand-off' },
+const TABS: ReadonlyArray<{ key: AdminTab; to: string; label: string; description: string }> = [
+  { key: 'overview', to: '/admin', label: 'Overview', description: 'Everything you need to care for the school.' },
+  { key: 'policy', to: '/admin/policy', label: 'Policy', description: 'Set the shared agreements and keep the door open.' },
+  { key: 'moderation', to: '/admin/moderation', label: 'Moderation', description: 'Review concerns and make decisions together.' },
+  { key: 'peers', to: '/admin/peers', label: 'Peers', description: 'Connect this school to other learning communities.' },
+  { key: 'newsletter', to: '/admin/newsletter', label: 'Newsletter', description: 'Put the coming month into a simple email.' },
+  { key: 'handoff', to: '/admin/handoff', label: 'Hand-off', description: 'Invite another person to share stewardship.' },
 ];
 
 function AdminSubNav({ current }: { current: AdminTab }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   return (
-    <nav aria-label="Admin sections" className="-mx-0.5 mb-1 flex gap-1.5 overflow-x-auto pb-2">
+    <nav aria-label="Admin sections" className="admin-nav">
       {TABS.map((tab) => {
         const active = current === tab.key || pathname === tab.to;
         return (
           <Link
             key={tab.key}
             to={tab.to}
+            activeOptions={{ exact: true }}
             aria-current={active ? 'page' : undefined}
-            className="shrink-0 border-[1.5px] border-ink px-3 py-1.5 text-caption font-medium"
-            style={{
-              background: active ? 'var(--c-ink)' : 'transparent',
-              color: active ? 'var(--c-paper-2)' : 'var(--c-ink)',
-            }}
+
           >
             {tab.label}
           </Link>
@@ -64,7 +64,7 @@ function RoleGate({ children }: { children: ReactNode }) {
   // `SessionGate` (the parent) already resolved `useMe()` successfully before
   // rendering this; this second call is a cache hit, not a second request.
   const { data: me, isPending } = useMe();
-  if (isPending) return null;
+  if (isPending) return <LoadingState label="Opening steward tools…" />;
   if (!me || me.role < STEWARD_ROLE) return <StewardsOnlyNotice />;
   return <>{children}</>;
 }
@@ -87,17 +87,10 @@ interface AdminLayoutProps {
  */
 export function AdminLayout({ title, current, standfirst, children }: AdminLayoutProps) {
   return (
-    <SessionGate prompt="Sign in as a steward to manage this school.">
-      <RoleGate>
-        <Screen
-          title={title}
-          standfirst={standfirst}
-          back={current !== 'overview'}
-          beneathTitle={<AdminSubNav current={current} />}
-        >
-          <div className="safe-x">{children}</div>
-        </Screen>
-      </RoleGate>
+    <SessionGate screen prompt="Sign in as a steward to manage this school.">
+      <Screen title={title} layout="admin" standfirst={standfirst} back={current !== 'overview'}>
+        <div className="safe-x"><RoleGate><div className="admin-workbench"><AdminSubNav current={current} /><div className="admin-content">{children}</div></div></RoleGate></div>
+      </Screen>
     </SessionGate>
   );
 }
@@ -106,19 +99,12 @@ export function AdminLayout({ title, current, standfirst, children }: AdminLayou
 export function AdminOverviewScreen() {
   return (
     <AdminLayout
-      title="Admin"
+      title="Steward tools"
       current="overview"
-      standfirst="Steward tools: policy, moderation, peers, and the monthly newsletter."
+      standfirst="Care for the commons. Keep the school welcoming, connected, and in good hands."
     >
-      <ul className="space-y-3">
-        {TABS.map((tab) => (
-          <li key={tab.key} className="plate p-3.5">
-            <Link to={tab.to} className="text-body font-bold text-blue">
-              {tab.label}
-            </Link>
-          </li>
-        ))}
-      </ul>
+      <ul className="admin-tools">{TABS.filter(tab => tab.key !== 'overview').map(tab => <li key={tab.key}><Link to={tab.to} className="admin-tool"><FieldGlyph seed={tab.key}/><h2>{tab.label}</h2><p>{tab.description}</p></Link></li>)}</ul>
+
     </AdminLayout>
   );
 }
