@@ -131,7 +131,7 @@ describe('EventEditScreen', () => {
     renderScreen();
 
     fireEvent.change(await screen.findByLabelText(/class title/i), { target: { value: 'Sourdough basics' } });
-    fireEvent.change(screen.getByLabelText(/^starts$/i), { target: { value: '2026-10-01T18:00' } }); // a Thursday
+    fireEvent.change(screen.getByLabelText(/^starts$/i), { target: { value: '2026-10-01T18:00' } }); // a Thursday evening
     fireEvent.click(screen.getByLabelText(/venue needed/i));
 
     fireEvent.click(screen.getByRole('button', { name: 'Weekly' }));
@@ -141,7 +141,12 @@ describe('EventEditScreen', () => {
 
     await waitFor(() => expect(api.events.create).toHaveBeenCalled());
     const body = vi.mocked(api.events.create).mock.calls[0]![0];
-    expect(body.series).toMatchObject({ freq: 'weekly', byDay: ['TH'] });
+    // A 6pm start in this machine's zone (America/Denver, per the test
+    // environment) is already the next day in UTC, and `rrule`'s BYDAY
+    // matches `getUTCDay()` — so the wire-level code for the host's "Thu"
+    // click is its UTC-equivalent, "FR" (see recurrence.ts's `effectiveByDay`
+    // doc comment; this is the bug found verifying this task manually).
+    expect(body.series).toMatchObject({ freq: 'weekly', byDay: ['FR'] });
     expect(body.series!.rrule).toContain('FREQ=WEEKLY');
   });
 

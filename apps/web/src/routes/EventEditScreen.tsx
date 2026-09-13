@@ -149,11 +149,11 @@ function EventEditForm() {
   const previewDates = useMemo(() => {
     if (!startsAtIso || recurrence.freq === 'none') return [];
     try {
-      return previewOccurrences(recurrence, startsAtIso, 4);
+      return previewOccurrences(recurrence, startsAtIso, timezone, 4);
     } catch {
       return [];
     }
-  }, [recurrence, startsAtIso]);
+  }, [recurrence, startsAtIso, timezone]);
 
   const flatSkills = useMemo(() => flattenSkills(skillTree?.skills ?? []), [skillTree]);
   const selectedSkill = flatSkills.find((s) => s.uri === skillUri);

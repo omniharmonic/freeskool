@@ -65,20 +65,82 @@ const RRULE_WEEKDAY: Record<WeekdayCode, Weekday> = {
   SU: RRule.SU,
 };
 
-/** The weekday of an ISO date(-time) string's own date digits — deliberately
- * not a local-timezone conversion, since the calendar day a host typed is
- * the day that matters, not what the viewing browser's clock says it is. */
-function weekdayCodeOfDateString(iso: string): WeekdayCode {
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
-  if (!match) return 'MO';
-  const [, y, m, d] = match;
-  const utc = new Date(Date.UTC(Number(y), Number(m) - 1, Number(d)));
-  return WEEKDAY_CODES[(utc.getUTCDay() + 6) % 7]!;
+const WEEKDAY_INDEX: Record<WeekdayCode, number> = { MO: 0, TU: 1, WE: 2, TH: 3, FR: 4, SA: 5, SU: 6 };
+const SHORT_WEEKDAY_TO_CODE: Record<string, WeekdayCode> = {
+  Mon: 'MO',
+  Tue: 'TU',
+  Wed: 'WE',
+  Thu: 'TH',
+  Fri: 'FR',
+  Sat: 'SA',
+  Sun: 'SU',
+};
+
+/** The weekday `rrule` itself will see. `RRule` (both here and in the
+ * materializer, `apps/appview/src/jobs/materialize-series.ts`) is UTC-naive:
+ * `BYDAY` matches a candidate's `getUTCDay()`, not the host's local calendar
+ * day. An evening class in any zone west of UTC (Denver 6:30pm is already
+ * Friday 00:30 UTC) lands on a DIFFERENT weekday in UTC than the one the host
+ * typed — send `BYDAY=TH` for that and the server's RRule engine searches
+ * forward for the next UTC-Thursday AT OR AFTER `dtstart`, which is up to 6
+ * days later: the host's own first class silently falls outside its own
+ * series, and every later occurrence is materialized a week later than
+ * intended. Confirmed against the live AppView + materializer while
+ * verifying this task: a `-06:00` Thursday evening start with `BYDAY=TH`
+ * produced 8 "TH" occurrences that were all actually a week late, because
+ * `getUTCDay()` of that instant is Friday. */
+function utcWeekdayCode(iso: string): WeekdayCode {
+  const instant = new Date(iso);
+  if (Number.isNaN(instant.getTime())) return 'MO';
+  return WEEKDAY_CODES[(instant.getUTCDay() + 6) % 7]!;
 }
 
-function effectiveByDay(state: Pick<RecurrenceState, 'freq' | 'byDay'>, startsAt: string): WeekdayCode[] | undefined {
+/**
+ * The weekday the host actually meant, in THEIR timezone — not the ISO
+ * string's own date digits. By the time `startsAt` reaches this module it is
+ * already a UTC `Z` instant (`EventEditScreen.tsx`'s `localToIso` converts
+ * the `datetime-local` value before calling `buildRecurrence`), so recovering
+ * "what calendar day was this for the host" needs the IANA zone, not string
+ * parsing — and `Intl`'s own DST-aware conversion is more correct than
+ * reconstructing it from a fixed UTC offset besides.
+ */
+function localWeekdayCode(iso: string, timezone: string): WeekdayCode {
+  const instant = new Date(iso);
+  if (Number.isNaN(instant.getTime())) return 'MO';
+  try {
+    const short = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short' }).format(instant);
+    return SHORT_WEEKDAY_TO_CODE[short] ?? utcWeekdayCode(iso);
+  } catch {
+    return utcWeekdayCode(iso); // an unrecognized IANA zone name: fall back to UTC (shift 0)
+  }
+}
+
+function shiftWeekday(code: WeekdayCode, shift: number): WeekdayCode {
+  const idx = (((WEEKDAY_INDEX[code] + shift) % 7) + 7) % 7;
+  return WEEKDAY_CODES[idx]!;
+}
+
+/** Every day of the week shifts by the SAME amount between "local calendar
+ * day" and "the UTC day rrule sees" for a given instant (it is a fixed
+ * offset, not a per-day fact) — always -1, 0, or +1 for any real timezone. */
+function weekdayShift(startsAt: string, timezone: string): number {
+  return WEEKDAY_INDEX[utcWeekdayCode(startsAt)] - WEEKDAY_INDEX[localWeekdayCode(startsAt, timezone)];
+}
+
+/** The editor's weekday picker shows LOCAL days (the host types "Thursdays");
+ * this translates that choice — or the inferred default, the start date's
+ * own local day — into the UTC-equivalent codes `rrule` needs to actually
+ * include `dtstart` as the series' first occurrence. See `utcWeekdayCode`'s
+ * doc comment for why the translation exists at all. */
+function effectiveByDay(
+  state: Pick<RecurrenceState, 'freq' | 'byDay'>,
+  startsAt: string,
+  timezone: string,
+): WeekdayCode[] | undefined {
   if (state.freq === 'monthly' || state.freq === 'none') return undefined;
-  return state.byDay.length > 0 ? state.byDay : [weekdayCodeOfDateString(startsAt)];
+  const local = state.byDay.length > 0 ? state.byDay : [localWeekdayCode(startsAt, timezone)];
+  const shift = weekdayShift(startsAt, timezone);
+  return shift === 0 ? local : local.map((code) => shiftWeekday(code, shift));
 }
 
 /** `2026-12-31T23:59:59.000Z` → `20261231T235959Z` (RFC 5545 UTC DATE-TIME). */
@@ -113,7 +175,7 @@ export function buildRecurrence(
   if (state.freq === 'none') return undefined;
   validateEnd(state.count, state.until);
 
-  const byDay = effectiveByDay(state, startsAt);
+  const byDay = effectiveByDay(state, startsAt, timezone);
   const interval = state.freq === 'biweekly' ? 2 : 1;
   const freq: EventSeriesInput['freq'] = state.freq === 'monthly' ? 'monthly' : 'weekly';
 
@@ -137,14 +199,16 @@ export function buildRecurrence(
 /** A client-side preview of the next `n` occurrences (inclusive of the start
  * date), for the editor's "next 4 classes" line. Builds the rule directly
  * rather than round-tripping `buildRecurrence`'s string, since this only
- * ever runs in the browser. */
-export function previewOccurrences(state: RecurrenceState, startsAt: string, n = 4): Date[] {
+ * ever runs in the browser. `timezone` must be the same zone `buildRecurrence`
+ * will be called with, or the preview can disagree with what actually gets
+ * posted. */
+export function previewOccurrences(state: RecurrenceState, startsAt: string, timezone: string, n = 4): Date[] {
   if (state.freq === 'none' || !startsAt) return [];
   validateEnd(state.count, state.until);
   const dtstart = new Date(startsAt);
   if (Number.isNaN(dtstart.getTime())) return [];
 
-  const byDay = effectiveByDay(state, startsAt);
+  const byDay = effectiveByDay(state, startsAt, timezone);
   const interval = state.freq === 'biweekly' ? 2 : 1;
   const rule = new RRule({
     freq: state.freq === 'monthly' ? RRule.MONTHLY : RRule.WEEKLY,
