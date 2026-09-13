@@ -85,9 +85,10 @@ rsvps.post('/rsvp', requireViewer, async (c) => {
 
   await upsertRsvp({ eventUri, did: viewer.did, status: finalStatus, alsoPublicRecord, publicRecordUri })
 
-  // A departure from 'going' frees a spot — promote whoever has waited longest.
+  // A departure from 'going' frees a spot — promote whoever has waited longest, and
+  // tell them (I2: the promoted member used to learn this only by checking back).
   if (existing?.status === 'going' && finalStatus !== 'going') {
-    await promoteFromWaitlist(eventUri)
+    await notifyIfPromoted(await promoteFromWaitlist(eventUri), eventUri, loaded.event.name)
   }
 
   // The host learns that someone RSVP'd. They are told WHO only because they will meet
@@ -120,7 +121,13 @@ rsvps.delete('/rsvp', requireViewer, async (c) => {
     await deletePublicRsvp(viewer, removed.publicRecordUri).catch(() => {})
   }
   // Clearing a 'going' RSVP frees a spot, same as switching away from it above.
-  if (removed?.wasGoing) await promoteFromWaitlist(eventUri)
+  if (removed?.wasGoing) {
+    const promoted = await promoteFromWaitlist(eventUri)
+    if (promoted) {
+      const loaded = await loadEvent(eventUri)
+      await notifyIfPromoted(promoted, eventUri, loaded?.event.name)
+    }
+  }
   return c.json({ ok: true, counts: await rsvpCounts(eventUri) })
 })
 
@@ -141,6 +148,28 @@ rsvps.get('/rsvp', requireViewer, async (c) => {
     counts: await rsvpCounts(eventUri),
   })
 })
+
+/**
+ * Tell a promoted member a spot opened up. Same dedup convention as the `rsvp.received`
+ * notification above (a static key per (event, did) pair, not per occurrence) — a second
+ * promotion of the same DID on the same event (waitlisted, promoted, left, re-waitlisted,
+ * promoted again) is the one case this intentionally does not re-notify, consistent with
+ * how `rsvp.received` already treats repeat transitions on the same event.
+ */
+async function notifyIfPromoted(
+  promoted: { did: string } | null,
+  eventUri: string,
+  eventName: string | undefined,
+): Promise<void> {
+  if (!promoted) return
+  await enqueueNotification({
+    did: promoted.did,
+    category: 'rsvp.promoted',
+    dedupKey: `rsvp.promoted:${eventUri}:${promoted.did}`,
+    title: `A spot opened up — you're in for "${eventName ?? 'the class'}"`,
+    navigate: `/events/${encodeURIComponent(eventUri)}`,
+  })
+}
 
 async function writePublicRsvp(
   viewer: { did: string; kind: 'custodial' | 'oauth'; sessionId: string },

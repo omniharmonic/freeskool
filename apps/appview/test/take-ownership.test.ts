@@ -38,7 +38,9 @@ import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './help
 import { revealOwnershipPassword, signup, takeOwnership } from '../src/lib/custody.js'
 import { agentForAppPassword } from '../src/lib/pds.js'
 import { custodialAccount, ownershipReveal } from '../src/db/schema.js'
-import { config } from '../src/config.js'
+import { config, resetConfig } from '../src/config.js'
+
+const REAL_PDS_ADMIN_PASSWORD = process.env.PDS_ADMIN_PASSWORD
 
 let dbOk = false
 let pdsOk = false
@@ -96,11 +98,87 @@ describe('takeOwnership', () => {
     await expect(takeOwnership('did:plc:never-signed-up')).rejects.toMatchObject({ status: 404, code: 'NotFound' })
   })
 
-  it('refuses a second take-ownership call for an account that already owns itself', async () => {
+  it('refuses a second call while the first reveal link is still unused and unexpired (409 RevealPending, with its expiry)', async () => {
     if (!pdsOk) return
-    const account = await makeCustodialAccount(`${Date.now()}-again`)
+    const account = await makeCustodialAccount(`${Date.now()}-pending`)
     await takeOwnership(account.did)
-    await expect(takeOwnership(account.did)).rejects.toMatchObject({ status: 409, code: 'AlreadyOwned' })
+    let caught: unknown
+    try {
+      await takeOwnership(account.did)
+    } catch (err) {
+      caught = err
+    }
+    expect(caught).toMatchObject({ status: 409, code: 'RevealPending' })
+    expect((caught as { expiresAt?: Date }).expiresAt).toBeInstanceOf(Date)
+  })
+
+  it('RE-ISSUE (review round 1, C1): once the first link has been used, a second call rotates again and issues a fresh working link', async () => {
+    if (!pdsOk) return
+    const account = await makeCustodialAccount(`${Date.now()}-reissue`)
+    const first = await takeOwnership(account.did)
+    const firstReveal = await revealOwnershipPassword(tokenFromRevealUrl(first.revealUrl!))
+    expect(firstReveal.ok).toBe(true)
+
+    // The first link is now used, so a second call must succeed rather than 409.
+    const second = await takeOwnership(account.did)
+    expect(second.revealUrl).toBeDefined()
+    expect(second.revealUrl).not.toBe(first.revealUrl)
+
+    const secondReveal = await revealOwnershipPassword(tokenFromRevealUrl(second.revealUrl!))
+    expect(secondReveal.ok).toBe(true)
+    if (!secondReveal.ok) return
+    // The SECOND password is the one that actually works now — proves the re-issue
+    // really did rotate the PDS password again, not just mint a new token for the old one.
+    const { session } = await agentForAppPassword(account.did, secondReveal.password)
+    expect(session.did).toBe(account.did)
+  })
+
+  it('RE-ISSUE after the first link merely EXPIRES (never used): a second call still succeeds and voids the stale row', async () => {
+    if (!pdsOk) return
+    const account = await makeCustodialAccount(`${Date.now()}-expired-reissue`)
+    const first = await takeOwnership(account.did)
+    const firstTokenHash = (await import('../src/lib/crypto.js')).hashToken(tokenFromRevealUrl(first.revealUrl!))
+    // Force the first row to look expired without waiting 24h.
+    await testDb().update(ownershipReveal).set({ expiresAt: new Date(Date.now() - 1000) }).where(eq(ownershipReveal.tokenHash, firstTokenHash))
+
+    const second = await takeOwnership(account.did)
+    expect(second.revealUrl).toBeDefined()
+
+    const rows = await testDb().select().from(ownershipReveal).where(eq(ownershipReveal.did, account.did))
+    // The expired-unused first row was voided; only the fresh one remains.
+    expect(rows.length).toBe(1)
+    expect(rows[0]?.tokenHash).not.toBe(firstTokenHash)
+  })
+
+  it('ROLLBACK (review round 1, C1): a PDS rotation failure leaves the account exactly as it was, and a retry then succeeds', async () => {
+    if (!pdsOk) return
+    const account = await makeCustodialAccount(`${Date.now()}-rollback`)
+    const before = (await testDb().select().from(custodialAccount).where(eq(custodialAccount.did, account.did)))[0]!
+
+    // Force the admin PDS call to fail: a wrong admin password is a genuine PDS-side
+    // failure (401), not a mock — proving the rollback path against the real service.
+    process.env.PDS_ADMIN_PASSWORD = 'deliberately-wrong-admin-password'
+    resetConfig()
+    try {
+      await expect(takeOwnership(account.did)).rejects.toMatchObject({ status: 502, code: 'PdsRotationFailed' })
+    } finally {
+      process.env.PDS_ADMIN_PASSWORD = REAL_PDS_ADMIN_PASSWORD
+      resetConfig()
+    }
+
+    // Rolled back to EXACTLY the prior state — no orphaned reveal row, no flipped flag.
+    const afterFailure = (await testDb().select().from(custodialAccount).where(eq(custodialAccount.did, account.did)))[0]!
+    expect(afterFailure.isCustodial).toBe(before.isCustodial)
+    expect(afterFailure.wrappedPassword).toEqual(before.wrappedPassword)
+    expect(afterFailure.ownedAt).toBeNull()
+    const revealRows = await testDb().select().from(ownershipReveal).where(eq(ownershipReveal.did, account.did))
+    expect(revealRows.length).toBe(0)
+
+    // A plain retry, with the real admin password restored, now succeeds normally.
+    const retried = await takeOwnership(account.did)
+    expect(retried.revealUrl).toBeDefined()
+    const retriedRow = (await testDb().select().from(custodialAccount).where(eq(custodialAccount.did, account.did)))[0]!
+    expect(retriedRow.isCustodial).toBe(false)
   })
 
   it('the revealed password actually works: com.atproto.server.createSession succeeds with it', async () => {

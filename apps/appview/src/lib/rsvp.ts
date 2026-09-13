@@ -139,18 +139,35 @@ export async function resolveGoingOrWaitlist(
  * A spot opened up: promote the earliest-by-`createdAt` waitlisted row to `'going'`.
  * Returns the promoted DID, or `null` when nobody was waiting. Callers decide whether to
  * notify them.
+ *
+ * FIX (review round 1, I1): SELECT-then-UPDATE was a lost-update race — two concurrent
+ * promotions could both SELECT the same earliest row before either UPDATEd it, so only
+ * one person actually got promoted even though two spots opened. The UPDATE now carries
+ * `status = 'waitlisted'` in its OWN `WHERE` and is checked via `.returning()`: if
+ * another promotion already claimed that exact row between our SELECT and UPDATE, we
+ * get zero rows back and retry against the next-earliest one instead of returning a
+ * stale result.
  */
 export async function promoteFromWaitlist(eventUri: string): Promise<{ did: string } | null> {
   const db = getDb()
-  const [earliest] = await db
-    .select({ id: rsvp.id, did: rsvp.did })
-    .from(rsvp)
-    .where(and(eq(rsvp.eventUri, eventUri), eq(rsvp.status, 'waitlisted' satisfies RsvpStatus)))
-    .orderBy(asc(rsvp.createdAt))
-    .limit(1)
-  if (!earliest) return null
-  await db.update(rsvp).set({ status: 'going', updatedAt: new Date() }).where(eq(rsvp.id, earliest.id))
-  return { did: earliest.did }
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const [earliest] = await db
+      .select({ id: rsvp.id })
+      .from(rsvp)
+      .where(and(eq(rsvp.eventUri, eventUri), eq(rsvp.status, 'waitlisted' satisfies RsvpStatus)))
+      .orderBy(asc(rsvp.createdAt))
+      .limit(1)
+    if (!earliest) return null
+    const promoted = await db
+      .update(rsvp)
+      .set({ status: 'going', updatedAt: new Date() })
+      .where(and(eq(rsvp.id, earliest.id), eq(rsvp.status, 'waitlisted' satisfies RsvpStatus)))
+      .returning({ did: rsvp.did })
+    if (promoted[0]) return { did: promoted[0].did }
+    // Someone else promoted (or otherwise changed) this exact row first — retry against
+    // whichever row is now earliest.
+  }
+  return null
 }
 
 /** 1-based position in the waitlist queue, or `null` if this DID is not waitlisted. */

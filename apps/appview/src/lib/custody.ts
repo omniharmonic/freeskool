@@ -11,7 +11,7 @@
  *
  * The handle is `<word><word><NNN>.<domain>` and is NEVER derived from the email (R9).
  */
-import { and, eq, gt, isNull } from 'drizzle-orm'
+import { and, desc, eq, gt, isNull } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { custodialAccount, emailVerification, invite, ownershipReveal } from '../db/schema.js'
 import { config } from '../config.js'
@@ -172,75 +172,134 @@ export const OWNERSHIP_REVEAL_TTL_MS = 24 * 3_600_000
 
 export interface TakeOwnershipResult {
   handle: string
-  /** Returned ONLY when SMTP is unconfigured, so local development can see the link. */
+  /** Returned when SMTP is unconfigured, OR when the send itself failed — see below. */
   revealUrl?: string
 }
 
 /**
- * The exit from custody — resolves the open question the stub above used to leave
- * unanswered ("step 2"), by never holding the NEW password at all except for the single
- * 24h reveal window:
+ * Thrown instead of rotating again while an unused, unexpired reveal link already
+ * exists for this DID — re-rotating would silently orphan that link's password (the
+ * member who has it would be holding a password the PDS no longer accepts). Carries
+ * `expiresAt` so the caller can say "check your email, the link is good until then."
+ */
+export class RevealPendingError extends SignupError {
+  constructor(readonly expiresAt: Date) {
+    super('a take-ownership link is already pending for this account', 409, 'RevealPending')
+  }
+}
+
+async function latestReveal(did: string) {
+  const rows = await getDb().select().from(ownershipReveal).where(eq(ownershipReveal.did, did)).orderBy(desc(ownershipReveal.createdAt)).limit(1)
+  return rows[0] ?? null
+}
+
+/**
+ * The exit from custody. FIX (review round 1, C1): the DB state (the reveal row + the
+ * `isCustodial` flip) is now committed BEFORE the PDS call, in one transaction, and
+ * rolled back to EXACTLY what it was if the PDS call then fails — the old ordering could
+ * strand a member with neither a working old credential (flipped away) nor a working new
+ * one (the PDS was never actually told to rotate, because the insert/flip/mail chain
+ * failed somewhere after it). Sequence:
  *
  *   1. the caller is already authenticated as this DID (`requireViewer`, in auth.ts) —
  *      that IS "the session belongs to the custodial account"; a second factor is not
  *      this step's job.
- *   2. rotate the PDS password ADMIN-SIDE, to a fresh random one
- *      (`com.atproto.admin.updateAccountPassword`) — this needs no session of the
- *      member's own and does not touch (or require) the password we currently hold.
- *   3. set `isCustodial = false`, clear `wrappedPassword` — our OLD credential is
- *      worthless the instant the PDS password rotates, so there is nothing left to
- *      protect by keeping it.
- *   4. wrap the NEW password under the same versioned custody key, but in a SEPARATE,
- *      single-use, 24h-TTL table (`fs_ownership_reveal`) keyed by a token we email the
- *      member — never the password itself. `GET /api/auth/take-ownership/:token`
- *      (`revealOwnershipPassword`) is the only reader, and it nulls the wrapped blob the
- *      moment it answers, so "we never learn or keep the final password" holds past the
- *      first (and only) time the member opens the link.
- *   5. future writes on this DID's behalf through `actorAgent` now 401
+ *   2. refuse (409 `RevealPending`) if an unused, unexpired reveal link already exists —
+ *      re-rotating now would orphan it. Otherwise, clear any prior UNUSED (necessarily
+ *      expired, by the check just above) row for this DID — at most one "live" reveal row
+ *      per DID at a time.
+ *   3. generate the new password, wrap it, and in ONE transaction: insert the new
+ *      `fs_ownership_reveal` row and flip `fs_custodial_account` (`isCustodial = false`,
+ *      `wrappedPassword = null`, `ownedAt = now()`). This is allowed to run again for an
+ *      account that is ALREADY non-custodial — re-issuing a missed link — since nothing
+ *      about the flip itself is false to repeat.
+ *   4. rotate the PDS password ADMIN-SIDE (`com.atproto.admin.updateAccountPassword`) —
+ *      needs no session of the member's own. If this throws, the PDS password was NOT
+ *      actually changed, so step 3 is undone exactly (delete the new row, restore the
+ *      account row's prior snapshot) and we 502 — the member can simply retry.
+ *   5. email the reveal link. A mail failure does not lose the token: it is logged (no
+ *      identifiers) and `revealUrl` is still returned — the caller is already proven to
+ *      be this account's own session, so showing them the link directly is exactly as
+ *      safe as the email would have been.
+ *   6. future writes on this DID's behalf through `actorAgent` now 401
  *      (`NoActorCredentialError`) until the member signs in via OAuth — the secondary
  *      door, exactly like any other existing account. The UI explains this (Task 10).
  */
 export async function takeOwnership(did: string): Promise<TakeOwnershipResult> {
   const row = await getCustodialAccount(did)
   if (!row) throw new SignupError('no custodial account for this session', 404, 'NotFound')
-  if (!row.isCustodial) throw new SignupError('this account has already taken full ownership', 409, 'AlreadyOwned')
+
+  const pending = await latestReveal(did)
+  if (pending && !pending.usedAt && pending.expiresAt.getTime() > Date.now()) {
+    throw new RevealPendingError(pending.expiresAt)
+  }
+  // Any remaining UNUSED row here is necessarily expired (the check above already
+  // refused a live one) — clear it before issuing a fresh one.
+  await getDb().delete(ownershipReveal).where(and(eq(ownershipReveal.did, did), isNull(ownershipReveal.usedAt)))
 
   const newPassword = randomPassword(18) // 18 bytes -> 24 base64url chars
-  await updateAccountPassword(did, newPassword)
-
-  await getDb()
-    .update(custodialAccount)
-    .set({ isCustodial: false, wrappedPassword: null, ownedAt: new Date() })
-    .where(eq(custodialAccount.did, did))
-
   const wrapped = wrapSecret(newPassword)
   const token = newToken()
-  await getDb().insert(ownershipReveal).values({
-    tokenHash: hashToken(token),
-    did,
-    keyVersion: wrapped.keyVersion,
-    wrappedPassword: wrapped.blob,
-    expiresAt: new Date(Date.now() + OWNERSHIP_REVEAL_TTL_MS),
+  const tokenHash = hashToken(token)
+  const expiresAt = new Date(Date.now() + OWNERSHIP_REVEAL_TTL_MS)
+
+  // Snapshot of the credential state to restore exactly if the PDS call below fails.
+  const prior = {
+    isCustodial: row.isCustodial,
+    wrappedPassword: row.wrappedPassword,
+    keyVersion: row.keyVersion,
+    ownedAt: row.ownedAt,
+  }
+
+  await getDb().transaction(async (tx) => {
+    await tx.insert(ownershipReveal).values({ tokenHash, did, keyVersion: wrapped.keyVersion, wrappedPassword: wrapped.blob, expiresAt })
+    await tx
+      .update(custodialAccount)
+      .set({ isCustodial: false, wrappedPassword: null, ownedAt: new Date() })
+      .where(eq(custodialAccount.did, did))
   })
 
+  try {
+    await updateAccountPassword(did, newPassword)
+  } catch (err) {
+    // The PDS password was NOT actually changed — undo step 3 exactly, so the member's
+    // existing credential (ours, or the PDS's) is still consistent, and a retry is just
+    // calling this again.
+    await getDb().transaction(async (tx) => {
+      await tx.delete(ownershipReveal).where(eq(ownershipReveal.tokenHash, tokenHash))
+      await tx.update(custodialAccount).set(prior).where(eq(custodialAccount.did, did))
+    })
+    log.error('take-ownership PDS rotation failed; rolled back, member can retry')
+    throw new SignupError('could not rotate the PDS password — nothing changed; please try again', 502, 'PdsRotationFailed')
+  }
+
   const url = `${config().APPVIEW_PUBLIC_URL}/api/auth/take-ownership/${encodeURIComponent(token)}`
-  await sendMail({
-    to: row.email,
-    subject: 'Take full ownership of your Free School account',
-    text: [
-      `You asked to take full ownership of @${row.handle}.`,
-      '',
-      'Open this link to see your new password (it is shown ONCE, so save it somewhere safe):',
-      url,
-      '',
-      'After that, sign in with it at your PDS and change it to one of your own choosing.',
-      "You can export your full repo any time with com.atproto.sync.getRepo — it is your data, not ours.",
-      '',
-      'The link works once and expires in 24 hours. From now on, publishing here needs a real sign-in.',
-    ].join('\n'),
-  })
+  let mailOk = true
+  try {
+    await sendMail({
+      to: row.email,
+      subject: 'Take full ownership of your Free School account',
+      text: [
+        `You asked to take full ownership of @${row.handle}.`,
+        '',
+        'Open this link to see your new password (it is shown ONCE, so save it somewhere safe):',
+        url,
+        '',
+        'After that, sign in with it at your PDS and change it to one of your own choosing.',
+        "You can export your full repo any time with com.atproto.sync.getRepo — it is your data, not ours.",
+        '',
+        'The link works once and expires in 24 hours. From now on, publishing here needs a real sign-in.',
+      ].join('\n'),
+    })
+  } catch {
+    mailOk = false
+    log.warn('ownership reveal mail failed')
+  }
   log.info('custodial account took ownership')
-  return { handle: row.handle, ...(config().SMTP_URL ? {} : { revealUrl: url }) }
+  // The link is shown directly whenever mail is unconfigured OR mail genuinely failed —
+  // the caller is proven to be this account's own session either way, so this is not a
+  // new exposure, only a fallback for a send that would otherwise lose the token.
+  return { handle: row.handle, ...(config().SMTP_URL && mailOk ? {} : { revealUrl: url }) }
 }
 
 export type RevealOwnershipResult =

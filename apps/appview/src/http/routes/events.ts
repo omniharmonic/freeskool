@@ -33,11 +33,12 @@ import { viewerRelation } from '../relation.js'
 import { toCalendarEvent } from './calendar.js'
 import { buildIcs, icsStatus } from '../../lib/ics.js'
 import { getDb } from '../../db/index.js'
-import { attendance, attendanceRollup, custodialAccount } from '../../db/schema.js'
+import { appMeta, attendance, attendanceRollup, custodialAccount } from '../../db/schema.js'
 import { rowId } from '../../lib/ids.js'
 import { bumpTally, roleOf } from '../../lib/roles.js'
 import { rsvpCounts, rsvpRoster } from '../../lib/rsvp.js'
 import { getEventExtra } from '../../lib/event-extra.js'
+import { PROFILE_KEY, type Profile } from './me.js'
 
 export const events = new Hono<AppEnv>()
 
@@ -171,10 +172,11 @@ events.get('/events/:id', async (c) => {
   const relation = viewer ? await viewerRelation(viewer, uri, loaded.hostDid) : 'public'
   if (!loaded.listed && relation === 'public') return c.json({ error: 'NotFound' }, 404)
   // The raw visibility enum (listed|unlisted|private) is a moderation/host-facing fact,
-  // never shown to an ordinary viewer — it is not shown to an 'rsvp'/'attendee' relation
-  // either, only to the host themselves or a steward. Same gate the roster route uses.
-  const isHost = viewer?.did === loaded.hostDid
-  const canSeeRawVisibility = isHost || relation === 'steward'
+  // never shown to an ordinary viewer. FIX (review round 1, M2): this used to gate on
+  // `relation === 'steward'`, but `viewerRelation` checks attendee/rsvp BEFORE steward,
+  // so a steward who had also RSVP'd would resolve to 'rsvp' and lose raw visibility.
+  // Use the same `roleOf`-based host-or-steward check the roster route uses instead.
+  const canSeeRawVisibility = viewer ? canViewRoster(loaded.hostDid, viewer.did, await roleOf(viewer.did)) : false
   return c.json({
     ...projectEvent(loaded.event, loaded.inputs, relation),
     listed: loaded.listed,
@@ -205,16 +207,38 @@ events.get('/events/:id/rsvps', requireViewer, async (c) => {
     return c.json({ error: 'PermissionDenied', message: 'only the host of this class or a steward may see who is coming' }, 403)
   }
   const rows = await rsvpRoster(uri)
-  const handles = await handlesForDids(rows.map((r) => r.did))
+  const dids = rows.map((r) => r.did)
+  const [handles, displayNames] = await Promise.all([handlesForDids(dids), displayNamesForDids(dids)])
   return c.json(
     rows.map((r) => ({
       did: r.did,
       handle: handles[r.did] ?? r.did,
+      ...(displayNames[r.did] ? { displayName: displayNames[r.did] } : {}),
       status: r.status,
       createdAt: r.createdAt.toISOString(),
     })),
   )
 })
+
+/**
+ * Roster `displayName` (review I3): the app-side profile a member sets at `PUT /api/me`
+ * (`fs_app_meta`, key `profile:<did>` — see `http/routes/me.ts`). One batched `inArray`
+ * query for every DID on the roster, never one query per row. Omitted when the member
+ * never set one.
+ */
+async function displayNamesForDids(dids: string[]): Promise<Record<string, string>> {
+  if (dids.length === 0) return {}
+  const rows = await getDb()
+    .select({ key: appMeta.key, value: appMeta.value })
+    .from(appMeta)
+    .where(inArray(appMeta.key, dids.map(PROFILE_KEY)))
+  const out: Record<string, string> = {}
+  for (const r of rows) {
+    const displayName = (r.value as Profile | undefined)?.displayName
+    if (displayName) out[r.key.slice('profile:'.length)] = displayName
+  }
+  return out
+}
 
 /**
  * Best-effort DID -> handle for the roster only — never authoritative, never cached.

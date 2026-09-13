@@ -121,6 +121,30 @@ describe('waitlist — promoteFromWaitlist', () => {
     if (!available) return
     expect(await promoteFromWaitlist(EVENT)).toBeNull()
   })
+
+  it('FIX (review round 1, I1): concurrent promotions fill distinct rows, never the same one twice', async () => {
+    if (!available) return
+    const dids = ['did:plc:one', 'did:plc:two', 'did:plc:three']
+    for (const did of dids) {
+      await upsertRsvp({ eventUri: EVENT, did, status: 'waitlisted' })
+      await new Promise((r) => setTimeout(r, 2))
+    }
+
+    const results = await Promise.all([
+      promoteFromWaitlist(EVENT),
+      promoteFromWaitlist(EVENT),
+      promoteFromWaitlist(EVENT),
+    ])
+    const promotedDids = results.map((r) => r?.did)
+    // No nulls (three rows were waiting for three concurrent calls), and no duplicate —
+    // the lost-update bug would have let two calls promote the SAME earliest row.
+    expect(promotedDids.every(Boolean)).toBe(true)
+    expect(new Set(promotedDids).size).toBe(3)
+
+    const counts = await rsvpCounts(EVENT)
+    expect(counts.going).toBe(3)
+    expect(counts.waitlisted).toBe(0)
+  })
 })
 
 describe('waitlist — waitlistPosition', () => {

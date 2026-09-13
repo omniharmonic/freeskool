@@ -51,9 +51,10 @@ export const me = new Hono<AppEnv>()
 
 me.use('*', requireViewer)
 
-const PROFILE_KEY = (did: string) => `profile:${did}`
+/** Exported for `http/routes/events.ts`'s roster `displayName` lookup (review I3). */
+export const PROFILE_KEY = (did: string) => `profile:${did}`
 
-interface Profile {
+export interface Profile {
   displayName?: string
   bio?: string
 }

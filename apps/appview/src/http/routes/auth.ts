@@ -18,6 +18,7 @@ import {
   getCustodialAccount,
   takeOwnership,
   revealOwnershipPassword,
+  RevealPendingError,
   SignupError,
 } from '../../lib/custody.js'
 import { oauthClient, OAuthUnavailableError } from '../oauth.js'
@@ -118,8 +119,9 @@ auth.get('/me', requireViewer, async (c) => {
 /**
  * The exit from custody. The viewer must be signed in AS the custodial account (the
  * session check here IS "verify the session belongs to the custodial account" —
- * `requireViewer` already refused anyone without a session, and `takeOwnership` itself
- * refuses a DID that is not custodial). See `lib/custody.ts` for the full five-step flow.
+ * `requireViewer` already refused anyone without a session). See `lib/custody.ts` for
+ * the full transactional flow, including the re-issue path for a missed first link and
+ * the 502-and-retry path for a PDS rotation failure.
  */
 auth.post('/take-ownership', requireViewer, async (c) => {
   const viewer = c.var.viewer!
@@ -127,7 +129,10 @@ auth.post('/take-ownership', requireViewer, async (c) => {
     const result = await takeOwnership(viewer.did)
     return c.json({ ok: true, handle: result.handle, ...(result.revealUrl ? { revealUrl: result.revealUrl } : {}) })
   } catch (err) {
-    if (err instanceof SignupError) return c.json({ error: err.code, message: err.message }, err.status as 404 | 409)
+    if (err instanceof RevealPendingError) {
+      return c.json({ error: err.code, message: err.message, expiresAt: err.expiresAt.toISOString() }, 409)
+    }
+    if (err instanceof SignupError) return c.json({ error: err.code, message: err.message }, err.status as 404 | 502)
     throw err
   }
 })

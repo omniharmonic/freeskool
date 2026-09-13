@@ -35,6 +35,7 @@ export const CATEGORIES = [
   'event.changed',
   'event.cancelled',
   'rsvp.received',
+  'rsvp.promoted',
   'offering.published',
   'member.joined',
   'feedback.received',

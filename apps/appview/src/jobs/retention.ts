@@ -13,11 +13,16 @@
  *   sessions       expired rows deleted.
  *   oauth state    single-use state rows older than an hour are dead weight.
  *   notifications  delivered/failed outbox rows and read feed rows older than 90 days.
+ *   ownership reveal  `fs_ownership_reveal` rows that are USED (the one-time read
+ *                  already happened) or EXPIRED-and-never-used are purged — the wrapped
+ *                  password blob in a used row is already nulled at read time
+ *                  (`lib/custody.ts#revealOwnershipPassword`), so this is metadata
+ *                  cleanup, not a second line of secret-retention defense.
  *
  * Every step is idempotent and bounded, so it is safe to run more than once a day and
  * safe to run on a machine that was off for a week.
  */
-import { and, eq, isNotNull, isNull, lt, sql } from 'drizzle-orm'
+import { and, eq, isNotNull, isNull, lt, or, sql } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import {
   attendance,
@@ -26,6 +31,7 @@ import {
   notificationFeed,
   notificationOutbox,
   oauthState,
+  ownershipReveal,
   session,
 } from '../db/schema.js'
 import { closeDueWindows } from '../lib/feedback.js'
@@ -46,6 +52,7 @@ export interface RetentionResult {
   sessionsPruned: number
   oauthStatesPruned: number
   notificationsPruned: number
+  ownershipRevealsPurged: number
 }
 
 export async function runRetention(now = new Date()): Promise<RetentionResult> {
@@ -130,6 +137,12 @@ export async function runRetention(now = new Date()): Promise<RetentionResult> {
     .where(and(lt(notificationFeed.createdAt, keepCutoff), isNotNull(notificationFeed.readAt)))
     .returning({ id: notificationFeed.id })
 
+  /* 7. ownership reveal rows: used, or expired-and-never-used (review round 1, I4) */
+  const ownershipReveals = await db
+    .delete(ownershipReveal)
+    .where(or(isNotNull(ownershipReveal.usedAt), lt(ownershipReveal.expiresAt, now)))
+    .returning({ tokenHash: ownershipReveal.tokenHash })
+
   const result: RetentionResult = {
     invitersPurged: purged.length,
     attendanceCollapsed: collapsedRows,
@@ -138,6 +151,7 @@ export async function runRetention(now = new Date()): Promise<RetentionResult> {
     sessionsPruned: sessions.length,
     oauthStatesPruned: states.length,
     notificationsPruned: outbox.length + feed.length,
+    ownershipRevealsPurged: ownershipReveals.length,
   }
   log.info('retention pass complete', { ...result })
   return result
