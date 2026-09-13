@@ -1,5 +1,7 @@
 import { useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { AdminLayout } from './AdminLayout';
+import { adminErrorSentence } from './adminErrors';
 import { Button } from '../../components/bits';
 import { ApiError } from '../../lib/api';
 import { useApproveModerationMutation, useExecuteModerationMutation, useMe, useModerationQueue, useProposeModerationMutation } from '../../lib/queries';
@@ -26,15 +28,17 @@ const MIN_REASON_LENGTH = 10;
  * item and then clicks "Approve" on it always gets back 409 `AlreadyApproved`
  * — that response has no `message` field on the wire (the route returns just
  * `{error, approvals}`), so `ApiError.message` would otherwise fall back to
- * the generic "Request failed with status 409". `errorFor` below maps the
- * CODE to a specific, written sentence instead, per the brief's "never a
- * generic failure" rule. `execute`'s `ErrThresholdNotMet` DOES carry a real
- * message from the server (`deny()` in `app-custody.ts`), so that one is
- * rendered verbatim.
+ * the generic "Request failed with status 409". `adminErrorSentence`
+ * (`./adminErrors.ts`) maps that CODE, and `approve`/`execute`'s
+ * message-less `NotFound`/`AlreadyResolved`, to specific written sentences
+ * instead, per the brief's "never a generic failure" rule. `execute`'s
+ * `ErrThresholdNotMet` DOES carry a real message from the server (`deny()`
+ * in `app-custody.ts`), so that one is rendered verbatim.
  */
 export function ModerationScreen() {
   const { data: me } = useMe();
   const { data, isPending } = useModerationQueue();
+  const queryClient = useQueryClient();
   const proposeMutation = useProposeModerationMutation();
   const approveMutation = useApproveModerationMutation();
   const executeMutation = useExecuteModerationMutation();
@@ -73,7 +77,12 @@ export function ModerationScreen() {
     try {
       await approveMutation.mutateAsync(id);
     } catch (err) {
-      setItemErrors((prev) => ({ ...prev, [id]: approveErrorFor(err) }));
+      setItemErrors((prev) => ({ ...prev, [id]: adminErrorSentence(err, 'Could not approve. Try again.') }));
+      // The item may have vanished from the queue since it was loaded — refetch
+      // rather than leave a stale row the steward can keep clicking.
+      if (err instanceof ApiError && err.code === 'NotFound') {
+        void queryClient.invalidateQueries({ queryKey: ['moderation-queue'] });
+      }
     }
   };
 
@@ -83,7 +92,12 @@ export function ModerationScreen() {
       const result = await executeMutation.mutateAsync(id);
       setItemResults((prev) => ({ ...prev, [id]: result.ok ? 'Done.' : 'Could not run it.' }));
     } catch (err) {
-      setItemErrors((prev) => ({ ...prev, [id]: err instanceof ApiError ? err.message : 'Could not run it. Try again.' }));
+      setItemErrors((prev) => ({ ...prev, [id]: adminErrorSentence(err, 'Could not run it. Try again.') }));
+      // Another steward may have already run it, or it may be gone entirely —
+      // either way the stale row needs a fresh read, not another click.
+      if (err instanceof ApiError && (err.code === 'NotFound' || err.code === 'AlreadyResolved')) {
+        void queryClient.invalidateQueries({ queryKey: ['moderation-queue'] });
+      }
     }
   };
 
@@ -170,13 +184,6 @@ export function ModerationScreen() {
       </section>
     </AdminLayout>
   );
-}
-
-function approveErrorFor(err: unknown): string {
-  if (err instanceof ApiError && err.code === 'AlreadyApproved') {
-    return "You already signed off on this when you opened it — a different steward needs to approve before it can run.";
-  }
-  return err instanceof ApiError ? err.message : 'Could not approve. Try again.';
 }
 
 function QueueItemCard({

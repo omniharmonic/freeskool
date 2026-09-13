@@ -182,6 +182,50 @@ describe('ModerationScreen', () => {
     expect(screen.getByText(/needs 1 more approval/i)).toBeInTheDocument();
   });
 
+  it("maps the server's 409 AlreadyResolved on execute to a specific sentence, and refetches the queue", async () => {
+    const openItem = {
+      id: 'mod1',
+      action: 'remove-listing' as const,
+      subjectUri: 'at://did:plc:host1/community.lexicon.calendar.event/abc',
+      reason: 'spam listing',
+      status: 'open',
+      approvals: [
+        { stewardDid: STEWARD_DID, at: '2026-09-01T00:00:00Z' },
+        { stewardDid: 'did:plc:other-steward', at: '2026-09-01T00:00:00Z' },
+      ],
+      createdAt: '2026-09-01T00:00:00Z',
+    };
+    // The refetch's second `list()` call is held open deliberately: react-query
+    // keeps showing the OLD data while a refetch is in flight, so the item row
+    // (and its error text) stays on screen until this resolves — letting the
+    // test see the error sentence before asserting the queue then clears.
+    let resolveSecondList!: (value: { requiredApprovals: number; items: never[] }) => void;
+    const secondList = new Promise<{ requiredApprovals: number; items: never[] }>((resolve) => {
+      resolveSecondList = resolve;
+    });
+    vi.mocked(api.admin.moderation.list)
+      .mockResolvedValueOnce({ requiredApprovals: 2, items: [openItem] })
+      // A different steward beat this one to it — the refetch after the 409
+      // sees the item already resolved and gone from the open queue.
+      .mockImplementationOnce(() => secondList);
+    vi.mocked(api.admin.moderation.execute).mockRejectedValue(
+      new ApiError(409, 'AlreadyResolved', 'Request failed with status 409'),
+    );
+    renderScreen();
+    await screen.findByText('spam listing');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Run it' }));
+
+    expect(
+      await screen.findByText(/another steward already ran this\. refreshing the queue/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText('Request failed with status 409')).not.toBeInTheDocument();
+    await waitFor(() => expect(api.admin.moderation.list).toHaveBeenCalledTimes(2));
+
+    resolveSecondList({ requiredApprovals: 2, items: [] });
+    expect(await screen.findByText('Nothing open right now.')).toBeInTheDocument();
+  });
+
   it('shows only state and category in the public-projection preview — never the reason or a DID', async () => {
     vi.mocked(api.admin.moderation.list).mockResolvedValue({
       requiredApprovals: 2,

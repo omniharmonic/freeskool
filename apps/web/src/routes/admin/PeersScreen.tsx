@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { AdminLayout } from './AdminLayout';
+import { adminErrorSentence } from './adminErrors';
 import { Button } from '../../components/bits';
-import { ApiError } from '../../lib/api';
 import { usePeers, useSetPeersMutation } from '../../lib/queries';
 
 const looksLikeUrl = (s: string) => /^https?:\/\//i.test(s.trim());
@@ -14,7 +14,8 @@ const looksLikeUrl = (s: string) => /^https?:\/\//i.test(s.trim());
  *   - "add by handle or DID or host URL" (the brief's words) — `PUT
  *     /api/admin/peers`'s `add` field is `z.array(z.string().url())`
  *     server-side: a bare handle or DID is refused with 400 `InvalidRequest`
- *     (which carries no `message`, just the code). There is no
+ *     (which carries no `message`, just the code — `adminErrorSentence` in
+ *     `./adminErrors.ts` maps it to a written sentence). There is no
  *     handle/DID → PDS-endpoint resolution exposed to this route. So this
  *     screen only accepts a host URL and says so, rather than accepting
  *     input that would just 400.
@@ -47,7 +48,7 @@ export function PeersScreen() {
       await setPeersMutation.mutateAsync({ add: [value] });
       setHostInput('');
     } catch (err) {
-      setAddError(err instanceof ApiError ? err.message : 'Could not add that peer. Try again.');
+      setAddError(adminErrorSentence(err, 'Could not add that peer. Try again.'));
     }
   };
 
@@ -56,7 +57,7 @@ export function PeersScreen() {
     try {
       await setPeersMutation.mutateAsync({ remove: [host] });
     } catch (err) {
-      setAddError(err instanceof ApiError ? err.message : 'Could not remove that peer. Try again.');
+      setAddError(adminErrorSentence(err, 'Could not remove that peer. Try again.'));
     }
   };
 

@@ -91,8 +91,8 @@ export function PolicyScreen() {
               Role ladder
             </h2>
             <div className="plate divide-y-[1.5px] divide-rule">
-              <div className="p-3.5">
-                <p className="text-body">Who can join</p>
+              <fieldset className="m-0 border-0 p-3.5">
+                <legend className="p-0 text-body">Who can join</legend>
                 <div className="mt-2.5 space-y-2">
                   {MEMBER_GATE_OPTIONS.map((opt) => (
                     <label key={opt.value} className="flex items-start gap-2.5 text-caption">
@@ -107,7 +107,7 @@ export function PolicyScreen() {
                     </label>
                   ))}
                 </div>
-              </div>
+              </fieldset>
 
               <NumberField
                 label="Classes attended before someone can host"
