@@ -74,7 +74,7 @@ Done this session: pnpm workspace; 17 validated `freeschool.draft.*` lexicons (C
 
 ## 5. Decisions needed from Benjamin (blocking outward-facing steps)
 1. License: AGPL-3.0-or-later for the app (proposed) or MIT.
-2. Publish the repo under `clawmniharmonic` (public) — when.
+2. ~~Publish the repo~~ — done: https://github.com/omniharmonic/freeskool (public, `main` + `mvp`).
 3. Send the Lucian packet and the Lex questions (drafts in `docs/email-drafts/`).
 4. Neutral PDS hostname (domain to buy or reuse).
 5. Who holds the second rotation key for the school DID.
