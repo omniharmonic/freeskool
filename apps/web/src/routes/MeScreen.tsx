@@ -158,6 +158,10 @@ export function MeScreen() {
   const [draftVisibility, setDraftVisibility] = useState<'public' | 'school'>(oauthLocked ? 'school' : 'public');
   const [claimsError, setClaimsError] = useState<string | null>(null);
   const [tierBConfirmOpen, setTierBConfirmOpen] = useState(false);
+  // R1: the server still saved the school-only claims even though the repo credential has
+  // lapsed — this is not an error banner, just a nudge to re-sign-in before the next public
+  // publish/retract can go through.
+  const [reauthNotice, setReauthNotice] = useState(false);
 
   const matchingSkills = draftSkillSearch.trim()
     ? flatSkills.filter((s) => s.path.toLowerCase().includes(draftSkillSearch.trim().toLowerCase())).slice(0, 8)
@@ -191,13 +195,15 @@ export function MeScreen() {
   // try-then-confirm rather than trusting the client's own tier read.
   const submitClaims = async (confirmTierB: boolean) => {
     setClaimsError(null);
+    setReauthNotice(false);
     const body: { claims: SkillClaimInput[]; confirmTierB?: boolean } = {
       claims: claims.map((c) => ({ skill: c.skill, level: c.level, note: c.note, visibility: c.visibility })),
       ...(confirmTierB ? { confirmTierB: true } : {}),
     };
     try {
-      await setClaimsMutation.mutateAsync(body);
+      const result = await setClaimsMutation.mutateAsync(body);
       setTierBConfirmOpen(false);
+      setReauthNotice(Boolean(result.reauthRequired));
     } catch (err) {
       if (err instanceof ApiError && err.code === 'TierBConfirmRequired') {
         setTierBConfirmOpen(true);
@@ -443,6 +449,11 @@ export function MeScreen() {
         </div>
 
         {claimsError ? <p className="mt-2 text-body text-pink">{claimsError}</p> : null}
+        {reauthNotice ? (
+          <p className="mt-2 border-l-[3px] border-amber pl-3 text-caption text-ink-soft">
+            Saved here. Sign in again to update your public records.
+          </p>
+        ) : null}
         <div className="mt-3 mb-2">
           <Button wide onClick={() => void submitClaims(false)} disabled={setClaimsMutation.isPending}>
             Save what I can do

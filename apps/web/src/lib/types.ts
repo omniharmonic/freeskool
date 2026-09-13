@@ -291,7 +291,8 @@ export interface AttendanceSummary {
 
 export interface RequestItem {
   uri: string;
-  askedBy: string;
+  /** Omitted by the API for a non-asker viewer — never assume this is present. */
+  askedBy?: string;
   title: string;
   description?: string;
   skill?: string;
@@ -400,6 +401,15 @@ export interface SkillClaimsSetInput {
 export interface SkillClaimsSetResult {
   published: Array<{ uri: string; skill: string; level: string }>;
   keptAppSide: number;
+  /**
+   * R1: set when the member's repo credential has lapsed. The app-side (school-only)
+   * claims in this same request were still saved — `keptAppSide` reflects them — but
+   * nothing could be published or retracted on the PDS. The UI should prompt a
+   * re-sign-in rather than imply the whole save failed.
+   */
+  reauthRequired?: boolean;
+  /** Public records that could not be retracted because of `reauthRequired`. */
+  pendingRetractions?: number;
 }
 
 export interface SkillClaimsResponse {
