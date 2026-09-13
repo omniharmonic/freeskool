@@ -21,7 +21,8 @@
     "appoint-steward": "tsx scripts/appoint-steward.ts",
     "backfill-skill-claims": "tsx scripts/backfill-skill-claims.ts",
     "privacy-audit": "tsx scripts/privacy-audit.ts",
-    "smoke": "tsx scripts/smoke.ts"
+    "smoke": "tsx scripts/smoke.ts",
+    "reindex-skills": "tsx scripts/reindex-skills.ts"
   },
   "dependencies": {
     "@atmo-dev/contrail": "0.23.0",
