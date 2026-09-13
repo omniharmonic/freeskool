@@ -22,6 +22,9 @@ const samples = {
   'freeschool.draft.policy': { $type:'freeschool.draft.policy', title:'Free School Boulder rules', text:'No money changes hands for classes.', version:'1', effectiveAt: now, thresholds:{ hostMinAttended:0, feedbackK:3, destructiveActionStewards:2 }, createdAt: now },
   'freeschool.draft.moderationAction': { $type:'freeschool.draft.moderationAction', action:'remove-listing', reason:'Duplicate of an existing class.', actors:['did:plc:steward'], subjectRecord:'at://did:plc:abc/coop.lexicon.event.listing/3k', createdAt: now },
   'freeschool.draft.appeal': { $type:'freeschool.draft.appeal', action:sref, text:'It was not a duplicate.', createdAt: now },
+  'freeschool.draft.skillLevel': { $type:'freeschool.draft.skillLevel', event:sref, skill:'at://did:plc:abc/freeschool.draft.skill/bicycle-repair', level:2, prerequisites:'Bring your own bike.', createdAt: now },
+  'freeschool.draft.series': { $type:'freeschool.draft.series', firstEvent:sref, rrule:'FREQ=WEEKLY;INTERVAL=1;BYDAY=TH;COUNT=8', freq:'weekly', interval:1, byDay:['TH'], count:8, timezone:'America/Denver', materializeAhead:60, createdAt: now },
+  'freeschool.draft.occurrence': { $type:'freeschool.draft.occurrence', event:sref, series:sref, originalStartsAt: now, sequence:3, createdAt: now },
   'freeschool.draft.school': { $type:'freeschool.draft.school', name:'Free School Boulder', region:'Boulder, CO', peers:['did:plc:cohere'], tags:['skillshare','free-school'], createdAt: now },
 }
 let failed = 0
@@ -34,6 +37,7 @@ for (const d of docs) {
   } catch (e) { failed++; console.log('FAIL', d.id, '-', e.message) }
 }
 // negative checks
+try { lex.assertValidRecord('freeschool.draft.skillLevel', { $type:'freeschool.draft.skillLevel', event:sref, skill:'at://did:plc:abc/freeschool.draft.skill/x', level:4, createdAt: now }); console.log('FAIL negative: level 4 accepted'); failed++ } catch { console.log('OK   negative: level 4 rejected') }
 try { lex.assertValidRecord('freeschool.draft.moderationAction', { $type:'freeschool.draft.moderationAction', action:'remove-listing', reason:'', actors:['did:plc:s'], createdAt: now }); console.log('FAIL negative: empty reason accepted'); failed++ } catch { console.log('OK   negative: empty reason rejected') }
 try { lex.assertValidRecord('freeschool.draft.hostFeedback', { $type:'freeschool.draft.hostFeedback', event:sref, host:'did:plc:x', direction:'positive', aspects:{knowledge:5}, createdAt: now }); console.log('FAIL negative: aspect 5 accepted'); failed++ } catch { console.log('OK   negative: aspect out of range rejected') }
 console.log(failed ? `${failed} failures` : `all ${docs.length} lexicons valid`)

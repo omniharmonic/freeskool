@@ -1,0 +1,48 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.skillLevel",
+  "description": "Sidecar to a community.lexicon.calendar.event: declares WHICH skill a class teaches and at WHAT depth. Composition over extension — the borrowed community.lexicon.calendar.event is never modified and never gains a field. One class may carry several skillLevel sidecars (a class that teaches two skills, or one skill at a spanning level). Placement: PUBLIC alongside the event by default (a class's subject and depth are the discovery surface — this is what a learner browses and searches); it rides into a scene's space only when the event itself is permissioned, in which case it is placed in the event's invite space so that the class's existence is not leaked by its subject tag.",
+  "defs": {
+    "main": {
+      "type": "record",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "event",
+          "skill",
+          "level",
+          "createdAt"
+        ],
+        "properties": {
+          "event": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Strong reference to the community.lexicon.calendar.event this describes."
+          },
+          "skill": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "AT-URI of the freeschool.draft.skill record naming the subject taught. A URI (identity) rather than a strongRef (version) because taxonomy nodes are edited in place — a relabelled skill must not orphan every class that referenced it. Consistent with skillClaim, skillAttestation, request and resource. Two scenes teaching the same skill resolve to the SAME record, which is what makes cross-scene skill discovery possible."
+          },
+          "level": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3,
+            "description": "Depth index, ORDERED so that policies and queries can ask `atLeast`/`atMost`: 1=introductory (no prior exposure assumed), 2=intermediate (assumes working familiarity), 3=advanced (assumes practice). An integer rather than an enum because the only question anyone asks of it is a comparison ('classes at or below my depth'), and because widening the maximum is a backward-compatible lexicon change whereas re-ordering an enum's knownValues is not. Mirrors the open-registry integer used by coop.lexicon.membership#role."
+          },
+          "prerequisites": {
+            "type": "string",
+            "maxLength": 2560,
+            "maxGraphemes": 256,
+            "description": "Optional free-form note on what a learner should already have (tools, prior classes, physical requirements). Deliberately prose, not a ref list: most real prerequisites ('bring closed-toe shoes', 'can you already cast on?') are not other classes."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}
