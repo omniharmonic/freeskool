@@ -79,18 +79,23 @@ describe('FeedbackScreen', () => {
     ).toBeInTheDocument();
   });
 
-  it('disables submit until at least one dial is answered', async () => {
+  it('disables submit until the required direction question is answered', async () => {
     renderScreen();
     await screen.findByText('Knew the material');
     expect(screen.getByRole('button', { name: /send feedback/i })).toBeDisabled();
 
+    // Answering a dial alone is not enough — dials and the note stay optional.
     const knowledgeGroup = screen.getByRole('group', { name: 'Knew the material' });
     fireEvent.click(within(knowledgeGroup).getByRole('radio', { name: 'A lot' }));
+    expect(screen.getByRole('button', { name: /send feedback/i })).toBeDisabled();
+
+    const directionGroup = screen.getByRole('group', { name: /would you come to another class by this host/i });
+    fireEvent.click(within(directionGroup).getByRole('radio', { name: 'Yes' }));
 
     expect(screen.getByRole('button', { name: /send feedback/i })).toBeEnabled();
   });
 
-  it('submits the three dials and note via api.feedback.submit', async () => {
+  it('submits "Yes" as direction: positive, alongside the dials and note', async () => {
     renderScreen();
     await screen.findByText('Knew the material');
 
@@ -99,6 +104,12 @@ describe('FeedbackScreen', () => {
     );
     fireEvent.click(
       within(screen.getByRole('group', { name: 'Taught it well' })).getByRole('radio', { name: 'Some' }),
+    );
+    fireEvent.click(
+      within(screen.getByRole('group', { name: /would you come to another class by this host/i })).getByRole(
+        'radio',
+        { name: 'Yes' },
+      ),
     );
     fireEvent.change(screen.getByLabelText(/anything else/i), { target: { value: 'Great class!' } });
     fireEvent.click(screen.getByRole('button', { name: /send feedback/i }));
@@ -114,6 +125,27 @@ describe('FeedbackScreen', () => {
     expect(await screen.findByText(/thanks/i)).toBeInTheDocument();
   });
 
+  it('submits "Not this time" as direction: negative', async () => {
+    renderScreen();
+    await screen.findByText('Knew the material');
+
+    fireEvent.click(
+      within(screen.getByRole('group', { name: /would you come to another class by this host/i })).getByRole(
+        'radio',
+        { name: 'Not this time' },
+      ),
+    );
+    fireEvent.click(screen.getByRole('button', { name: /send feedback/i }));
+
+    await waitFor(() =>
+      expect(api.feedback.submit).toHaveBeenCalledWith({
+        eventUri: EVENT_URI,
+        direction: 'negative',
+      }),
+    );
+    expect(await screen.findByText(/thanks/i)).toBeInTheDocument();
+  });
+
   it('shows the already-voted state on a 409 AlreadyVoted', async () => {
     vi.mocked(api.feedback.submit).mockRejectedValue(
       new ApiError(409, 'AlreadyVoted', 'you have already left feedback for this class'),
@@ -122,7 +154,10 @@ describe('FeedbackScreen', () => {
     await screen.findByText('Knew the material');
 
     fireEvent.click(
-      within(screen.getByRole('group', { name: 'Knew the material' })).getByRole('radio', { name: 'A lot' }),
+      within(screen.getByRole('group', { name: /would you come to another class by this host/i })).getByRole(
+        'radio',
+        { name: 'Yes' },
+      ),
     );
     fireEvent.click(screen.getByRole('button', { name: /send feedback/i }));
 
@@ -137,10 +172,14 @@ describe('FeedbackScreen', () => {
     await screen.findByText('Knew the material');
 
     fireEvent.click(
-      within(screen.getByRole('group', { name: 'Knew the material' })).getByRole('radio', { name: 'A lot' }),
+      within(screen.getByRole('group', { name: /would you come to another class by this host/i })).getByRole(
+        'radio',
+        { name: 'Yes' },
+      ),
     );
     fireEvent.click(screen.getByRole('button', { name: /send feedback/i }));
 
-    expect(await screen.findByText(/feedback is open to people the host confirmed were there/i)).toBeInTheDocument();
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/feedback is open to people the host confirmed were there/i);
   });
 });

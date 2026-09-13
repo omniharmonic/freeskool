@@ -58,7 +58,9 @@ export function FeedbackSummaryScreen() {
     return (
       <Screen title="Feedback summary" back>
         <div className="safe-x">
-          <p className="text-body text-ink-soft">Only the host or a steward may see this class's feedback summary.</p>
+          <p role="alert" className="text-body text-ink-soft">
+            Only the host or a steward may see this class's feedback summary.
+          </p>
         </div>
       </Screen>
     );

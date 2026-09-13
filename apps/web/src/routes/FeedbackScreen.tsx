@@ -19,12 +19,16 @@ const DIALS: Array<{ key: Aspect; label: string }> = [
   { key: 'experience', label: 'The experience' },
 ];
 
-/** The three points on every dial. The mean of whichever were answered
- * decides `direction` — there is no separate thumbs up/down control. */
+/** The three points on every dial. */
 const LEVELS: Array<{ value: 1 | 2 | 3; label: string }> = [
   { value: 1, label: 'Not much' },
   { value: 2, label: 'Some' },
   { value: 3, label: 'A lot' },
+];
+
+const DIRECTIONS: Array<{ value: 'positive' | 'negative'; label: string }> = [
+  { value: 'positive', label: 'Yes' },
+  { value: 'negative', label: 'Not this time' },
 ];
 
 /**
@@ -41,22 +45,21 @@ export function FeedbackScreen() {
   const submitMutation = useFeedbackSubmitMutation();
 
   const [ratings, setRatings] = useState<Partial<Record<Aspect, 1 | 2 | 3>>>({});
+  const [direction, setDirection] = useState<'positive' | 'negative' | null>(null);
   const [note, setNote] = useState('');
   const [sent, setSent] = useState(false);
   const [alreadyVoted, setAlreadyVoted] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const answered = Object.values(ratings).filter((v): v is 1 | 2 | 3 => typeof v === 'number');
-  const canSubmit = answered.length > 0 && !submitMutation.isPending;
+  const canSubmit = direction !== null && !submitMutation.isPending;
 
   const onSubmit = async () => {
-    if (!canSubmit) return;
+    if (!canSubmit || direction === null) return;
     setError(null);
     setAlreadyVoted(false);
-    const average = answered.reduce((sum, v) => sum + v, 0) / answered.length;
     const body: FeedbackInput = {
       eventUri: id,
-      direction: average >= 2 ? 'positive' : 'negative',
+      direction,
       ...(Object.keys(ratings).length ? { aspects: ratings } : {}),
       ...(note.trim() ? { text: note.trim() } : {}),
     };
@@ -109,6 +112,23 @@ export function FeedbackScreen() {
                 </fieldset>
               ))}
 
+              <fieldset className="plate p-3.5">
+                <legend className="text-body font-bold">Would you come to another class by this host?</legend>
+                <div className="mt-2 flex flex-wrap gap-4">
+                  {DIRECTIONS.map((option) => (
+                    <label key={option.value} className="flex items-center gap-1.5 text-caption">
+                      <input
+                        type="radio"
+                        name="direction"
+                        checked={direction === option.value}
+                        onChange={() => setDirection(option.value)}
+                      />
+                      {option.label}
+                    </label>
+                  ))}
+                </div>
+              </fieldset>
+
               <label className="block">
                 <span className="text-caption text-ink-soft">Anything else? (optional)</span>
                 <textarea
@@ -119,7 +139,11 @@ export function FeedbackScreen() {
                 />
               </label>
 
-              {error ? <p className="text-body text-pink">{error}</p> : null}
+              {error ? (
+                <p role="alert" className="text-body text-pink">
+                  {error}
+                </p>
+              ) : null}
 
               <Button wide ink="green" disabled={!canSubmit} onClick={() => void onSubmit()}>
                 Send feedback
