@@ -43,7 +43,6 @@ import {
   type OrderedFrame,
 } from './host-subscription.js'
 import type { PeerStateStore } from './peer-state.js'
-import { safe } from '../lib/logging.js'
 
 export const DEFAULT_SOURCE_ID = 'pds-subscribe-repos'
 
@@ -184,11 +183,11 @@ export class PdsChangeSource implements ChangeSource {
           this.options.logger.info('sync: peer reconnect', {
             peer: peer.name,
             attempt,
-            detail: describe(error),
+            detail: describeError(error),
           })
         },
         onError: (error) => {
-          this.options.logger.warn('sync: peer stream error', { peer: peer.name, detail: describe(error) })
+          this.options.logger.warn('sync: peer stream error', { peer: peer.name, detail: describeError(error) })
         },
         onQuarantine: (ms, failures) => {
           this.options.logger.error('sync: peer quarantined after repeated fatal errors', {
@@ -248,7 +247,7 @@ export class PdsChangeSource implements ChangeSource {
       peer: peer.name,
       kind: frame.kind,
       seq: frame.seq,
-      detail: describe(error),
+      detail: describeError(error),
     })
     if (frame.kind === 'commit') {
       for (const op of frame.commit.ops) {
@@ -260,7 +259,7 @@ export class PdsChangeSource implements ChangeSource {
           .catch((err) =>
             this.options.logger.warn('sync: could not record a pending delete', {
               peer: peer.name,
-              detail: describe(err),
+              detail: describeError(err),
             }),
           )
       }
@@ -352,7 +351,7 @@ export class PdsChangeSource implements ChangeSource {
     try {
       endpoint = await resolve(frame.did, peer.host)
     } catch (err) {
-      this.options.logger.warn('sync: peer identity re-resolve failed', { peer: peer.name, detail: describe(err) })
+      this.options.logger.warn('sync: peer identity re-resolve failed', { peer: peer.name, detail: describeError(err) })
       return
     }
     if (!endpoint) return
@@ -515,7 +514,7 @@ export class PdsChangeSource implements ChangeSource {
       onHandlerFailure: async (_frame, error) => {
         this.options.logger.warn('sync: replay could not decode an event', {
           peer: peer.name,
-          detail: describe(error),
+          detail: describeError(error),
         })
         settle?.()
       },
@@ -525,8 +524,8 @@ export class PdsChangeSource implements ChangeSource {
         }
       },
       onReconnect: (attempt, error) =>
-        this.options.logger.info('sync: peer reconnect', { peer: peer.name, attempt, detail: describe(error) }),
-      onError: (error) => this.options.logger.warn('sync: peer replay error', { peer: peer.name, detail: describe(error) }),
+        this.options.logger.info('sync: peer reconnect', { peer: peer.name, attempt, detail: describeError(error) }),
+      onError: (error) => this.options.logger.warn('sync: peer replay error', { peer: peer.name, detail: describeError(error) }),
       onQuarantine: (ms) =>
         this.options.logger.warn('sync: replay host quarantined', { peer: peer.name, minutes: Math.round(ms / 60_000) }),
     })
@@ -581,13 +580,24 @@ function frameTimeUs(time: string): number {
 }
 
 /**
- * A diagnosable error string. `safe()` (src/lib/logging.ts) strips DIDs, emails and
- * AT-URIs and truncates, so the message can be kept: the name alone made real
- * failures ("Error") indistinguishable from each other.
+ * A bounded error label for a log line: the class name, plus the XRPC error CODE when
+ * the error carries one.
+ *
+ * **Never the message.** R9 forbids DIDs, handles, emails, record contents and AT-URIs
+ * in logs, and `safe()` redacts only the first, third and fifth of those — an XRPC
+ * message like `could not find repo for alice.test` would walk a HANDLE straight into
+ * a log line. The `error` code (`RepoNotFound`, `FutureCursor`, `ConsumerTooSlow`, …)
+ * is a closed vocabulary from the lexicon and carries the diagnostic value anyway.
+ *
+ * The code arrives from a peer, so it is only used when it looks like the identifier
+ * the lexicon says it is; anything else is dropped rather than echoed.
  */
-function describe(err: unknown): string {
-  if (err instanceof Error) return `${err.name}: ${safe(err.message)}`
-  return safe(err)
+const XRPC_ERROR_CODE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
+
+export function describeError(err: unknown): string {
+  if (!(err instanceof Error)) return typeof err === 'string' ? 'error' : 'unknown'
+  const code = (err as { error?: unknown }).error
+  return typeof code === 'string' && XRPC_ERROR_CODE.test(code) ? `${err.name}: ${code}` : err.name
 }
 
 /** `<collection>/<rkey>` from a `#commit` op path. */

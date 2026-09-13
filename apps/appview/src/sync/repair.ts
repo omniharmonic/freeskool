@@ -27,7 +27,7 @@ import type { IndexTarget, PeerRepairRequest, RepairQueue, SyncLogger } from './
 import type { PeerStateStore } from './peer-state.js'
 import { normalizePeerHost } from './cursor-map.js'
 import { createIngestEvent, type IngestEvent } from '@atmo-dev/contrail'
-import { safe } from '../lib/logging.js'
+import { describeError } from './pds-change-source.js'
 
 export interface PeerRepairOptions {
   collections: string[]
@@ -103,7 +103,7 @@ export class PeerRepair implements RepairQueue {
     try {
       dids = request.did ? [request.did] : await listFn(request.host)
     } catch (err) {
-      this.options.logger.warn('sync: peer repair could not enumerate repos', { peer, detail: describe(err) })
+      this.options.logger.warn('sync: peer repair could not enumerate repos', { peer, detail: describeError(err) })
       return
     }
     let records = 0
@@ -167,7 +167,7 @@ export class PeerRepair implements RepairQueue {
         await this.options.state.clearPendingDeletes(host, did)
       } catch (err) {
         failures++
-        this.options.logger.warn('sync: peer repair failed for one repo', { peer, detail: describe(err) })
+        this.options.logger.warn('sync: peer repair failed for one repo', { peer, detail: describeError(err) })
       }
     }
     this.options.logger.info('sync: peer repair complete', {
@@ -200,7 +200,7 @@ export class PeerRepair implements RepairQueue {
       return normalizePeerHost(endpoint) === host
     } catch (err) {
       // Unresolvable identity is not permission to trust the peer's claim.
-      this.options.logger.warn('sync: peer repair could not confirm a repo home', { peer, detail: describe(err) })
+      this.options.logger.warn('sync: peer repair could not confirm a repo home', { peer, detail: describeError(err) })
       return false
     }
   }
@@ -237,8 +237,3 @@ export class PeerRepair implements RepairQueue {
   }
 }
 
-/** `safe()` keeps the message diagnosable while stripping DIDs, emails and URIs. */
-function describe(err: unknown): string {
-  if (err instanceof Error) return `${err.name}: ${safe(err.message)}`
-  return safe(err)
-}

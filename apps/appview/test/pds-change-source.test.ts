@@ -20,6 +20,7 @@ import { encodeCursorMap, decodeCursorMap, cursorMapReached } from '../src/sync/
 import { AppMetaPeerState, MemoryPeerState } from '../src/sync/peer-state.js'
 import { APPVIEW_VERSION, peerName, peerSetEpoch, peerUserAgent } from '../src/index/live-sync.js'
 import { restartDelayFor } from '../src/sync/host-subscription.js'
+import { describeError } from '../src/sync/pds-change-source.js'
 import { PeerRepair, REPAIR_SOURCE_ID, type PeerRepairOptions } from '../src/sync/repair.js'
 import { Identity } from '@freeschool/pds-follow'
 import { NSID } from '../src/lexicons/nsids.js'
@@ -569,6 +570,61 @@ describe('fatal-error backoff', () => {
     // Capped, never beyond: a small registry must not park itself for minutes.
     expect(restartDelayFor(20, 1_000, 16_000)).toBe(16_000)
     expect(restartDelayFor(1, 30_000, 16_000)).toBe(16_000)
+  })
+})
+
+describe('error labels in logs', () => {
+  it('never lets an error MESSAGE into a log line, handles included', () => {
+    // The real shape: a PDS answers RepoNotFound and names the repo by HANDLE.
+    // `safe()` redacts DIDs, emails and at:// URIs — not handles — so the message can
+    // never be logged, only the bounded XRPC code.
+    const xrpc = Object.assign(new Error('could not find repo for alice.test'), {
+      name: 'XRPCError',
+      error: 'RepoNotFound',
+    })
+    const label = describeError(xrpc)
+    expect(label).toBe('XRPCError: RepoNotFound')
+    expect(label).not.toContain('alice.test')
+
+    // No code: the name alone, still never the message.
+    expect(describeError(new TypeError('alice.test is not a function'))).toBe('TypeError')
+    // A peer supplies the code, so anything that is not the lexicon's identifier shape
+    // is dropped rather than echoed into our logs.
+    expect(describeError(Object.assign(new Error('x'), { error: 'alice.test is gone' }))).toBe('Error')
+    expect(describeError('alice.test')).toBe('error')
+    expect(describeError(undefined)).toBe('unknown')
+  })
+
+  it('keeps a handle out of the live source log when indexing throws', async () => {
+    const fake = await startFakePds([identityFrame({ seq: 30, did: DID })])
+    const logger = capturingLogger()
+    const src = new PdsChangeSource({
+      hosts: [{ host: fake.host, name: 'fake-peer' }],
+      epoch: 'test-epoch-1',
+      collections: [NSID.event],
+      userAgent: 'freeschool-appview/test (+http://localhost:4000)',
+      unauthenticatedCommits: true,
+      state: new MemoryPeerState({ flushIntervalMs: 5 }),
+      target: recordingTarget(),
+      repair: recordingRepair(),
+      logger,
+      maxReconnectSeconds: 1,
+      handlerAttempts: 1,
+      // Re-resolution fails with a message naming a handle, which is the path that
+      // reaches `describeError` from a real identity lookup.
+      resolvePdsEndpoint: async () => {
+        throw Object.assign(new Error('unable to resolve handle alice.test'), { name: 'XRPCError' })
+      },
+    })
+    try {
+      await src.start()
+      await waitFor(() => logger.lines.some((l) => l.includes('identity re-resolve failed')))
+      expect(logger.lines.join('\n')).not.toContain('alice.test')
+      expect(logger.lines.join('\n')).not.toContain('did:plc:')
+    } finally {
+      await src.stop()
+      await fake.close()
+    }
   })
 })
 
