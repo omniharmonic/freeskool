@@ -109,11 +109,12 @@ custodial credentials (wrapped, but still).
 ## Releasing a change
 
 ```sh
-cd /opt/freeskool && git pull --ff-only
-/opt/freeskool/infra/production/backup.sh
-$C build && $C up -d          # Postgres and the PDS are untouched; appview + web restart
-curl -s https://freeskool.xyz/api/health
+ssh -i ~/.ssh/frontrange-twin root@167.233.100.123 /opt/freeskool/infra/production/release.sh
 ```
+
+`release.sh` = `git pull --ff-only` on the branch the server is on, `backup.sh`, rebuild `appview` +
+`web`, `up -d`, wait for `/api/health`. Postgres and the PDS are untouched. To move the server from
+`deploy/hetzner` to `main` once these files are merged: `git checkout main` first, then run it.
 
 Roll back with `git checkout <previous commit> && $C build && $C up -d`. A release that changes the
 schema also needs the pre-release dump to roll back to; never delete a volume.
