@@ -1,0 +1,21 @@
+To: Lex
+From: Benjamin
+Subject: Four quick questions before I lock the Free School app
+
+Hey Lex,
+
+The research pass is done and I'm building. Four things only you can answer, in plain terms. Short replies are fine.
+
+1. Feedback without ratings. After a class, attendees can leave anonymous feedback (three quick dials plus an optional note). The host only sees a summary once enough people have answered, never who said what, never a public number. Publicly a host shows counts only: classes hosted, attended, vouches. Does that sit right, or is even the private summary too close to grading?
+
+2. Who can post a class on day one. Open (anyone with a profile posts immediately, your "if you say you're Free School you're Free School") or gated (invite/vouch to make a profile, attend two classes before hosting). Default is open, gate is a switch you can flip later. Which for the COhere launch?
+
+3. Profile defaults. Calendar public (name, time, neighborhood; exact address after RSVP). Who RSVPs and who attended: not public. Profiles: made-up name, no photo unless you add one. Skills visible to the school, tick a box to make them public (ordinary skills pre-ticked, legally sensitive ones not). New people get a fresh Free School account by default; Bluesky sign-in is possible with a plain warning that it links the two forever. Anything you'd change?
+
+4. freeschool.com. Can you confirm you own it, and do you want the app there (boulder.freeschool.com etc.)? Two cautions: people's usernames shouldn't live on that domain, and the server member accounts live on should have a boring unrelated name, because the network publishes which server hosts each account. So freeschool.com for the site and the school's account, something neutral for members. Good?
+
+Small one: supplies donations — (a) nothing, (b) a "bring $5 for vegetables" note the host types, (c) a Venmo link. I lean (b).
+
+Thanks — see you at the next COhere meeting.
+
+Benjamin

@@ -1,0 +1,27 @@
+To: Lucian Hymer
+From: Benjamin Life
+Subject: Free School lexicon review packet — 17 draft records, 3 space types, 5 questions
+
+Lucian,
+
+Here's the review packet for the Free School app, as promised on Thursday. Everything is under freeschool.draft.* so the rename to your canonical namespace is a find-and-replace, and every record follows the rule we settled: never extend a borrowed record, attach a strongRef sidecar, placement follows audience. All 17 validate against @atproto/lexicon 0.7.14 with positive and negative cases.
+
+The packet (attached / at the link) has: the reuse table (what we did NOT draft because coop.lexicon.* already covers it), one line of extend-vs-sidecar reasoning per type, three space-type declarations in your predicate format, and the full JSON.
+
+Three things from this week's research you'll want to know before reading:
+
+1. We ran the Spaces alpha locally. Per-collection read policy is inexpressible in it (one credential reads every collection of every member repo in the space), so roster and feedback have to be two separate spaces. Space-type NSIDs need 3+ segments.
+2. The Arbiter repo was totally rewritten this month: no membership API, no role model, no license. We'll custody the school DID in v1 behind one write primitive (SchoolActorPort) shaped like the arbiter proxy body, so your Syntropic harness or the Arbiter can slot in later.
+3. Smoke Signal is sunset; lexicon-community/lexicon moved to Tangled (byte-identical for now). One correction to the planbot handoff: coop.lexicon.event.config's field is `attendance`, not `attendanceMode`.
+
+The five questions for you:
+
+1. Extend-vs-sidecar rule in writing — does our application of it match yours? Edge case: exdates on the series record vs a separate exception record.
+2. Should skillAttestation just be coop.lexicon.evaluation with an optional skill field? And are you OK with skill references as at-uri (identity) rather than strongRef (version), since taxonomy nodes are edited in place?
+3. Is the sandbox PDS the pds-spaces-alpha image or the reference PDS? (v1 is fine either way.)
+4. Would the harness expose a write-as-scene primitive with the SchoolActorPort shape (scope required, arbiter-style result envelope, approvals as records)?
+5. Series + occurrence recurrence sidecars: nobody upstream has solved this. Propose to lexicon.community together?
+
+No rush on v1 — we build on the drafts now and rename when you've decided. Happy to walk through it at the Hub whenever suits.
+
+Benjamin
