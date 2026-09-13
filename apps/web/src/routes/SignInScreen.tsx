@@ -1,35 +1,36 @@
-import { useState } from 'react';
-import { useNavigate } from '@tanstack/react-router';
+import { useState, type FormEvent } from 'react';
+import { Link } from '@tanstack/react-router';
 import { school } from '../lib/mock';
-import { Sheet } from '../components/Sheet';
 import { Button } from '../components/bits';
-import { api } from '../lib/api';
+import { api, ApiError } from '../lib/api';
+
+type Status = 'idle' | 'sending' | 'sent' | 'error';
 
 /**
  * Two doors, in R9's order: a new Free School identity first, an existing
- * ATProto account second and behind a hard confirm — because linking an
- * existing DID to Free School is public and permanent.
+ * ATProto account second — the latter is now its own screen
+ * (`OAuthConfirmScreen`, `/oauth/confirm`) because linking an existing DID to
+ * Free School is public and permanent and gets a hard confirm of its own.
  *
- * Both doors POST to /api/auth/* on this origin: OAuth runs server-side so the
- * session is a cookie, and cookies are the one thing iOS copies at install.
+ * The primary door POSTs an email to `/api/auth/signup`; the AppView mints a
+ * custodial identity and emails (or, with no SMTP configured, logs) a magic
+ * link. `VerifyScreen` (`/verify`) is where that link lands.
  */
 export function SignInScreen() {
-  const [handle, setHandle] = useState('');
-  const [confirming, setConfirming] = useState(false);
-  const navigate = useNavigate();
+  const [email, setEmail] = useState('');
+  const [status, setStatus] = useState<Status>('idle');
+  const [errorMessage, setErrorMessage] = useState('');
 
-  // A real email-based signup flow lands in Task 3 (VerifyScreen, "check your
-  // email" states); this keeps the shell working against the real endpoint
-  // in the meantime.
-  const createIdentity = async () => {
-    await api.auth.signup({ email: handle }).catch(() => undefined);
-    void navigate({ to: '/me' });
-  };
-
-  const useExisting = () => {
-    setConfirming(false);
-    // `oauth/start` is a GET that redirects the browser; it is not a fetch.
-    window.location.href = api.auth.oauthStartUrl(true, handle);
+  const onSubmit = async (event: FormEvent) => {
+    event.preventDefault();
+    setStatus('sending');
+    try {
+      await api.auth.signup({ email });
+      setStatus('sent');
+    } catch (err) {
+      setErrorMessage(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
+      setStatus('error');
+    }
   };
 
   return (
@@ -44,69 +45,67 @@ export function SignInScreen() {
           </p>
         </div>
 
-        <label className="mt-8 block">
-          <span className="text-caption text-ink-soft">Pick a name people will see</span>
-          <div className="mt-1.5 flex items-stretch">
-            <input
-              value={handle}
-              onChange={(event) => setHandle(event.target.value)}
-              placeholder="wren"
-              autoCapitalize="none"
-              autoCorrect="off"
-              spellCheck={false}
-              className="min-w-0 flex-1 border-[1.5px] border-ink bg-sheet px-3 py-2.5 text-body outline-none"
-            />
-            <span className="flex items-center border-[1.5px] border-l-0 border-ink px-3 text-caption text-ink-soft">
-              .fs.boulder
-            </span>
+        {status === 'sent' ? (
+          <div className="mt-8 plate plate-green p-4">
+            <p className="text-body font-bold">Check your email</p>
+            <p className="mt-1.5 text-caption text-ink-soft">
+              We sent a link to {email}. Open it on this device to finish signing in.
+            </p>
           </div>
-        </label>
+        ) : (
+          <form className="mt-8" onSubmit={(event) => void onSubmit(event)}>
+            <label className="block">
+              <span className="text-caption text-ink-soft">Your email</span>
+              <input
+                type="email"
+                required
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="you@example.com"
+                autoCapitalize="none"
+                autoCorrect="off"
+                spellCheck={false}
+                className="mt-1.5 block w-full border-[1.5px] border-ink bg-sheet px-3 py-2.5 text-body outline-none"
+              />
+            </label>
 
-        <div className="mt-6">
-          <Button wide onClick={() => void createIdentity()} disabled={handle.trim().length < 2}>
-            Create a new Free School identity (recommended)
-          </Button>
-          <p className="mt-2 text-caption text-ink-soft">
-            Your Free School records stay on the school's own server and are not attached to any account you
-            already have.
-          </p>
-        </div>
+            {status === 'error' ? (
+              <p role="alert" className="mt-2 text-caption text-pink">
+                {errorMessage}
+              </p>
+            ) : null}
+
+            <div className="mt-6">
+              <Button type="submit" wide disabled={status === 'sending' || email.trim().length < 3}>
+                {status === 'sending' ? 'Sending…' : 'Create a new Free School identity (recommended)'}
+              </Button>
+              <p className="mt-2 text-caption text-ink-soft">
+                Your Free School records stay on the school's own server and are not attached to any account you
+                already have.
+              </p>
+            </div>
+          </form>
+        )}
 
         <hr className="rule my-8" />
 
-        <button
-          type="button"
-          onClick={() => setConfirming(true)}
+        {/*
+          A client-side `Link`, not a plain `<a>`: the dev proxy forwards any
+          `/oauth/*` request to the AppView (`vite.config.ts`, for the real
+          `/oauth/callback` etc.), which has no `/oauth/confirm` route and
+          would 404 a full navigation here. Router-level navigation never
+          touches the network, so it lands on the real screen regardless.
+        */}
+        <Link
+          to="/oauth/confirm"
           className="text-body font-medium text-blue underline decoration-[1.5px] underline-offset-[5px]"
         >
           Use an existing AT Protocol account
-        </button>
+        </Link>
         <p className="mt-2 max-w-[48ch] text-caption text-ink-soft">
           For people who already have a Bluesky or other ATProto handle and want Free School on it.
         </p>
       </div>
-
-      <Sheet
-        open={confirming}
-        onClose={() => setConfirming(false)}
-        title="Before you continue"
-        footer={
-          <div className="flex gap-3">
-            <Button ink="ink" variant="quiet" onClick={() => setConfirming(false)}>
-              Go back
-            </Button>
-            <Button ink="blue" onClick={() => void useExisting()}>
-              I understand, continue
-            </Button>
-          </div>
-        }
-      >
-        <p className="max-w-[56ch] text-body">
-          Anyone on the internet will be able to see that this account is part of Free School, and that link
-          can't be undone later — not by us, and not by you. If you'd rather keep Free School separate, go back
-          and create a new identity instead.
-        </p>
-      </Sheet>
     </div>
   );
 }

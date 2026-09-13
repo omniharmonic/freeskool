@@ -9,11 +9,14 @@ import { SkillScreen } from './routes/SkillScreen';
 import { RequestsScreen } from './routes/RequestsScreen';
 import { MeScreen } from './routes/MeScreen';
 import { SignInScreen } from './routes/SignInScreen';
+import { VerifyScreen } from './routes/VerifyScreen';
+import { OAuthConfirmScreen } from './routes/OAuthConfirmScreen';
 import { ZineScreen } from './routes/ZineScreen';
 import { Placeholder } from './routes/Placeholder';
 
-/** The zine and the sign-in screen are the two places without tabs. */
-const CHROMELESS = ['/zine', '/signin'];
+/** The zine and the sign-in flow (both doors plus the verify landing) are the
+ * places without tabs. */
+const CHROMELESS = ['/zine', '/signin', '/verify', '/oauth/confirm'];
 
 function Shell() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -39,10 +42,11 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/signin', component: SignInScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/zine', component: ZineScreen }),
 
+  createRoute({ getParentRoute: () => rootRoute, path: '/verify', component: VerifyScreen }), // Task 3
+  createRoute({ getParentRoute: () => rootRoute, path: '/oauth/confirm', component: OAuthConfirmScreen }), // Task 3
+
   // Registered here as placeholders; each is replaced by its real screen in
   // the task named in the plan (`.superpowers/sdd/mvp-plan/task-*-brief.md`).
-  createRoute({ getParentRoute: () => rootRoute, path: '/verify', component: Placeholder }), // Task 3
-  createRoute({ getParentRoute: () => rootRoute, path: '/oauth/confirm', component: Placeholder }), // Task 3
   createRoute({ getParentRoute: () => rootRoute, path: '/events/new', component: Placeholder }), // Task 5
   createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/edit', component: Placeholder }), // Task 5
   createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/attendance', component: Placeholder }), // Task 5
