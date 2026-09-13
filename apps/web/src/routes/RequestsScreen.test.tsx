@@ -2,6 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
+// jsdom has no `<dialog>` showModal/close — Sheet.tsx calls them unconditionally
+// in a `useEffect`, so any test that opens the composer sheet needs this polyfill.
+if (!HTMLDialogElement.prototype.showModal) {
+  HTMLDialogElement.prototype.showModal = function () {
+    this.setAttribute('open', '');
+  };
+  HTMLDialogElement.prototype.close = function () {
+    this.removeAttribute('open');
+  };
+}
+
 const REQUEST_URI = 'at://did:plc:asker1/freeschool.draft.request/req1';
 
 const navigateSpy = vi.fn();
@@ -109,5 +120,32 @@ describe('RequestsScreen', () => {
     expect((await screen.findAllByText(/sign in/i)).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: /i want this too/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /i can teach this/i })).not.toBeInTheDocument();
+  });
+
+  it('shows an inline error (and does not silently succeed) when "I want this too" fails', async () => {
+    vi.mocked(api.requests.rsvp).mockRejectedValueOnce(new ApiError(500, 'ServerError', 'something went wrong'));
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole('button', { name: /i want this too/i }));
+
+    expect(await screen.findByText('something went wrong')).toBeInTheDocument();
+    // Did not optimistically flip to "counted in" — the request item itself
+    // still reads from the (unchanged) list data.
+    expect(screen.queryByRole('button', { name: /you're counted in/i })).not.toBeInTheDocument();
+  });
+
+  it('the composer does NOT show the "Asked" success state when api.requests.create fails, and shows the server message', async () => {
+    vi.mocked(api.requests.create).mockRejectedValueOnce(new ApiError(400, 'InvalidRequest', 'title is required'));
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Ask for one' }));
+    fireEvent.change(await screen.findByPlaceholderText(/someone teach me to sharpen things properly/i), {
+      target: { value: 'Teach me to weld' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /post this request/i }));
+
+    expect(await screen.findByText('title is required')).toBeInTheDocument();
+    expect(screen.queryByText('Asked')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /post this request/i })).toBeInTheDocument();
   });
 });

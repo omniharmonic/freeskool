@@ -31,23 +31,28 @@ export function RequestsScreen() {
   const { data, isPending } = useRequests();
   const list = data?.requests ?? [];
   const [composing, setComposing] = useState(false);
-  const [claimError, setClaimError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const rsvpMutation = useRequestRsvpMutation();
   const claimMutation = useClaimRequestMutation();
   const navigate = useNavigate();
 
   const onJoin = (request: RequestItem) => {
-    rsvpMutation.mutate(request.uri);
+    setActionError(null);
+    rsvpMutation.mutate(request.uri, {
+      onError: (err) => {
+        setActionError(err instanceof ApiError ? err.message : 'Could not update that. Try again.');
+      },
+    });
   };
 
   const onClaim = async (request: RequestItem) => {
-    setClaimError(null);
+    setActionError(null);
     try {
       await claimMutation.mutateAsync({ requestUri: request.uri, body: {} });
       void navigate({ to: '/events/new', search: { request: request.uri } });
     } catch (err) {
-      setClaimError(
+      setActionError(
         err instanceof ApiError && err.code === 'ThresholdNotMet'
           ? err.message
           : 'Could not claim this request. Try again.',
@@ -119,7 +124,7 @@ export function RequestsScreen() {
             </article>
           );
         })}
-        {claimError ? <p className="text-body text-pink">{claimError}</p> : null}
+        {actionError ? <p className="text-body text-pink">{actionError}</p> : null}
       </div>
 
       <ComposerSheet open={composing} onClose={() => setComposing(false)} />
@@ -136,16 +141,25 @@ function ComposerSheet({ open, onClose }: { open: boolean; onClose: () => void }
   const [description, setDescription] = useState('');
   const [skillUri, setSkillUri] = useState('');
   const [sent, setSent] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const submit = async () => {
-    await createMutation
-      .mutateAsync({ title: title.trim(), description: description.trim() || undefined, skill: skillUri || undefined })
-      .catch(() => undefined);
-    setSent(true);
+    setSubmitError(null);
+    try {
+      await createMutation.mutateAsync({
+        title: title.trim(),
+        description: description.trim() || undefined,
+        skill: skillUri || undefined,
+      });
+      setSent(true);
+    } catch (err) {
+      setSubmitError(err instanceof ApiError ? err.message : 'Could not post this request. Try again.');
+    }
   };
 
   const close = () => {
     setSent(false);
+    setSubmitError(null);
     setTitle('');
     setDescription('');
     setSkillUri('');
@@ -201,6 +215,7 @@ function ComposerSheet({ open, onClose }: { open: boolean; onClose: () => void }
               placeholder="What you've already tried, what you own, when you're free."
             />
           </label>
+          {submitError ? <p className="mt-3 text-body text-pink">{submitError}</p> : null}
           <label className="mt-4 block">
             <span className="text-caption text-ink-soft">Closest skill</span>
             <select className={field} value={skillUri} onChange={(event) => setSkillUri(event.target.value)}>

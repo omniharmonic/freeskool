@@ -94,6 +94,7 @@ export function MeScreen() {
   const [editingProfile, setEditingProfile] = useState(false);
   const [displayName, setDisplayName] = useState('');
   const [bio, setBio] = useState('');
+  const [profileError, setProfileError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!meProfile || editingProfile) return;
@@ -101,9 +102,19 @@ export function MeScreen() {
     setBio(meProfile.profile.bio ?? '');
   }, [meProfile, editingProfile]);
 
+  // `displayName`/`bio` also carry `maxLength` on their inputs below, matching
+  // `profileBody` in `apps/appview/src/http/routes/me.ts` exactly (120/2000) —
+  // belt-and-suspenders, since the server is `.strict()` but still the source
+  // of truth. On failure (400 past some other limit, 401, ...) the editor
+  // stays open with the server's message, rather than closing as if it saved.
   const saveProfile = async () => {
-    await updateProfileMutation.mutateAsync({ displayName: displayName.trim(), bio: bio.trim() }).catch(() => undefined);
-    setEditingProfile(false);
+    setProfileError(null);
+    try {
+      await updateProfileMutation.mutateAsync({ displayName: displayName.trim(), bio: bio.trim() });
+      setEditingProfile(false);
+    } catch (err) {
+      setProfileError(err instanceof ApiError ? err.message : 'Could not save your profile. Try again.');
+    }
   };
 
   // ── skill claims editor ──────────────────────────────────────────────
@@ -193,7 +204,14 @@ export function MeScreen() {
             <p className="display text-lede font-bold">{meProfile?.profile.displayName || me?.handle || 'You'}</p>
             {me?.handle ? <p className="text-caption text-ink-soft">{me.handle}</p> : null}
           </div>
-          <button type="button" onClick={() => setEditingProfile((v) => !v)} className="shrink-0 text-caption font-bold text-blue">
+          <button
+            type="button"
+            onClick={() => {
+              setProfileError(null);
+              setEditingProfile((v) => !v);
+            }}
+            className="shrink-0 text-caption font-bold text-blue"
+          >
             {editingProfile ? 'Cancel' : 'Edit'}
           </button>
         </div>
@@ -205,6 +223,7 @@ export function MeScreen() {
               <input
                 className="mt-1.5 w-full border-[1.5px] border-ink bg-sheet px-3 py-2 text-body outline-none"
                 value={displayName}
+                maxLength={120}
                 onChange={(e) => setDisplayName(e.target.value)}
               />
             </label>
@@ -213,9 +232,11 @@ export function MeScreen() {
               <textarea
                 className="mt-1.5 min-h-[72px] w-full resize-none border-[1.5px] border-ink bg-sheet px-3 py-2 text-body outline-none"
                 value={bio}
+                maxLength={2000}
                 onChange={(e) => setBio(e.target.value)}
               />
             </label>
+            {profileError ? <p className="text-body text-pink">{profileError}</p> : null}
             <Button wide onClick={() => void saveProfile()}>
               Save
             </Button>

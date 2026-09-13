@@ -162,6 +162,29 @@ describe('MeScreen', () => {
     expect(api.me.setSkillClaims).toHaveBeenCalledTimes(1);
   });
 
+  it('a rejected profile save keeps the editor open with the server error visible, and never reports success', async () => {
+    vi.mocked(api.me.updateProfile).mockRejectedValueOnce(new ApiError(400, 'InvalidRequest', 'bio is too long'));
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.change(screen.getByLabelText(/bio/i), { target: { value: 'a new bio' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText('bio is too long')).toBeInTheDocument();
+    // The editor is still open — the bio field (and its still-unsaved value)
+    // remains in the document, rather than the screen closing as if it saved.
+    expect(screen.getByLabelText(/bio/i)).toHaveValue('a new bio');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
+  });
+
+  it('display name and bio inputs carry the server\'s length limits (120/2000)', async () => {
+    renderScreen();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+
+    expect(screen.getByLabelText(/display name/i)).toHaveAttribute('maxLength', '120');
+    expect(screen.getByLabelText(/bio/i)).toHaveAttribute('maxLength', '2000');
+  });
+
   it('an OAuth-door session sees the Public toggle disabled, with the reason, and new claims default to school-only', async () => {
     vi.mocked(api.me.visibilityDefaults).mockResolvedValue({ oauthDoor: true, tierBConfirmRequired: true });
 
