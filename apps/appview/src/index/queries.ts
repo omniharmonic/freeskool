@@ -46,11 +46,24 @@ export async function listCollection<T = Record<string, unknown>>(
   short: string,
   options: Parameters<Indexer['contrail']['query']>[1] = {},
 ): Promise<{ records: IndexedRecord<T>[]; cursor?: string }> {
-  const res = await indexer.contrail.query(short, options, indexer.db)
-  return {
-    records: res.records.map((r) => parseRecord<T>(r)),
-    cursor: res.cursor,
-  }
+  // Contrail clamps every query to 200 rows, even when a caller asks for 1000.
+  // Honor the requested collection window by walking its cursor; otherwise whole
+  // taxonomy branches and busy calendars silently disappear after the first page.
+  const records: IndexedRecord<T>[] = []
+  let cursor = options.cursor
+  const visited = new Set<string>(cursor ? [cursor] : [])
+  do {
+    const res = await indexer.contrail.query(short, {
+      ...options,
+      ...(options.limit ? { limit: options.limit - records.length } : {}),
+      ...(cursor ? { cursor } : {}),
+    }, indexer.db)
+    records.push(...res.records.map((r) => parseRecord<T>(r)))
+    cursor = res.cursor
+    if (!cursor || !options.limit || records.length >= options.limit || visited.has(cursor)) break
+    visited.add(cursor)
+  } while (cursor)
+  return { records, cursor }
 }
 
 export async function getRecordByUri<T = Record<string, unknown>>(
@@ -86,16 +99,15 @@ export async function eventsInWindow(
   to: string,
   limit = 200,
 ): Promise<IndexedRecord[]> {
-  const res = await indexer.contrail.query(
+  const res = await listCollection(indexer,
     'event',
     {
       rangeFilters: { startsAt: { min: from, max: to } },
       limit,
       sort: { recordField: 'startsAt', direction: 'asc' },
     },
-    indexer.db,
   )
-  return res.records.map((r) => parseRecord(r))
+  return res.records
 }
 
 /** Every sidecar of one short name whose `references.event` points at this event. */

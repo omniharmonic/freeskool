@@ -130,6 +130,7 @@ export function RequestsScreen() {
             </article>
           );
         })}
+        {!signedIn ? <div className="mt-5"><Button href="/signin" ink="blue">Sign in to ask for a class</Button></div> : null}
         {actionError ? <p role="alert" className="text-body text-pink">{actionError}</p> : null}
       </div>
 
