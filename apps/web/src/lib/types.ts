@@ -10,7 +10,13 @@
 
 export type ViewerRole = number;
 
-export type ViewerRelation = 'public' | 'rsvped' | 'attended' | 'host' | 'steward' | string;
+/**
+ * Mirrors `ViewerRelation` in `apps/appview/src/http/visibility.ts` exactly —
+ * these are the literal strings `viewerRelation()` (`../relation.ts`) returns,
+ * in the order it checks them. No `| string` escape hatch: a value outside
+ * this set means the server changed and this type needs updating too.
+ */
+export type ViewerRelation = 'public' | 'rsvp' | 'attendee' | 'host' | 'steward';
 
 // ── auth ──────────────────────────────────────────────────────────────────
 
@@ -47,22 +53,34 @@ export interface EventUriRef {
   name?: string;
 }
 
+/**
+ * Mirrors `PublicCalendarEntry`/`FullCalendarEntry` from `projectEvent()` in
+ * `apps/appview/src/http/visibility.ts:87-110` and `toCalendarEvent()` in
+ * `apps/appview/src/http/routes/calendar.ts:63-76` exactly: `hostDid`,
+ * `description`, `locations`, and `uris` are present only when
+ * `locationRedacted` is false (the viewer is the host, has RSVP'd, has
+ * confirmed attendance, or is a steward) — everyone else gets the coarser
+ * public entry.
+ */
 export interface CalendarEvent {
   uri: string;
-  hostDid: string;
-  name?: string;
-  description?: string;
+  name: string;
   startsAt?: string;
   endsAt?: string;
   mode?: string;
   status?: string;
+  neighborhood?: string;
+  /** True when the full location was withheld from this viewer. */
+  locationRedacted: boolean;
+  /** Present only when `locationRedacted` is false. */
+  hostDid?: string;
+  description?: string;
   locations?: EventLocation[];
   uris?: EventUriRef[];
   /** Added by Task 2; absent until then. */
   venueNeeded?: boolean;
   tags?: string[];
   origin?: 'ours' | 'listed';
-  [key: string]: unknown;
 }
 
 export interface CalendarResponse {

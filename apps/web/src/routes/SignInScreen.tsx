@@ -29,7 +29,7 @@ export function SignInScreen() {
   const useExisting = () => {
     setConfirming(false);
     // `oauth/start` is a GET that redirects the browser; it is not a fetch.
-    window.location.href = api.auth.oauthStartUrl(true);
+    window.location.href = api.auth.oauthStartUrl(true, handle);
   };
 
   return (

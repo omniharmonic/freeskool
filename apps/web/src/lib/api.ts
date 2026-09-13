@@ -142,9 +142,13 @@ export const api = {
       get<VerifyResult>('/api/auth/verify', { token }, { accept: 'application/json' }),
     me: () => get<AuthMe>('/api/auth/me'),
     logout: () => post<{ ok: boolean }>('/api/auth/logout'),
-    /** Secondary door. `confirm` must be true or the AppView refuses with 428. */
-    oauthStartUrl: (confirm: boolean): string =>
-      buildUrl('/api/auth/oauth/start', { confirm: confirm ? '1' : '0' }),
+    /**
+     * Secondary door. `confirm` must be true or the AppView refuses with 428;
+     * `handle` (a handle or a DID) is required too or it refuses with 400
+     * (`apps/appview/src/http/routes/auth.ts:78-79`).
+     */
+    oauthStartUrl: (confirm: boolean, handle: string): string =>
+      buildUrl('/api/auth/oauth/start', { confirm: confirm ? '1' : '0', handle }),
   },
 
   calendar: {

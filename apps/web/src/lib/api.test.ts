@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { api, ApiError } from './api';
+import type { CalendarEvent, ViewerRelation } from './types';
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -50,8 +51,42 @@ describe('api client', () => {
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
 
-  it('auth.oauthStartUrl(true) includes confirm=1', () => {
-    expect(api.auth.oauthStartUrl(true)).toContain('confirm=1');
-    expect(api.auth.oauthStartUrl(true)).toBe('/api/auth/oauth/start?confirm=1');
+  it('auth.oauthStartUrl(true, handle) includes confirm=1 and the handle', () => {
+    expect(api.auth.oauthStartUrl(true, 'wren.fs.boulder')).toContain('confirm=1');
+    expect(api.auth.oauthStartUrl(true, 'wren.fs.boulder')).toBe(
+      '/api/auth/oauth/start?confirm=1&handle=wren.fs.boulder',
+    );
+  });
+});
+
+describe('type-level: client types mirror the AppView response shapes', () => {
+  // These assertions are caught by `tsc --noEmit` (the `typecheck` script),
+  // not by vitest's esbuild transform — `@ts-expect-error` fails the build if
+  // the line it guards stops being a type error, which is exactly what we
+  // want if `ViewerRelation` or `CalendarEvent` drift from the server again.
+
+  it('ViewerRelation has no `| string` escape hatch — only the five literals the server returns', () => {
+    const allFive: ViewerRelation[] = ['public', 'rsvp', 'attendee', 'host', 'steward'];
+    expect(allFive).toHaveLength(5);
+
+    // @ts-expect-error — the old mock-era names; the server never returns these.
+    const rejected1: ViewerRelation = 'rsvped';
+    // @ts-expect-error
+    const rejected2: ViewerRelation = 'attended';
+    // @ts-expect-error — arbitrary strings used to be allowed via `| string`; not anymore.
+    const rejected3: ViewerRelation = 'anything';
+    void rejected1;
+    void rejected2;
+    void rejected3;
+  });
+
+  it('CalendarEvent permits the privacy-redacted shape (no hostDid/description/locations/uris)', () => {
+    const redacted: CalendarEvent = { uri: 'at://did:plc:host/x/1', name: 'Sourdough', locationRedacted: true };
+    expect(redacted.hostDid).toBeUndefined();
+    expect(redacted.locations).toBeUndefined();
+
+    // @ts-expect-error — `name` and `locationRedacted` are required; the server always sets them.
+    const invalid: CalendarEvent = { uri: 'at://x' };
+    void invalid;
   });
 });
