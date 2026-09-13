@@ -9,6 +9,8 @@ import { SessionGate } from '../components/SessionGate';
 import { Screen } from '../components/Screen';
 import { Button, SkillChip, Toggle } from '../components/bits';
 import { Sheet } from '../components/Sheet';
+import { SkillPicker } from '../components/SkillPicker';
+import { flattenSkills } from '../lib/skills';
 import { useInstallFlow } from '../components/InstallNudge';
 import { api, ApiError } from '../lib/api';
 import {
@@ -22,7 +24,7 @@ import {
   useUpdateProfileMutation,
   useVisibilityDefaults,
 } from '../lib/queries';
-import type { SkillClaimInput, SkillClaimLevel, SkillClaimsResponse, SkillNode, SkillTier } from '../lib/types';
+import type { SkillClaimInput, SkillClaimLevel, SkillClaimsResponse } from '../lib/types';
 
 const CLAIM_LEVEL_LABEL: Record<SkillClaimLevel, string> = {
   learning: 'Learning',
@@ -81,16 +83,6 @@ function claimsFromServer(
     .filter((s) => isClaimLevel(s.level))
     .map((s) => ({ skill: s.skill, level: s.level as SkillClaimLevel, note: s.note, visibility: 'school' as const }));
   return { claims: [...fromPublic, ...fromSchool], coercedPublicCount };
-}
-
-function flattenSkills(nodes: SkillNode[], trail: string[] = []): Array<{ uri: string; path: string; tier: SkillTier }> {
-  const out: Array<{ uri: string; path: string; tier: SkillTier }> = [];
-  for (const node of nodes) {
-    const path = [...trail, node.label];
-    out.push({ uri: node.uri, path: path.join(' › '), tier: node.tier });
-    out.push(...flattenSkills(node.children, path));
-  }
-  return out;
 }
 
 export function MeScreen() {
@@ -169,7 +161,6 @@ function MeContent() {
   }, [claimsData, claimsInitialized, oauthLocked]);
 
   const [draftSkillUri, setDraftSkillUri] = useState('');
-  const [draftSkillSearch, setDraftSkillSearch] = useState('');
   const [draftLevel, setDraftLevel] = useState<SkillClaimLevel>('practicing');
   const [draftVisibility, setDraftVisibility] = useState<'public' | 'school'>(oauthLocked ? 'school' : 'public');
   const [claimsError, setClaimsError] = useState<string | null>(null);
@@ -179,10 +170,6 @@ function MeContent() {
   // publish/retract can go through.
   const [reauthNotice, setReauthNotice] = useState(false);
 
-  const matchingSkills = draftSkillSearch.trim()
-    ? flatSkills.filter((s) => s.path.toLowerCase().includes(draftSkillSearch.trim().toLowerCase())).slice(0, 8)
-    : [];
-
   const addClaim = () => {
     if (!draftSkillUri) return;
     setClaims((prev) => [
@@ -190,7 +177,6 @@ function MeContent() {
       { skill: draftSkillUri, level: draftLevel, visibility: oauthLocked ? 'school' : draftVisibility },
     ]);
     setDraftSkillUri('');
-    setDraftSkillSearch('');
     setDraftLevel('practicing');
     setDraftVisibility(oauthLocked ? 'school' : 'public');
   };
@@ -368,50 +354,18 @@ function MeContent() {
 
         <div className="plate mt-3 space-y-3 p-3.5">
           <p className="text-caption text-ink-soft">Add a skill</p>
-          {draftSkillUri ? (
-            <div className="flex items-center justify-between gap-3 border-[1.5px] border-ink bg-sheet px-3 py-2">
-              <span className="flex items-center gap-2 text-body">
-                <span>{flatSkills.find((s) => s.uri === draftSkillUri)?.path ?? draftSkillUri}</span>
-                {flatSkills.find((s) => s.uri === draftSkillUri)?.tier === 'B' ? (
-                  <SkillChip ink="pink">Sensitive</SkillChip>
-                ) : null}
-              </span>
-              <button type="button" className="text-caption text-blue" onClick={() => setDraftSkillUri('')}>
-                Change
-              </button>
-            </div>
-          ) : (
-            <>
-              <input
-                className="w-full border-[1.5px] border-ink bg-sheet px-3 py-2 text-body outline-none"
-                value={draftSkillSearch}
-                onChange={(e) => setDraftSkillSearch(e.target.value)}
-                placeholder="Search the skill taxonomy"
-                aria-label="Search the skill taxonomy"
-              />
-              {matchingSkills.length > 0 ? (
-                <ul className="divide-y divide-rule border-[1.5px] border-ink">
-                  {matchingSkills.map((s) => (
-                    <li key={s.uri}>
-                      <button
-                        type="button"
-                        className="block w-full px-3 py-2 text-left text-body"
-                        onClick={() => {
-                          setDraftSkillUri(s.uri);
-                          setDraftSkillSearch('');
-                          // Tier B (sensitive) defaults to school-only; Tier A to public —
-                          // an oauth-door session still always defaults to school-only.
-                          setDraftVisibility(oauthLocked || s.tier === 'B' ? 'school' : 'public');
-                        }}
-                      >
-                        {s.path}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </>
-          )}
+          <SkillPicker
+            skills={flatSkills}
+            value={draftSkillUri}
+            allowPropose
+            placeholder="Start typing a skill"
+            onChange={(uri, skill) => {
+              setDraftSkillUri(uri);
+              // Tier B (sensitive) defaults to school-only; Tier A to public —
+              // an oauth-door session still always defaults to school-only.
+              if (skill) setDraftVisibility(oauthLocked || skill.tier === 'B' ? 'school' : 'public');
+            }}
+          />
 
           <div>
             <span className="text-caption text-ink-soft">How much practice</span>

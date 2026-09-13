@@ -7,6 +7,8 @@ import { LoadingState } from '../components/PageState';
 import { Screen } from '../components/Screen';
 import { Button, SectionHeading } from '../components/bits';
 import { SessionGate } from '../components/SessionGate';
+import { SkillPicker } from '../components/SkillPicker';
+import { flattenSkills } from '../lib/skills';
 import { api } from '../lib/api';
 import { useEvent, useMe, useSkillTree, useCreateEventMutation, useUpdateEventMutation } from '../lib/queries';
 import {
@@ -19,7 +21,7 @@ import {
   type RecurrenceState,
   type WeekdayCode,
 } from '../lib/recurrence';
-import type { CreateEventInput, SkillNode } from '../lib/types';
+import type { CreateEventInput } from '../lib/types';
 
 /**
  * `/events/new` (create) and `/events/$id/edit` (edit an existing class) — one
@@ -48,16 +50,6 @@ const RECURRENCE_LOCKED_COPY =
   "Recurrence can't be changed after a class is published yet. To reshape a series, cancel it and post a new one.";
 
 const previewFormat = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-
-function flattenSkills(nodes: SkillNode[], trail: string[] = []): Array<{ uri: string; path: string }> {
-  const out: Array<{ uri: string; path: string }> = [];
-  for (const node of nodes) {
-    const path = [...trail, node.label];
-    out.push({ uri: node.uri, path: path.join(' › ') });
-    out.push(...flattenSkills(node.children, path));
-  }
-  return out;
-}
 
 /** `datetime-local`'s value has no offset — `new Date()` parses it as wall
  * time in the browser's own zone, which is exactly what we want to send. */
@@ -107,7 +99,6 @@ function EventEditForm() {
   const [materialDraft, setMaterialDraft] = useState('');
   const [suppliesNote, setSuppliesNote] = useState('');
   const [skillUri, setSkillUri] = useState('');
-  const [skillSearch, setSkillSearch] = useState('');
   const [level, setLevel] = useState<1 | 2 | 3>(2);
   const [startLocal, setStartLocal] = useState('');
   const [endLocal, setEndLocal] = useState('');
@@ -210,9 +201,6 @@ function EventEditForm() {
 
   const flatSkills = useMemo(() => flattenSkills(skillTree?.skills ?? []), [skillTree]);
   const selectedSkill = flatSkills.find((s) => s.uri === skillUri);
-  const matchingSkills = skillSearch.trim()
-    ? flatSkills.filter((s) => s.path.toLowerCase().includes(skillSearch.trim().toLowerCase())).slice(0, 8)
-    : [];
 
   // A host can be looking for a room in a known neighborhood. Clear the exact
   // address while preserving the public area; venueNeeded is stored explicitly.
@@ -415,43 +403,14 @@ function EventEditForm() {
         <div id="class-skill">
           <SectionHeading>Skill</SectionHeading>
           <div className="safe-x -mx-4">
-            {selectedSkill ? (
-              <div className="flex items-center justify-between gap-3 border-[1.5px] border-ink bg-sheet px-3 py-2.5">
-                <span className="text-body">{selectedSkill.path}</span>
-                <button type="button" className="text-caption text-blue" onClick={() => setSkillUri('')}>
-                  Change
-                </button>
-              </div>
-            ) : (
-              <>
-                <input
-                  className={field}
-                  value={skillSearch}
-                  onChange={(e) => setSkillSearch(e.target.value)}
-                  placeholder="Search the skill taxonomy, or leave blank"
-                  aria-label="Search the skill taxonomy"
-                />
-                {matchingSkills.length > 0 ? (
-                  <ul className="mt-1.5 divide-y divide-rule border-[1.5px] border-ink">
-                    {matchingSkills.map((s) => (
-                      <li key={s.uri}>
-                        <button
-                          type="button"
-                          className="block w-full px-3 py-2 text-left text-body"
-                          onClick={() => {
-                            setSkillUri(s.uri);
-                            setSkillSearch('');
-                          }}
-                        >
-                          {s.path}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-                <p className="mt-1.5 text-caption text-ink-faint">No specific skill is fine — leave this blank.</p>
-              </>
-            )}
+            <SkillPicker
+              skills={flatSkills}
+              value={skillUri}
+              onChange={setSkillUri}
+              allowPropose
+              placeholder="Start typing a skill, or leave blank"
+              hint="No specific skill is fine — leave this blank."
+            />
             {selectedSkill ? (
               <div className="mt-3">
                 <span className={labelText}>Depth</span>

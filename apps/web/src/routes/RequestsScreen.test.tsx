@@ -14,6 +14,7 @@ if (!HTMLDialogElement.prototype.showModal) {
 }
 
 const REQUEST_URI = 'at://did:plc:asker1/freeschool.draft.request/req1';
+const SKILL_URI = 'at://did:plc:school/freeschool.draft.skill/sharpening';
 
 const navigateSpy = vi.fn();
 vi.mock('@tanstack/react-router', () => ({
@@ -78,6 +79,59 @@ describe('RequestsScreen', () => {
       .mockReset()
       .mockResolvedValue({ uri: 'at://did:plc:host1/freeschool.draft.claim/c1', cid: 'cid1' });
     vi.mocked(api.skills.tree).mockReset().mockResolvedValue({ skills: [] });
+    vi.mocked(api.requests.create)
+      .mockReset()
+      .mockResolvedValue({ uri: 'at://did:plc:host1/freeschool.draft.request/new1', cid: 'cid1' });
+  });
+
+  it('posts the skill chosen in the type-ahead picker, not a dropdown value', async () => {
+    vi.mocked(api.skills.tree).mockResolvedValue({
+      skills: [
+        {
+          uri: 'at://did:plc:school/freeschool.draft.skill/crafts',
+          id: 'crafts',
+          label: 'Crafts',
+          status: 'canonical',
+          tier: 'A' as const,
+          alsoUnder: [],
+          children: [
+            {
+              uri: SKILL_URI,
+              id: 'sharpening',
+              label: 'Sharpening hand tools',
+              status: 'canonical',
+              tier: 'A' as const,
+              alsoUnder: [],
+              children: [],
+            },
+          ],
+        },
+      ],
+    });
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Ask for one' }));
+    fireEvent.change(await screen.findByPlaceholderText(/someone teach me to sharpen things properly/i), {
+      target: { value: 'Teach me to sharpen things' },
+    });
+
+    // No <select> anywhere in the composer any more.
+    expect(screen.queryByRole('combobox', { name: /search the skill taxonomy/i })).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('combobox', { name: /search the skill taxonomy/i }), {
+      target: { value: 'sharpen' },
+    });
+    fireEvent.click(await screen.findByRole('option', { name: /Sharpening hand tools/ }));
+
+    expect(screen.getByText('Crafts › Sharpening hand tools')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /post this request/i }));
+
+    await waitFor(() =>
+      expect(api.requests.create).toHaveBeenCalledWith({
+        title: 'Teach me to sharpen things',
+        description: undefined,
+        skill: SKILL_URI,
+      }),
+    );
   });
 
   it("shows the empty-state copy when there's nothing on the board", async () => {

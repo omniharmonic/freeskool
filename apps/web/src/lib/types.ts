@@ -369,6 +369,37 @@ export interface SkillTreeResponse {
   skills: SkillNode[];
 }
 
+/**
+ * `POST /api/skills` — "I couldn't find it, here is what it's called."
+ * `parentUri` is always a domain or an area (the picker only ever offers
+ * those), so a proposal can never orphan itself at the root of the taxonomy.
+ */
+export interface SkillProposeInput {
+  label: string;
+  description?: string;
+  parentUri: string;
+}
+
+/** The 201 body. `status` comes back `'proposed'` until a steward curates it. */
+export interface SkillProposeResult {
+  uri: string;
+  id: string;
+  label: string;
+  status: string;
+  tier: SkillTier;
+}
+
+/**
+ * The 409 body — the taxonomy already has this skill under some name. Rides
+ * on `ApiError.body`; the picker selects `existing` rather than making the
+ * member retype anything. 503 `AuthorityUnavailable` (the school has no
+ * curation authority configured) carries no extra fields.
+ */
+export interface SkillExistsBody {
+  error: 'SkillExists';
+  existing: SkillNode;
+}
+
 export interface SkillDetail {
   uri: string;
   id: string;

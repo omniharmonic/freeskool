@@ -123,7 +123,7 @@ describe('MeScreen', () => {
 
   async function addDeEscalationClaim() {
     fireEvent.change(await screen.findByLabelText(/search the skill taxonomy/i), { target: { value: 'de-esc' } });
-    fireEvent.click(await screen.findByRole('button', { name: 'De-escalation' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'De-escalation' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Public' }));
     fireEvent.click(screen.getByRole('button', { name: 'Add this skill' }));
   }
@@ -241,7 +241,7 @@ describe('MeScreen', () => {
     renderScreen();
 
     fireEvent.change(await screen.findByLabelText(/search the skill taxonomy/i), { target: { value: 'de-esc' } });
-    fireEvent.click(await screen.findByRole('button', { name: 'De-escalation' }));
+    fireEvent.click(await screen.findByRole('option', { name: 'De-escalation' }));
 
     // Tier B default: "School only" is the active toggle without being clicked.
     expect(screen.getByRole('button', { name: 'School only' })).toHaveAttribute('aria-pressed', 'true');

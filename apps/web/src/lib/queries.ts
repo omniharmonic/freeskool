@@ -23,6 +23,7 @@ import type {
   SetNewsletterInput,
   SetPublicRoleInput,
   SkillClaimsSetInput,
+  SkillProposeInput,
   UpdateProfileInput,
 } from './types';
 
@@ -75,6 +76,23 @@ export function useSkillTree() {
   return useQuery({
     queryKey: ['skills'],
     queryFn: () => api.skills.tree(),
+  });
+}
+
+/**
+ * `POST /api/skills`. Never retries: 409 `SkillExists` and 503
+ * `AuthorityUnavailable` are both real answers the picker shows as copy, not
+ * transient failures. Invalidates `['skills']` so the freshly proposed node
+ * is in the tree by the time the picker renders it as a chip.
+ */
+export function useProposeSkillMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SkillProposeInput) => api.skills.propose(body),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['skills'] });
+    },
   });
 }
 

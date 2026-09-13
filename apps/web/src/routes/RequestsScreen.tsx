@@ -14,17 +14,9 @@ import {
   useSkillTree,
 } from '../lib/queries';
 import { ApiError } from '../lib/api';
-import type { RequestItem, SkillNode } from '../lib/types';
-
-function flattenSkills(nodes: SkillNode[], trail: string[] = []): Array<{ uri: string; path: string }> {
-  const out: Array<{ uri: string; path: string }> = [];
-  for (const node of nodes) {
-    const path = [...trail, node.label];
-    out.push({ uri: node.uri, path: path.join(' › ') });
-    out.push(...flattenSkills(node.children, path));
-  }
-  return out;
-}
+import { SkillPicker } from '../components/SkillPicker';
+import { flattenSkills } from '../lib/skills';
+import type { RequestItem } from '../lib/types';
 
 export function RequestsScreen() {
   const { data: me } = useMe();
@@ -223,17 +215,19 @@ function ComposerSheet({ open, onClose }: { open: boolean; onClose: () => void }
             />
           </label>
           {submitError ? <p className="mt-3 text-body text-pink">{submitError}</p> : null}
-          <label className="mt-4 block">
+          <div className="mt-4">
             <span className="text-caption text-ink-soft">Closest skill</span>
-            <select className={field} value={skillUri} onChange={(event) => setSkillUri(event.target.value)}>
-              <option value="">No specific skill</option>
-              {flatSkills.map((skill) => (
-                <option key={skill.uri} value={skill.uri}>
-                  {skill.path}
-                </option>
-              ))}
-            </select>
-          </label>
+            <div className="mt-1.5">
+              <SkillPicker
+                skills={flatSkills}
+                value={skillUri}
+                onChange={setSkillUri}
+                allowPropose
+                placeholder="Start typing a skill, or leave blank"
+                hint="No specific skill is fine — leave this blank."
+              />
+            </div>
+          </div>
         </SessionGate>
       )}
     </Sheet>

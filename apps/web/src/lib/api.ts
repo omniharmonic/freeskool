@@ -75,6 +75,8 @@ import type {
   SkillClaimsSetInput,
   SkillClaimsSetResult,
   SkillDetail,
+  SkillProposeInput,
+  SkillProposeResult,
   SkillTreeResponse,
   TakeOwnershipResult,
   UpdateEventResult,
@@ -229,6 +231,14 @@ export const api = {
   skills: {
     tree: () => get<SkillTreeResponse>('/api/skills'),
     get: (id: string) => get<SkillDetail>(`/api/skills/${encodeURIComponent(id)}`),
+    /**
+     * Propose a skill the taxonomy is missing. 409 `SkillExists` carries the
+     * node that already covers it (`SkillExistsBody` on `ApiError.body`); 503
+     * `AuthorityUnavailable` means this school has no curation authority set
+     * up yet. Both are real answers, not transient failures — see
+     * `useProposeSkillMutation`.
+     */
+    propose: (body: SkillProposeInput) => post<SkillProposeResult>('/api/skills', body),
   },
 
   me: {
