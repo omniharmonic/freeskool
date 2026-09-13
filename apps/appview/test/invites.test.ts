@@ -7,11 +7,12 @@
 process.env.SCHOOL_DID = 'did:plc:school'
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { defaultThresholds } from '@freeschool/shared'
 import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
 import { mintInviteLink, MintPermissionError, redeemInviteLink } from '../src/http/routes/invites.js'
 import { evidenceFor } from '../src/lib/roles.js'
 import { config } from '../src/config.js'
-import { custodialAccount } from '../src/db/schema.js'
+import { custodialAccount, policyCache } from '../src/db/schema.js'
 
 const INVITER = 'did:plc:inviter'
 const REDEEMER_A = 'did:plc:redeemera'
@@ -27,6 +28,14 @@ beforeAll(async () => {
     console.warn(SKIP_MESSAGE)
     return
   }
+  // `mintInviteLink` calls `roleOf`, which calls `getThresholds`, which otherwise fetches
+  // did:plc:school's record over HTTP (and logs a warning when that fails, since the DID
+  // is not real) — priming the DB-level policy cache directly means it never has to.
+  // This file must make no network call and print nothing.
+  await testDb()
+    .insert(policyCache)
+    .values({ schoolDid: 'did:plc:school', thresholds: defaultThresholds, fetchedAt: new Date() })
+    .onConflictDoUpdate({ target: policyCache.schoolDid, set: { thresholds: defaultThresholds, fetchedAt: new Date() } })
 })
 
 beforeEach(async () => {
@@ -149,20 +158,32 @@ describe('the member admission gate cannot be bypassed', () => {
     expect(evidence.inviteOrVouch).toBe(false)
   })
 
-  it('refuses a redeemer who already satisfies invite-or-vouch (409 AlreadyInvited)', async () => {
+  it('an already-admitted redeemer succeeds (the class deep-link case) without consuming a use or writing new evidence', async () => {
     if (!available) return
     // REDEEMER_A is admitted once, legitimately, by INVITER.
     const first = await mintInviteLink(INVITER, {})
     const firstRedeem = await redeemInviteLink(first.token, REDEEMER_A)
     expect(firstRedeem.ok).toBe(true)
 
-    // REDEEMER_A now mints their own link (they are a Member by now) and hands it to
-    // REDEEMER_B — but REDEEMER_A trying to redeem ANOTHER invite is refused: the gate
-    // is for first admission, not for collecting more evidence.
-    const second = await mintInviteLink(INVITER, {})
+    // INVITER now mints a class deep-link and hands it to REDEEMER_A, who is already a
+    // member — this must still work (it is how someone already admitted opens the class),
+    // just without burning the single use or writing a second piece of evidence.
+    const eventUri = 'at://did:plc:host/community.lexicon.calendar.event/xyz'
+    const second = await mintInviteLink(INVITER, { eventUri, uses: 1 })
     const secondAttempt = await redeemInviteLink(second.token, REDEEMER_A)
-    expect(secondAttempt.ok).toBe(false)
-    expect(secondAttempt.ok === false && secondAttempt.error).toBe('AlreadyInvited')
-    expect(secondAttempt.ok === false && secondAttempt.status).toBe(409)
+    expect(secondAttempt.ok).toBe(true)
+    expect(secondAttempt.ok === true && secondAttempt.eventUri).toBe(eventUri)
+    expect(secondAttempt.ok === true && secondAttempt.alreadyMember).toBe(true)
+
+    // the use was NOT consumed: REDEEMER_B, genuinely new, can still redeem it
+    const thirdAttempt = await redeemInviteLink(second.token, REDEEMER_B)
+    expect(thirdAttempt.ok).toBe(true)
+    expect(thirdAttempt.ok === true && thirdAttempt.alreadyMember).toBeUndefined()
+
+    // no duplicate evidence row was written for REDEEMER_A by the already-admitted path
+    const { invite } = await import('../src/db/schema.js')
+    const { eq } = await import('drizzle-orm')
+    const rows = await testDb().select().from(invite).where(eq(invite.usedByDid, REDEEMER_A))
+    expect(rows.length).toBe(1)
   })
 })

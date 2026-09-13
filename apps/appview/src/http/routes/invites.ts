@@ -9,15 +9,18 @@
  * scoped to one class), it can be reused up to `uses` times, and it expires. Only the
  * SHA-256 of the token is ever stored, so a leaked database row is not a working link.
  *
- * THE MEMBER ADMISSION GATE, three independent layers (closes the self-promotion hole
+ * THE MEMBER ADMISSION GATE, two independent layers (closes the self-promotion hole
  * where a fresh Visitor mints their own link and redeems it to promote themselves):
  *   1. minting requires Role.Member+ (`requireRole` at the route, `roleOf` inside
  *      `mintInviteLink` itself so the function is safe even called directly);
  *   2. `redeemInviteLink` refuses a redemption where `redeemerDid === inviterDid`
- *      (409 `SelfRedeem`) — no self-invite, from any account;
- *   3. `redeemInviteLink` refuses a redeemer who ALREADY satisfies the invite-or-vouch
- *      gate (409 `AlreadyInvited`) — this mechanism exists to admit people who do not yet
- *      have qualifying evidence, not to accumulate more of it.
+ *      (409 `SelfRedeem`, a hard error) — no self-invite, from any account.
+ *
+ * A redeemer who ALREADY satisfies invite-or-vouch is NOT an error: this is the brief's
+ * class deep-link (mint with `eventUri`, hand the link to someone already admitted so
+ * they land on the class). Redemption still succeeds — `{ ok: true, eventUri,
+ * alreadyMember: true }` — it just consumes no use and writes no new evidence, since
+ * there is nothing left to admit them to.
  *
  * PRIVACY (R9): the inviter's DID never appears in the minted URL, in the token, or in
  * the redeemer's response — `fs_invite_link.inviterDid` stays server-side, same as
@@ -81,7 +84,7 @@ export async function mintInviteLink(inviterDid: string, input: z.infer<typeof m
 }
 
 export type RedeemResult =
-  | { ok: true; eventUri?: string }
+  | { ok: true; eventUri?: string; alreadyMember?: boolean }
   | { ok: false; status: number; error: string; message?: string }
 
 export async function redeemInviteLink(token: string, redeemerDid: string): Promise<RedeemResult> {
@@ -100,16 +103,17 @@ export async function redeemInviteLink(token: string, redeemerDid: string): Prom
     return { ok: false, status: 409, error: 'SelfRedeem', message: 'you cannot redeem your own invite link' }
   }
 
-  // Layer 3: this mechanism is for FIRST admission. A redeemer who already satisfies
-  // invite-or-vouch (the exact condition `evidenceFor` checks) has nothing to gain here,
-  // and letting them consume a link meant for someone new is not what it is for.
+  // A redeemer who already satisfies invite-or-vouch (the exact condition `evidenceFor`
+  // checks) is not turned away: this is the class deep-link case — succeed, but consume
+  // no use and write no new evidence, since there is nothing left for this link to admit
+  // them to.
   const already = await db
     .select({ code: invite.code })
     .from(invite)
     .where(and(eq(invite.usedByDid, redeemerDid), or(isNotNull(invite.inviterDid), isNotNull(invite.inviterPurgedAt))))
     .limit(1)
   if (already.length > 0) {
-    return { ok: false, status: 409, error: 'AlreadyInvited', message: 'you already satisfy the member admission gate' }
+    return { ok: true, ...(row.eventUri ? { eventUri: row.eventUri } : {}), alreadyMember: true }
   }
 
   // Atomic claim: decrement only while a use remains, so two simultaneous redemptions
@@ -151,5 +155,9 @@ invites.post('/invites/:token/redeem', requireViewer, async (c) => {
   const token = c.req.param('token')
   const result = await redeemInviteLink(token, c.var.viewer!.did)
   if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status as 404 | 409 | 410)
-  return c.json({ ok: true, ...(result.eventUri ? { eventUri: result.eventUri } : {}) })
+  return c.json({
+    ok: true,
+    ...(result.eventUri ? { eventUri: result.eventUri } : {}),
+    ...(result.alreadyMember ? { alreadyMember: true } : {}),
+  })
 })

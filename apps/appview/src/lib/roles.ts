@@ -15,31 +15,50 @@
  *   upheldNegativeFeedback  resolved `fs_moderation_queue` rows against the DID
  *   stewardAppointed        `fs_steward`
  */
-import { and, eq, isNotNull, isNull, or, sql } from 'drizzle-orm'
+import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm'
 import { deriveRole, Role, type Evidence } from '@freeschool/shared'
 import { getDb } from '../db/index.js'
-import { attendanceTally, custodialAccount, invite, moderationQueue, oauthSession, steward } from '../db/schema.js'
+import { attendanceTally, custodialAccount, invite, member, moderationQueue, steward } from '../db/schema.js'
 import { getThresholds } from './policy.js'
 import { config } from '../config.js'
 import { getIndexer } from '../index/indexer.js'
 
 /**
- * Does this DID belong to THIS school at all — by signing in through either door, or by
- * steward appointment? Used to decide calendar/zine inclusion by AUTHORSHIP
+ * Does this DID belong to THIS school at all — by having EVER signed in through either
+ * door, or by steward appointment? Used to decide calendar/zine inclusion by AUTHORSHIP
  * (`http/visibility.ts#calendarInclusion`), independent of any `coop.lexicon.event.listing`
- * (which exists for routing to PEERS, not for deciding what is ours). Deliberately
- * narrower than `hasProfile` above: `hasIndexedRecords` counts ANY indexed record
- * anywhere, which would wrongly call a peer school's host "ours" once their events are
- * indexed; these three tables are specifically OUR OWN accounts.
+ * (which exists for routing to PEERS, not for deciding what is ours).
+ *
+ * Reads `fs_member` (a DURABLE fact, written once at `createSession` and never deleted),
+ * NOT `fs_oauth_session` — that table is the OAuth client's own token/session store and
+ * `PostgresSessionStore.del` (`http/oauth.ts`) deletes a row on revocation or a failed
+ * refresh, which would make an OAuth-door host's classes vanish from their own calendar
+ * the moment their token needed renewing. Deliberately narrower than `hasProfile` above:
+ * that function's `hasIndexedRecords` fallback counts ANY indexed record anywhere, which
+ * would wrongly call a peer school's host "ours" once their events are indexed.
+ *
+ * Single-DID convenience wrapper around `isOwnMemberSet` — prefer the batch form when
+ * checking more than one DID (calendar/zine routes do).
  */
 export async function isOwnMember(did: string): Promise<boolean> {
+  return (await isOwnMemberSet([did])).has(did)
+}
+
+/** Batched form of `isOwnMember`: one query per table instead of one per DID. */
+export async function isOwnMemberSet(dids: string[]): Promise<Set<string>> {
+  const unique = [...new Set(dids)]
+  if (unique.length === 0) return new Set()
   const db = getDb()
-  const [custodial, oauth, stewardRow] = await Promise.all([
-    db.select({ did: custodialAccount.did }).from(custodialAccount).where(eq(custodialAccount.did, did)).limit(1),
-    db.select({ sub: oauthSession.sub }).from(oauthSession).where(eq(oauthSession.sub, did)).limit(1),
-    db.select({ did: steward.did }).from(steward).where(eq(steward.did, did)).limit(1),
+  const [custodialRows, memberRows, stewardRows] = await Promise.all([
+    db.select({ did: custodialAccount.did }).from(custodialAccount).where(inArray(custodialAccount.did, unique)),
+    db.select({ did: member.did }).from(member).where(inArray(member.did, unique)),
+    db.select({ did: steward.did }).from(steward).where(inArray(steward.did, unique)),
   ])
-  return custodial.length > 0 || oauth.length > 0 || stewardRow.length > 0
+  const out = new Set<string>()
+  for (const r of custodialRows) out.add(r.did)
+  for (const r of memberRows) out.add(r.did)
+  for (const r of stewardRows) out.add(r.did)
+  return out
 }
 
 export async function evidenceFor(did: string, schoolDid = config().SCHOOL_DID): Promise<Evidence> {

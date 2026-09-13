@@ -11,7 +11,7 @@ import { getIndexer } from '../../index/indexer.js'
 import { eventsInWindow, sidecarsForEvent } from '../../index/queries.js'
 import { config } from '../../config.js'
 import { getRecord } from '../../lib/pds.js'
-import { isOwnMember } from '../../lib/roles.js'
+import { isOwnMemberSet } from '../../lib/roles.js'
 import { NSID } from '../../lexicons/nsids.js'
 import type { EventConfig, EventListing } from '../../lexicons/coop.js'
 import { calendarInclusion, projectEvent, type PublicCalendarEntry } from '../visibility.js'
@@ -77,6 +77,9 @@ zine.get('/zine/:yyyyMm', async (c) => {
   const indexer = await getIndexer()
   const events = await eventsInWindow(indexer, range.fromIso, range.toIso, 500)
 
+  // One batched membership lookup for the whole month, not one per event (N+1).
+  const ownDids = await isOwnMemberSet(events.map((e) => e.did))
+
   const projected: PublicCalendarEntry[] = []
   for (const e of events) {
     const [listings, configs] = await Promise.all([
@@ -85,7 +88,7 @@ zine.get('/zine/:yyyyMm', async (c) => {
     ])
     const inputs = { listings: listings.map((l) => l.value), configs: configs.map((x) => x.value) }
     // Same authorship-based inclusion as the calendar (see http/visibility.ts).
-    const { show } = calendarInclusion(await isOwnMember(e.did), inputs)
+    const { show } = calendarInclusion(ownDids.has(e.did), inputs)
     if (!show) continue
     // 'public': this endpoint has no session at all, by design (R9 — no public endpoint
     // enumerates members, and the zine is for anyone to print).

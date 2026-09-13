@@ -174,6 +174,22 @@ export const requestRsvp = pgTable(
   (t) => [primaryKey({ columns: [t.requestUri, t.did] }), index('fs_request_rsvp_req_idx').on(t.requestUri)],
 )
 
+/**
+ * A DURABLE record that this DID has ever authenticated with THIS school, through either
+ * door. Written on every successful `createSession` call (see `http/session.ts`) and by
+ * `create-school` for the school/steward DIDs. Deliberately NEVER deleted on logout or
+ * session expiry — `fs_oauth_session` and `fs_session` are ephemeral session-store rows
+ * that get cleared on revocation/expiry, and `lib/roles.ts#isOwnMember` (calendar/zine
+ * inclusion by authorship) needs a fact that outlives those.
+ */
+export const member = pgTable('fs_member', {
+  did: text('did').primaryKey(),
+  /** 'custodial' | 'oauth' — the door most recently used; presence is what matters. */
+  door: text('door').notNull(),
+  firstSeenAt: ts('first_seen_at').notNull().defaultNow(),
+  lastSeenAt: ts('last_seen_at').notNull().defaultNow(),
+})
+
 /* ───────────────────────────────── RSVP & attendance ───────────────────────────── */
 
 /**
@@ -537,6 +553,7 @@ export const schema = {
   inviteLink,
   skillTier,
   requestRsvp,
+  member,
   rsvp,
   attendance,
   attendanceRollup,

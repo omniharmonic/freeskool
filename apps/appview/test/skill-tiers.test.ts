@@ -31,6 +31,10 @@ afterAll(async () => {
 })
 
 describe('the explicit Tier B list', () => {
+  it('is non-empty at module load — a JSON import, no readFileSync path to get wrong', () => {
+    expect(explicitTierBSlugs().length).toBeGreaterThan(0)
+  })
+
   it('names every sensitive skill the brief requires', () => {
     const slugs = explicitTierBSlugs()
     for (const s of [

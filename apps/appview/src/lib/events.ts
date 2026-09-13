@@ -343,8 +343,10 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
   const configRows = await sidecarsForEvent<EventConfig>(indexer, 'eventConfig', eventUri)
   const existingConfig = configRows[0]
   const configParts = existingConfig ? parseAtUri(existingConfig.uri) : null
-  // No default here either (see createEventAsHost): an explicit `tags: []` or an omitted
-  // `tags` both mean "use whatever is already there", never a silent re-route.
+  // No default here either (see createEventAsHost). Omitting `tags` entirely means "leave
+  // it alone" (keeps whatever the config already had). An EXPLICIT `tags: []` is a
+  // deliberate instruction to un-route the event — it clears the tags and, a few lines
+  // down, `decideListingEdit` will remove the school's listing if one is currently active.
   const newTags = input.tags !== undefined ? input.tags : existingConfig?.value.tags ?? []
   const newVisibility = input.visibility ?? existingConfig?.value.visibility ?? 'listed'
   const mergedConfig: EventConfig & { $type: string } = {

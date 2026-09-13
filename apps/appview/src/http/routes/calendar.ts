@@ -14,7 +14,7 @@ import { z } from 'zod'
 import type { AppEnv } from '../session.js'
 import { getIndexer } from '../../index/indexer.js'
 import { eventsInWindow, sidecarsForEvent } from '../../index/queries.js'
-import { isOwnMember } from '../../lib/roles.js'
+import { isOwnMemberSet } from '../../lib/roles.js'
 import type { EventConfig, EventListing } from '../../lexicons/coop.js'
 import { calendarInclusion, projectEvent, type CalendarEvent, type ViewerRelation } from '../visibility.js'
 import { viewerRelation } from '../relation.js'
@@ -40,6 +40,9 @@ calendar.get('/calendar', async (c) => {
   const events = await eventsInWindow(indexer, fromIso, toIso, limit)
   const viewer = c.var.viewer
 
+  // One batched membership lookup for the whole page, not one per event (N+1).
+  const ownDids = await isOwnMemberSet(events.map((e) => e.did))
+
   const out: unknown[] = []
   for (const e of events) {
     const [listings, configs] = await Promise.all([
@@ -55,7 +58,7 @@ calendar.get('/calendar', async (c) => {
     // AUTHORSHIP decides inclusion, not the listing (gap-report §A item 11: listings are
     // for routing to peers; a host who belongs to this school is 'ours' regardless of
     // whether the tags they chose happened to route — see http/visibility.ts).
-    const { show, origin } = calendarInclusion(await isOwnMember(e.did), inputs)
+    const { show, origin } = calendarInclusion(ownDids.has(e.did), inputs)
     if (!show) continue
 
     const relation: ViewerRelation = viewer ? await viewerRelation(viewer, e.uri, e.did) : 'public'

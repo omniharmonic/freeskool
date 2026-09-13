@@ -18,11 +18,15 @@ import { fileURLToPath } from 'node:url'
 import { eq } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { skillTier } from '../db/schema.js'
+// A native JSON import, not `fs.readFileSync` + `JSON.parse`: tsc's `resolveJsonModule`
+// type-checks this as the array it is, and (per `package.json`'s `build` script) the file
+// is copied next to the compiled output so a `dist/` deployment finds it at the same
+// relative path a dev run does — see the `build` script's copy step.
+import seedData from './skill-tiers.seed.json' with { type: 'json' }
 
 export type SkillTierValue = 'A' | 'B'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const SEED_PATH = path.resolve(here, './skill-tiers.seed.json')
 const DEFAULT_TAXONOMY_PATH = path.resolve(here, '../../../../infra/seed/skills/skills-seed.jsonl')
 
 /** Matches a label that itself names a sensitive/high-risk topic. */
@@ -35,10 +39,8 @@ export async function tierOf(skillId: string): Promise<SkillTierValue> {
 
 /** The curated Tier B list, named in the task brief verbatim. */
 export function explicitTierBSlugs(): string[] {
-  const raw = fs.readFileSync(SEED_PATH, 'utf8')
-  const parsed = JSON.parse(raw) as unknown
-  if (!Array.isArray(parsed)) return []
-  return parsed.filter((x): x is string => typeof x === 'string')
+  if (!Array.isArray(seedData)) return []
+  return (seedData as unknown[]).filter((x): x is string => typeof x === 'string')
 }
 
 interface TaxonomyRow {
