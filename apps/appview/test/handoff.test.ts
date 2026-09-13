@@ -10,12 +10,17 @@ process.env.SCHOOL_DID = 'did:plc:school'
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { eq } from 'drizzle-orm'
+import type { Context } from 'hono'
 import { AppCustodyAdapter, type Did } from '@freeschool/school-actor'
 import { Role } from '@freeschool/shared'
 import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
 import { PostgresAuditSink, setSchoolActor } from '../src/lib/school-actor.js'
 import { acceptHandoff, proposeHandoff } from '../src/http/routes/handoff.js'
-import { audit, steward } from '../src/db/schema.js'
+import { audit, custodialAccount, steward } from '../src/db/schema.js'
+import { createApp } from '../src/http/app.js'
+import { createSession } from '../src/http/session.js'
+import { signSessionId } from '../src/lib/crypto.js'
+import { config } from '../src/config.js'
 
 const SCHOOL = 'did:plc:school' as Did
 const FROM = 'did:plc:from-steward' as Did
@@ -48,7 +53,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   if (!available) return
-  await truncate('fs_handoff', 'fs_steward', 'fs_audit')
+  await truncate('fs_handoff', 'fs_steward', 'fs_audit', 'fs_session', 'fs_member', 'fs_custodial_account')
 })
 
 afterEach(() => setSchoolActor(undefined))
@@ -72,14 +77,30 @@ describe('proposeHandoff', () => {
     expect(new Date(res.expiresAt).getTime()).toBeGreaterThan(Date.now())
   })
 
-  it('resolves a named successor and records it on the approval', async () => {
+  it('resolves a named successor into fs_handoff.to_did, but NEVER into the public approval record', async () => {
     if (!available) return
-    const writeCalls: Array<{ subjectDid?: string }> = []
+    const writeCalls: Array<Record<string, unknown>> = []
     const res = await proposeHandoff({ did: FROM, kind: 'custodial' }, { toHandleOrDid: ACCEPTOR }, {
-      writeApproval: async (_viewer, record) => (writeCalls.push(record as { subjectDid?: string }), fakeApproval()),
+      writeApproval: async (_viewer, record) => (writeCalls.push(record), fakeApproval()),
     })
     expect(res.ok).toBe(true)
-    expect(writeCalls[0]?.subjectDid).toBe(ACCEPTOR)
+    // The successor's DID lives only app-side (fs_handoff), bound once THEY accept —
+    // never in the proposer's public repo before the successor has consented to anything.
+    expect('subjectDid' in writeCalls[0]!).toBe(false)
+    expect(JSON.stringify(writeCalls[0])).not.toContain(ACCEPTOR)
+  })
+
+  it('the approval record never carries any DID other than the proposer\'s own (R9)', async () => {
+    if (!available) return
+    const writeCalls: Array<Record<string, unknown>> = []
+    await proposeHandoff({ did: FROM, kind: 'custodial' }, { toHandleOrDid: ACCEPTOR }, {
+      writeApproval: async (viewer, record) => (writeCalls.push(record), fakeApproval()),
+    })
+    const serialized = JSON.stringify(writeCalls[0])
+    // the proposal's synthetic at-uri legitimately contains the SCHOOL's did; nothing
+    // else in the record may contain any did: at all.
+    const dids = serialized.match(/did:[a-z0-9]+:[a-zA-Z0-9._-]+/g) ?? []
+    for (const d of dids) expect(d).toBe(SCHOOL)
   })
 })
 
@@ -155,5 +176,74 @@ describe('acceptHandoff', () => {
     const result = await acceptHandoff(proposed.token, ACCEPTOR)
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.warning).toBeUndefined()
+  })
+})
+
+/**
+ * HTTP level, through the REAL `createApp()` — pins the actual route: `POST
+ * /api/handoff/:token/accept` must NOT be caught by `admin.use('*', requireRole(Steward))`
+ * (it would be, at `/api/admin/handoff/:token/accept`, since Hono applies a mounted
+ * sub-app's `'*'` middleware to any path under its prefix regardless of whether that
+ * sub-app has its own handler for it).
+ */
+describe('HTTP: POST /api/handoff/:token/accept', () => {
+  /** `setCookie` only ever calls `c.header(...)` on this — see `test/membership.test.ts`. */
+  function fakeContext(): Context {
+    return { header: () => undefined } as unknown as Context
+  }
+
+  async function cookieFor(did: string): Promise<string> {
+    const id = await createSession(fakeContext(), did, 'custodial')
+    return `${config().SESSION_COOKIE}=${signSessionId(id)}`
+  }
+
+  it('a non-steward Member can accept — no 403 from the admin gate', async () => {
+    if (!available) return
+    setSchoolActor(wirePort())
+    const proposed = await proposeHandoff({ did: FROM, kind: 'custodial' }, {}, { writeApproval: fakeApproval })
+    expect(proposed.ok).toBe(true)
+    if (!proposed.ok) return
+
+    // A custodial account gives this DID hasProfile=true; under the default open
+    // policy that derives (at least) Host — comfortably >= Member, and NOT Steward,
+    // which is exactly the case the admin blanket gate used to 403.
+    await testDb().insert(custodialAccount).values({ did: ACCEPTOR, handle: 'member.test', email: 'member@example.org', keyVersion: 'v1' })
+    const cookie = await cookieFor(ACCEPTOR)
+
+    const app = createApp()
+    const res = await app.request(`/api/handoff/${proposed.token}/accept`, {
+      method: 'POST',
+      headers: { Cookie: cookie },
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { ok: boolean }
+    expect(body.ok).toBe(true)
+  })
+
+  it('a Visitor (no profile at all) is refused with 403, not a steward-gate 403 masquerading as the wrong error', async () => {
+    if (!available) return
+    setSchoolActor(wirePort())
+    const proposed = await proposeHandoff({ did: FROM, kind: 'custodial' }, {}, { writeApproval: fakeApproval })
+    expect(proposed.ok).toBe(true)
+    if (!proposed.ok) return
+
+    const visitor = 'did:plc:a-bare-visitor'
+    const cookie = await cookieFor(visitor)
+
+    const app = createApp()
+    const res = await app.request(`/api/handoff/${proposed.token}/accept`, {
+      method: 'POST',
+      headers: { Cookie: cookie },
+    })
+    expect(res.status).toBe(403)
+    const body = (await res.json()) as { error: string }
+    expect(body.error).toBe('PermissionDenied')
+  })
+
+  it('an unauthenticated request is refused with 401', async () => {
+    if (!available) return
+    const app = createApp()
+    const res = await app.request('/api/handoff/not-a-real-token/accept', { method: 'POST' })
+    expect(res.status).toBe(401)
   })
 })

@@ -502,6 +502,8 @@ export const newsletterIssue = pgTable('fs_newsletter_issue', {
   status: text('status').notNull().default('draft'),
   sentAt: ts('sent_at'),
   recipientCount: integer('recipient_count'),
+  /** Per-recipient sends are isolated (one throwing send must not abort the rest). */
+  failedCount: integer('failed_count'),
 })
 
 /**

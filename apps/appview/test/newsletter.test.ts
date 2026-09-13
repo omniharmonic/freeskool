@@ -56,7 +56,10 @@ describe('sendNewsletterIssue', () => {
     const res = await sendNewsletterIssue(draft.id, { sendFn })
 
     expect(res.ok).toBe(true)
-    if (res.ok) expect(res.recipientCount).toBe(2)
+    if (res.ok) {
+      expect(res.recipientCount).toBe(2)
+      expect(res.failedCount).toBe(0)
+    }
     expect(calls.length).toBe(2)
     expect(calls.map((m) => m.to).sort()).toEqual(['a@example.org', 'b@example.org'])
     for (const mail of calls) {
@@ -67,7 +70,37 @@ describe('sendNewsletterIssue', () => {
     const rows = await testDb().select().from(newsletterIssue).where(eq(newsletterIssue.id, draft.id))
     expect(rows[0]?.status).toBe('sent')
     expect(rows[0]?.recipientCount).toBe(2)
+    expect(rows[0]?.failedCount).toBe(0)
     expect(rows[0]?.sentAt).toBeTruthy()
+  })
+
+  it('one recipient throwing does not abort the run for the rest, and is counted rather than silently dropped', async () => {
+    if (!available) return
+    await subscribe('did:plc:subscriber-ok-1', 'ok1@example.org')
+    await subscribe('did:plc:subscriber-fail', 'fail@example.org')
+    await subscribe('did:plc:subscriber-ok-2', 'ok2@example.org')
+
+    const draft = await composeNewsletterIssue('2026-09')
+    const calls: Mail[] = []
+    const sendFn = async (mail: Mail) => {
+      if (mail.to === 'fail@example.org') throw new Error('simulated transport failure')
+      calls.push(mail)
+      return { delivered: true, transport: 'fake' }
+    }
+    const res = await sendNewsletterIssue(draft.id, { sendFn })
+
+    expect(res.ok).toBe(true)
+    if (res.ok) {
+      expect(res.recipientCount).toBe(2)
+      expect(res.failedCount).toBe(1)
+    }
+    // both surviving recipients still got their mail — the throw did not abort the loop
+    expect(calls.map((m) => m.to).sort()).toEqual(['ok1@example.org', 'ok2@example.org'])
+
+    const rows = await testDb().select().from(newsletterIssue).where(eq(newsletterIssue.id, draft.id))
+    expect(rows[0]?.status).toBe('sent')
+    expect(rows[0]?.recipientCount).toBe(2)
+    expect(rows[0]?.failedCount).toBe(1)
   })
 
   it('refuses to send an already-sent issue a second time', async () => {

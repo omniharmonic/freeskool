@@ -13,6 +13,7 @@ const MIN_ROLE: Record<SchoolAction, Role> = {
   'write-policy': Role.Steward,
   'void-attendance': Role.Steward,
   'publish-role-claim': Role.Host,
+  'retract-role-claim': Role.Visitor,
 }
 
 /**

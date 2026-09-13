@@ -128,7 +128,7 @@ export interface SendNewsletterDeps {
 }
 
 export type SendNewsletterResult =
-  | { ok: true; recipientCount: number }
+  | { ok: true; recipientCount: number; failedCount: number; skipped?: number }
   | { ok: false; status: number; error: string; message?: string }
 
 function unsubscribeUrl(token: string): string {
@@ -136,9 +136,17 @@ function unsubscribeUrl(token: string): string {
 }
 
 /**
- * Sends a DRAFT issue to every currently-subscribed member (capped at
- * `MAX_RECIPIENTS_PER_RUN`), then marks it sent with the actual recipient count. A
- * second call against an already-sent issue is refused rather than re-sending.
+ * Sends a DRAFT issue to every currently-subscribed member, up to `MAX_RECIPIENTS_PER_RUN`,
+ * then marks it sent. A second call against an already-sent issue is refused rather than
+ * re-sending.
+ *
+ * Two things this deliberately does NOT do:
+ *   - one recipient's send throwing does not abort the run for everyone after them —
+ *     each send is isolated (try/catch per recipient); `failedCount` is the tally;
+ *   - resend the REMAINDER when a school has more than `MAX_RECIPIENTS_PER_RUN` active
+ *     subscribers. That would need a per-issue delivery ledger (who has received THIS
+ *     issue) this table does not have. Documented limitation: `skipped` in the result
+ *     names how many were not reached this run; reaching them needs a follow-up issue.
  */
 export async function sendNewsletterIssue(id: string, deps: SendNewsletterDeps = {}): Promise<SendNewsletterResult> {
   const send = deps.sendFn ?? sendMail
@@ -148,19 +156,34 @@ export async function sendNewsletterIssue(id: string, deps: SendNewsletterDeps =
   if (!issue) return { ok: false, status: 404, error: 'NotFound', message: 'no such newsletter issue' }
   if (issue.status === 'sent') return { ok: false, status: 409, error: 'AlreadySent', message: 'this issue was already sent' }
 
-  const subscribers = await activeSubscribers(MAX_RECIPIENTS_PER_RUN)
+  // Peek one past the cap so we know whether anyone was skipped, without a second query.
+  const candidates = await activeSubscribers(MAX_RECIPIENTS_PER_RUN + 1)
+  const skipped = Math.max(0, candidates.length - MAX_RECIPIENTS_PER_RUN)
+  const subscribers = skipped > 0 ? candidates.slice(0, MAX_RECIPIENTS_PER_RUN) : candidates
   const subject = issue.html.match(/<h1[^>]*>(.*?)<\/h1>/)?.[1] ?? `Free School, ${issue.month}`
 
   let sent = 0
+  let failed = 0
   for (const sub of subscribers) {
-    const token = await rotateUnsubscribeToken(sub.did)
-    const url = unsubscribeUrl(token)
-    const html = `${issue.html}\n<p style="font-size:12px;color:#666;">Don't want this? <a href="${url}">Unsubscribe</a>.</p>`
-    const text = `${issue.text}\n\nUnsubscribe: ${url}`
-    await send({ to: sub.emailRef, subject, text, html })
-    sent++
+    try {
+      const token = await rotateUnsubscribeToken(sub.did)
+      const url = unsubscribeUrl(token)
+      const html = `${issue.html}\n<p style="font-size:12px;color:#666;">Don't want this? <a href="${url}">Unsubscribe</a>.</p>`
+      const text = `${issue.text}\n\nUnsubscribe: ${url}`
+      await send({ to: sub.emailRef, subject, text, html })
+      sent++
+    } catch (err) {
+      // Isolated on purpose: a transport failure for one address must never abort the
+      // rest of the run, and must never be retried with a newly-rotated (and now
+      // unsent) token at this recipient's expense.
+      failed++
+      log.warn('newsletter send failed for one recipient', { detail: String(err) })
+    }
   }
 
-  await db.update(newsletterIssue).set({ status: 'sent', sentAt: new Date(), recipientCount: sent }).where(eq(newsletterIssue.id, id))
-  return { ok: true, recipientCount: sent }
+  await db
+    .update(newsletterIssue)
+    .set({ status: 'sent', sentAt: new Date(), recipientCount: sent, failedCount: failed })
+    .where(eq(newsletterIssue.id, id))
+  return { ok: true, recipientCount: sent, failedCount: failed, ...(skipped > 0 ? { skipped } : {}) }
 }

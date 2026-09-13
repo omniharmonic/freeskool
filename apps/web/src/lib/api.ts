@@ -249,7 +249,9 @@ export const api = {
     },
     handoff: {
       start: (b: HandoffStartInput) => post<HandoffResult>('/api/admin/handoff', b),
-      accept: (token: string) => post<HandoffResult>(`/api/admin/handoff/${encodeURIComponent(token)}/accept`),
+      // NOT under /api/admin: that prefix is steward-gated, and accepting is open to
+      // any Member — see apps/appview/src/http/routes/handoff.ts.
+      accept: (token: string) => post<HandoffResult>(`/api/handoff/${encodeURIComponent(token)}/accept`),
     },
   },
 

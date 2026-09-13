@@ -34,6 +34,14 @@ export type SchoolAction =
    * Steward. Distinct from `set-role`, which is a STEWARD decision (e.g. a hand-off).
    */
   | 'publish-role-claim'
+  /**
+   * The school retracting a previously-published `coop.lexicon.membership` claim
+   * (opted back out, or the role dropped below Host). Visitor-level on purpose: by the
+   * time this is needed the subject's CURRENT role may itself be below Host, and
+   * removing a name one already consented to naming can never need a HIGHER bar than
+   * publishing it did.
+   */
+  | 'retract-role-claim'
 
 /** Actions that require the policy's destructiveActionStewards threshold (default 2). */
 export const DESTRUCTIVE_ACTIONS: ReadonlySet<SchoolAction> = new Set<SchoolAction>([

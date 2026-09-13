@@ -4,8 +4,13 @@
  * it and become a steward. This is the "how to start this school again if it goes
  * quiet" mechanism `lib/how-it-works.ts` points at.
  *
- *   POST /admin/handoff                 (steward) propose — 7-day single-use token
- *   POST /admin/handoff/:token/accept   (any signed-in member) accept
+ *   POST /admin/handoff            (steward) propose — 7-day single-use token
+ *   POST /handoff/:token/accept    (any Member+; a bare Visitor is refused) accept
+ *
+ * Accept is deliberately NOT under `/api/admin/*`: `admin.ts` mounts a blanket
+ * `admin.use('*', requireRole(Steward))` there, which would 403 the very non-steward
+ * the token is meant for (Hono applies a sub-app's `'*'` middleware to any path under
+ * its mount, whether or not that sub-app has its own handler for it).
  *
  * The PROPOSER's own approval is written FIRST, to their OWN repo
  * (`freeschool.draft.approval`, per that lexicon's own description — "written by the
@@ -14,6 +19,11 @@
  * the `fs_handoff` row — and therefore the token — come into existence, so "the
  * proposer's own approval already exists" is true by construction, not by a runtime
  * check against something that could have failed independently.
+ *
+ * The approval record NEVER carries the successor's DID: R9 forbids a public record
+ * naming a DID its holder did not write, and at propose time the successor has not
+ * consented to anything (they may not even know the token exists yet). `fs_handoff.to_did`
+ * — app-side only — is what binds an addressed hand-off to a specific successor.
  *
  * Accepting runs `set-role` through `SchoolActorPort` — the SAME action and record
  * shape (`freeschool.draft.moderationAction`) the generic moderation queue already uses
@@ -93,11 +103,14 @@ export async function proposeHandoff(
 
   const writeApproval = deps.writeApproval ?? defaultWriteApproval
   try {
+    // Deliberately NO subjectDid here, even when the proposal is addressed to a named
+    // successor: that DID has not consented to being named in the proposer's public
+    // repo. `toDid` lives only in fs_handoff (app-side) until the successor themselves
+    // accepts — at which point it is THEIR OWN action naming themselves.
     await writeApproval(viewer, {
       $type: NSID.approval,
       proposal: proposalUri,
       action: 'set-role',
-      ...(toDid ? { subjectDid: toDid } : {}),
       reason: 'steward hand-off: approving whoever accepts this token as the successor',
       createdAt: new Date().toISOString(),
     })
@@ -203,7 +216,9 @@ handoffRoutes.post('/admin/handoff', requireViewer, requireRole(Role.Steward), a
   return c.json({ id: result.id, url: result.url, token: result.token, expiresAt: result.expiresAt }, 201)
 })
 
-handoffRoutes.post('/admin/handoff/:token/accept', requireViewer, async (c) => {
+// NOT under /admin — see the module doc for why (the admin router's blanket Steward
+// gate would otherwise 403 the very non-steward this token is meant for).
+handoffRoutes.post('/handoff/:token/accept', requireViewer, requireRole(Role.Member), async (c) => {
   const token = c.req.param('token')
   const result = await acceptHandoff(token, c.var.viewer!.did)
   if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status as 403 | 404 | 410)
