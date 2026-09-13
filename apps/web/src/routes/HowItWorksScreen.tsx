@@ -1,4 +1,5 @@
 import { Screen } from '../components/Screen';
+import { Button } from '../components/bits';
 import { useHowItWorks } from '../lib/queries';
 
 const dateFormat = new Intl.DateTimeFormat('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
@@ -20,14 +21,11 @@ export function HowItWorksScreen() {
       title={data?.title ?? 'How this skool works'}
       back
       trailing={
-        <button
-          type="button"
-          onClick={() => window.print()}
-          className="border-[1.5px] border-ink bg-pink px-3 py-1 text-caption font-bold"
-          style={{ color: 'var(--c-on-pink)' }}
-        >
+        // B5: a real tap target (>= 44px) — the shared `Button`, not a
+        // bespoke one-off sized to fit the header bar.
+        <Button type="button" onClick={() => window.print()}>
           Print
-        </button>
+        </Button>
       }
     >
       <div className="safe-x space-y-6 pb-4">

@@ -3,6 +3,14 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 
+// jsdom has no real canvas backend, so `qrcode`'s draw call would otherwise
+// always reject here (the exact failure `QrCode.tsx`'s fallback line — B5 —
+// is for); mocked to succeed so this file's assertions stay about the
+// hand-off flow, not about canvas support in the test environment.
+vi.mock('qrcode', () => ({
+  default: { toCanvas: vi.fn().mockResolvedValue(undefined) },
+}));
+
 vi.mock('@tanstack/react-router', () => ({
   useRouter: vi.fn(() => ({ history: { back: vi.fn() } })),
   useRouterState: vi.fn(() => '/admin/handoff'),

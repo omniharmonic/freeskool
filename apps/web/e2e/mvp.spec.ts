@@ -45,10 +45,14 @@ interface Member {
 }
 
 /**
- * The magic link, from the dev mail sink. Polled rather than slept on: the signup response
- * returns before the file write has necessarily landed.
+ * The magic link URL, from the dev mail sink, exactly as the mail body wrote it — no
+ * extracting the token and rebuilding a URL around it (B4). The mail body currently carries
+ * `${APPVIEW_PUBLIC_URL}/api/auth/verify?token=…`; once the backend change lands it will
+ * carry `${WEB_PUBLIC_URL}/verify?token=…` (the web app's own `/verify` route) instead — this
+ * only has to find whatever URL is actually there and hand it back verbatim. Polled rather
+ * than slept on: the signup response returns before the file write has necessarily landed.
  */
-async function magicLinkToken(to: string, timeoutMs = 20_000): Promise<string> {
+async function magicLinkUrl(to: string, timeoutMs = 20_000): Promise<string> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const text = await readFile(MAIL_LOG, 'utf8').catch(() => '');
@@ -62,8 +66,8 @@ async function magicLinkToken(to: string, timeoutMs = 20_000): Promise<string> {
         continue;
       }
       if (mail.to !== to) continue;
-      const token = /[?&]token=([A-Za-z0-9._~-]+)/.exec(mail.body ?? '')?.[1];
-      if (token) return decodeURIComponent(token);
+      const url = /(\S+\/verify\?token=\S+)/.exec(mail.body ?? '')?.[1];
+      if (url) return url;
     }
     if (Date.now() > deadline) {
       throw new Error(
@@ -84,8 +88,8 @@ async function signUp(browser: Browser, who: string): Promise<Member> {
   await page.getByRole('button', { name: /Create a new Free School identity/ }).click();
   await expect(page.getByText('Check your email')).toBeVisible();
 
-  const token = await magicLinkToken(address);
-  await page.goto(`/verify?token=${encodeURIComponent(token)}`);
+  const verifyUrl = await magicLinkUrl(address);
+  await page.goto(verifyUrl);
   // PRD §13 constraint 2: verification lands on the needs board, not the calendar.
   await expect(page.getByRole('heading', { name: 'Requests', level: 1 })).toBeVisible();
 
@@ -353,14 +357,18 @@ test('the MVP loop: sign up, ask, post, RSVP, attest, feedback, zine, policy', a
     const learnerRole = async () =>
       ((await (await learners[0]!.page.request.get('/api/me')).json()) as { role: number }).role;
 
-    await setHostingBar('5', 'E2E: raise the hosting bar');
-    // The role is DERIVED, never stored: the same member, the same records, a new answer.
-    await expect.poll(learnerRole, { timeout: 20_000 }).toBeLessThan(20);
-
-    // Put it back, both to prove the derivation moves in both directions and so a second
-    // `pnpm e2e` against this school can still post a class.
-    await setHostingBar('0', 'E2E: put the hosting bar back where it was');
-    await expect.poll(learnerRole, { timeout: 20_000 }).toBeGreaterThanOrEqual(20);
+    // B3: the restore (back to 0) must run even if the raised-bar assertion below fails —
+    // otherwise a failed run leaves the school at `hostMinAttended: 5` for every run after it.
+    try {
+      await setHostingBar('5', 'E2E: raise the hosting bar');
+      // The role is DERIVED, never stored: the same member, the same records, a new answer.
+      await expect.poll(learnerRole, { timeout: 20_000 }).toBeLessThan(20);
+    } finally {
+      // Put it back, both to prove the derivation moves in both directions and so a second
+      // `pnpm e2e` against this school can still post a class.
+      await setHostingBar('0', 'E2E: put the hosting bar back where it was');
+      await expect.poll(learnerRole, { timeout: 20_000 }).toBeGreaterThanOrEqual(20);
+    }
   });
 
   await test.step('Me shows the host their own badges and evidence', async () => {
