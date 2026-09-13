@@ -1,0 +1,115 @@
+# Free School production stack: Caddy (TLS + the built PWA) · AppView · Postgres · reference PDS.
+# Run from the repository root with the private env file beside this compose file:
+#
+#   docker compose --env-file infra/production/.env -f infra/production/compose.yml up -d --build
+#
+# Only Caddy publishes ports. Postgres, the AppView and the PDS stay on the compose network.
+# Every secret comes from infra/production/.env (never committed; see .env.example).
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: freeschool
+      POSTGRES_DB: freeschool
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
+    volumes:
+      - postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U freeschool']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # The school's own PDS. Custodial member accounts and the school account live here.
+  # Generated handles are `<name>.${PDS_HANDLE_DOMAIN}`; Caddy fronts both the PDS hostname
+  # and every handle (on-demand certificates, vouched for by the PDS's /tls-check).
+  pds:
+    image: ghcr.io/bluesky-social/pds:0.4
+    restart: unless-stopped
+    environment:
+      PDS_HOSTNAME: ${PDS_HOST:?Set PDS_HOST}
+      PDS_SERVICE_HANDLE_DOMAINS: .${PDS_HANDLE_DOMAIN:?Set PDS_HANDLE_DOMAIN}
+      PDS_JWT_SECRET: ${PDS_JWT_SECRET:?Set PDS_JWT_SECRET}
+      PDS_ADMIN_PASSWORD: ${PDS_ADMIN_PASSWORD:?Set PDS_ADMIN_PASSWORD}
+      PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: ${PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX:?Set the rotation key}
+      PDS_DATA_DIRECTORY: /pds
+      PDS_BLOBSTORE_DISK_LOCATION: /pds/blocks
+      PDS_BLOB_UPLOAD_LIMIT: '52428800'
+      PDS_DID_PLC_URL: https://plc.directory
+      PDS_BSKY_APP_VIEW_URL: https://api.bsky.app
+      PDS_BSKY_APP_VIEW_DID: did:web:api.bsky.app
+      PDS_REPORT_SERVICE_URL: https://mod.bsky.app
+      PDS_REPORT_SERVICE_DID: did:plc:ar7c4by46qjdydhdevvrndac
+      # Empty = do not announce this PDS to the Bluesky relay (R9: no enumeration by default).
+      PDS_CRAWLERS: ${PDS_CRAWLERS:-}
+      # Only the AppView mints accounts, via admin invite codes.
+      PDS_INVITE_REQUIRED: 'true'
+      PDS_EMAIL_SMTP_URL: ${SMTP_URL:?Set SMTP_URL}
+      PDS_EMAIL_FROM_ADDRESS: ${PDS_EMAIL_FROM:?Set PDS_EMAIL_FROM}
+      LOG_ENABLED: 'true'
+      PDS_PORT: '3000'
+    volumes:
+      - pds:/pds
+    healthcheck:
+      test: [CMD, wget, -qO-, 'http://localhost:3000/xrpc/_health']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  appview:
+    build:
+      context: ../..
+      target: appview
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      APPVIEW_PORT: '4000'
+      APPVIEW_PUBLIC_URL: https://${WEB_HOST:?Set WEB_HOST}
+      WEB_PUBLIC_URL: https://${WEB_HOST:?Set WEB_HOST}
+      DATABASE_URL: postgres://freeschool:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/freeschool
+      # The PDS as the world sees it, through Caddy, so DID documents, sessions and the
+      # peer follower all agree on one origin.
+      PDS_URL: https://${PDS_HOST:?Set PDS_HOST}
+      PDS_HANDLE_DOMAIN: ${PDS_HANDLE_DOMAIN:?Set PDS_HANDLE_DOMAIN}
+      PEER_PDS_HOSTS: ${PEER_PDS_HOSTS:-https://${PDS_HOST}}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pds:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://localhost:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    stop_grace_period: 45s
+
+  web:
+    build:
+      context: ../..
+      target: web
+    restart: unless-stopped
+    environment:
+      WEB_HOST: ${WEB_HOST:?Set WEB_HOST}
+      PDS_HOST: ${PDS_HOST:?Set PDS_HOST}
+      PDS_HANDLE_DOMAIN: ${PDS_HANDLE_DOMAIN:?Set PDS_HANDLE_DOMAIN}
+    ports:
+      - '80:80'
+      - '443:443'
+      - '443:443/udp'
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - appview
+      - pds
+
+volumes:
+  postgres:
+  pds:
+  caddy_data:
+  caddy_config:

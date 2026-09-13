@@ -1,0 +1,46 @@
+# One Caddy for the whole stack. Three kinds of names:
+#   {$WEB_HOST}                          the PWA + the AppView API (same origin: cookies, OAuth)
+#   www.{$WEB_HOST}                      redirect to the apex
+#   {$PDS_HOST}, *.{$PDS_HANDLE_DOMAIN}  the PDS, and every generated handle it answers for
+{
+	on_demand_tls {
+		# The PDS says yes for its own hostname and for every handle it has issued,
+		# so a certificate is only ever minted for a name that exists.
+		ask http://pds:3000/tls-check
+	}
+}
+
+{$WEB_HOST} {
+	encode zstd gzip
+	header {
+		Referrer-Policy no-referrer
+		X-Content-Type-Options nosniff
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		Strict-Transport-Security "max-age=31536000"
+	}
+	@backend path /api/* /oauth/callback /oauth/jwks.json /oauth/client-metadata.json
+	handle @backend {
+		reverse_proxy appview:4000
+	}
+	handle {
+		root * /srv
+		header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		@static path /assets/* /fonts/*
+		header @static Cache-Control "public, max-age=31536000, immutable"
+		@sw path /sw.js /registerSW.js /index.html /manifest.webmanifest
+		header @sw Cache-Control "no-cache"
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+www.{$WEB_HOST} {
+	redir https://{$WEB_HOST}{uri} permanent
+}
+
+{$PDS_HOST}, *.{$PDS_HANDLE_DOMAIN} {
+	tls {
+		on_demand
+	}
+	reverse_proxy pds:3000
+}
