@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 // jsdom has no `<dialog>` showModal/close — Sheet.tsx calls them unconditionally
@@ -200,6 +200,35 @@ describe('MeScreen', () => {
 
     const publicToggles = await screen.findAllByRole('button', { name: 'Public' });
     for (const toggle of publicToggles) expect(toggle).toBeDisabled();
+  });
+
+  it('B2 (#19): an OAuth-door session with an already-published PUBLIC claim saves it as school-only, with a one-line notice, instead of being unable to save at all', async () => {
+    vi.mocked(api.me.visibilityDefaults).mockResolvedValue({ oauthDoor: true, tierBConfirmRequired: true });
+    vi.mocked(api.me.skillClaims).mockResolvedValue({
+      public: [{ uri: 'at://did:plc:wren/freeschool.draft.skillClaim/claim1', value: { skill: SKILL_URI, level: 'proficient' } }],
+      school: [],
+    });
+    vi.mocked(api.me.setSkillClaims).mockResolvedValue({ published: [], keptAppSide: 1 });
+
+    renderScreen();
+
+    expect(
+      await screen.findByText(
+        /your public claims were switched to school-only because this account signed in through another provider/i,
+      ),
+    ).toBeInTheDocument();
+
+    // The claim's own visibility toggle already shows "School only" active, not "Public" —
+    // it was never resubmitted as public in the first place.
+    const group = await screen.findByRole('group', { name: 'Visibility for De-escalation' });
+    expect(within(group).getByRole('button', { name: 'School only' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(group).getByRole('button', { name: 'Public' })).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save what I can do' }));
+
+    await waitFor(() => expect(api.me.setSkillClaims).toHaveBeenCalled());
+    const body = vi.mocked(api.me.setSkillClaims).mock.calls[0]![0];
+    expect(body.claims).toEqual([{ skill: SKILL_URI, level: 'proficient', note: undefined, visibility: 'school' }]);
   });
 
   it('selecting a Tier B skill defaults the draft visibility to school-only, and shows a "Sensitive" marker once added', async () => {

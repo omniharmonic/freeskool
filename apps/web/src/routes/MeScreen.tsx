@@ -41,21 +41,41 @@ function isClaimLevel(value: unknown): value is SkillClaimLevel {
 /** Flattens the claims response (public PDS records + app-side school-only
  * entries) into one editable list. A claim missing `skill`/`level` — it
  * should never happen, but `public[].value` is `JSON.parse`d server-side
- * from an arbitrary record — is dropped rather than rendered broken. */
-function claimsFromServer(data: SkillClaimsResponse | undefined): EditableClaim[] {
-  if (!data) return [];
+ * from an arbitrary record — is dropped rather than rendered broken.
+ *
+ * B2 (#19): an OAuth-door session has its public toggles forced off
+ * server-side (403 `PublicTogglesLocked` on any attempt to set
+ * `visibility: 'public'`) — but a session like that can still have
+ * already-published public claims from before it signed in this way, or
+ * from a different door entirely. Rebuilding those claims with
+ * `visibility: 'public'` here would make the whole claims list un-savable
+ * (the server rejects the public ones, so *nothing* saves). When
+ * `oauthLocked` is true, every public claim is coerced to `'school'` up
+ * front instead; `coercedPublicCount` tells the caller whether to show the
+ * one-line notice. The server retracts the now-stale public record on save
+ * (a concurrent backend fix) — this screen only has to stop resubmitting it
+ * as public. */
+function claimsFromServer(
+  data: SkillClaimsResponse | undefined,
+  oauthLocked: boolean,
+): { claims: EditableClaim[]; coercedPublicCount: number } {
+  if (!data) return { claims: [], coercedPublicCount: 0 };
+  let coercedPublicCount = 0;
   const fromPublic: EditableClaim[] = data.public
     .filter((p) => typeof p.value.skill === 'string' && isClaimLevel(p.value.level))
-    .map((p) => ({
-      skill: p.value.skill as string,
-      level: p.value.level as SkillClaimLevel,
-      note: typeof p.value.note === 'string' ? p.value.note : undefined,
-      visibility: 'public' as const,
-    }));
+    .map((p) => {
+      if (oauthLocked) coercedPublicCount += 1;
+      return {
+        skill: p.value.skill as string,
+        level: p.value.level as SkillClaimLevel,
+        note: typeof p.value.note === 'string' ? p.value.note : undefined,
+        visibility: oauthLocked ? ('school' as const) : ('public' as const),
+      };
+    });
   const fromSchool: EditableClaim[] = data.school
     .filter((s) => isClaimLevel(s.level))
     .map((s) => ({ skill: s.skill, level: s.level as SkillClaimLevel, note: s.note, visibility: 'school' as const }));
-  return [...fromPublic, ...fromSchool];
+  return { claims: [...fromPublic, ...fromSchool], coercedPublicCount };
 }
 
 function flattenSkills(nodes: SkillNode[], trail: string[] = []): Array<{ uri: string; path: string; tier: SkillTier }> {
@@ -121,11 +141,16 @@ export function MeScreen() {
   // ── skill claims editor ──────────────────────────────────────────────
   const [claims, setClaims] = useState<EditableClaim[]>([]);
   const [claimsInitialized, setClaimsInitialized] = useState(false);
+  // B2: set only when loading in already-published public claims actually had
+  // to coerce one or more of them to school-only for this session.
+  const [oauthCoercedNotice, setOauthCoercedNotice] = useState(false);
   useEffect(() => {
     if (claimsInitialized || !claimsData) return;
-    setClaims(claimsFromServer(claimsData));
+    const { claims: loaded, coercedPublicCount } = claimsFromServer(claimsData, oauthLocked);
+    setClaims(loaded);
+    setOauthCoercedNotice(coercedPublicCount > 0);
     setClaimsInitialized(true);
-  }, [claimsData, claimsInitialized]);
+  }, [claimsData, claimsInitialized, oauthLocked]);
 
   const [draftSkillUri, setDraftSkillUri] = useState('');
   const [draftSkillSearch, setDraftSkillSearch] = useState('');
@@ -261,6 +286,12 @@ export function MeScreen() {
         {oauthLocked ? (
           <p className="mb-2.5 border-l-[3px] border-amber pl-3 text-caption text-ink-soft">
             Signed in with an existing account: claims here stay school-only and can't be made public in v1.
+          </p>
+        ) : null}
+        {oauthCoercedNotice ? (
+          <p className="mb-2.5 border-l-[3px] border-amber pl-3 text-caption text-ink-soft">
+            Your public claims were switched to school-only because this account signed in through another
+            provider.
           </p>
         ) : null}
         {claims.length === 0 ? <p className="text-body text-ink-soft">Nothing added yet.</p> : null}
