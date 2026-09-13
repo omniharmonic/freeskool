@@ -13,7 +13,7 @@
  */
 import { PgBoss } from 'pg-boss'
 import { config } from '../config.js'
-import { log } from '../lib/logging.js'
+import { describeError, log } from '../lib/logging.js'
 import { materializeAllSeries } from './materialize-series.js'
 import { runReminders } from './reminders.js'
 import { runRetention } from './retention.js'
@@ -34,7 +34,7 @@ export const QUEUES = {
 
 export async function startJobs(): Promise<PgBoss> {
   const boss = new PgBoss({ connectionString: config().DATABASE_URL, schema: 'pgboss' })
-  boss.on('error', (err: unknown) => log.error('pg-boss error', { detail: String(err) }))
+  boss.on('error', (err: unknown) => log.error('pg-boss error', { detail: describeError(err) }))
   await boss.start()
 
   for (const queue of Object.values(QUEUES)) {

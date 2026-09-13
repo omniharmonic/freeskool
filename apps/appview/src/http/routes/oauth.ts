@@ -6,7 +6,7 @@ import type { AppEnv } from '../session.js'
 import { assertOauthUsable, clientMetadata, jwks, oauthClient, OAuthUnavailableError } from '../oauth.js'
 import { createSession } from '../session.js'
 import { config } from '../../config.js'
-import { log } from '../../lib/logging.js'
+import { describeError, log } from '../../lib/logging.js'
 
 export const oauthRoutes = new Hono<AppEnv>()
 
@@ -35,9 +35,11 @@ oauthRoutes.get('/oauth/callback', async (c) => {
     const client = await oauthClient()
     const { session } = await client.callback(params)
     await createSession(c, session.did, 'oauth')
-    return c.redirect(`${config().APPVIEW_PUBLIC_URL}/?signed-in=1`)
+    // The human lands back in the PWA. The callback URL itself (registered in the client
+    // metadata, and visited by the PDS) stays on APPVIEW_PUBLIC_URL — see ../oauth.ts.
+    return c.redirect(`${config().webPublicUrl}/?signed-in=1`)
   } catch (err) {
-    log.warn('oauth callback failed', { detail: String(err) })
-    return c.redirect(`${config().APPVIEW_PUBLIC_URL}/?oauth-error=1`)
+    log.warn('oauth callback failed', { detail: describeError(err) })
+    return c.redirect(`${config().webPublicUrl}/?oauth-error=1`)
   }
 })

@@ -22,7 +22,7 @@ import { attendanceTally, custodialAccount, invite, member, moderationQueue, ste
 import { getThresholds } from './policy.js'
 import { config } from '../config.js'
 import { getIndexer } from '../index/indexer.js'
-import { log } from './logging.js'
+import { describeError, log } from './logging.js'
 
 /**
  * Does this DID belong to THIS school at all — by having EVER signed in through either
@@ -161,7 +161,7 @@ export async function bumpTally(
     const role = await roleOf(did, schoolDid)
     await publishRoleClaim(schoolDid as `did:${string}`, did as `did:${string}`, role)
   } catch (err) {
-    log.warn('role re-derivation publish check failed', { detail: String(err) })
+    log.warn('role re-derivation publish check failed', { detail: describeError(err) })
   }
 }
 

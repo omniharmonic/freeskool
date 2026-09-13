@@ -38,6 +38,7 @@ import { rowId } from '../../lib/ids.js'
 import { bumpTally, roleOf } from '../../lib/roles.js'
 import { rsvpCounts, rsvpRoster } from '../../lib/rsvp.js'
 import { getEventExtra } from '../../lib/event-extra.js'
+import { config } from '../../config.js'
 import { PROFILE_KEY, type Profile } from './me.js'
 
 export const events = new Hono<AppEnv>()
@@ -151,7 +152,9 @@ events.get('/events/:id{.+\\.ics}', async (c) => {
         startsAt: loaded.event.startsAt,
         endsAt: loaded.event.endsAt,
         location: icsLocation(loaded.event, loaded.inputs, relation),
-        url: `${new URL(c.req.url).origin}/events/${encodeURIComponent(uri)}`,
+        // The PWA's event page, not this API origin: a calendar client shows URL to a
+        // human, who clicks it (A1).
+        url: `${config().webPublicUrl}/events/${encodeURIComponent(uri)}`,
         status: icsStatus(loaded.event.status),
         ...(series?.rrule ? { rrule: series.rrule } : {}),
         ...(series?.exdates?.length ? { exdates: series.exdates } : {}),

@@ -32,7 +32,7 @@ import { actorAgent } from './actor-agent.js'
 import { bumpTally } from './roles.js'
 import { openFeedbackWindow } from './feedback.js'
 import { getRecord } from './pds.js'
-import { log } from './logging.js'
+import { describeError, log } from './logging.js'
 import { getRecordByUri, parseAtUri, sidecarsForEvent } from '../index/queries.js'
 import { isListed } from '../http/visibility.js'
 import type { EventConfig, EventListing } from '../lexicons/coop.js'
@@ -119,7 +119,7 @@ export async function schoolRoutingTags(): Promise<string[]> {
       if (strings.length > 0) return strings
     }
   } catch (err) {
-    log.warn('could not read the school record for its routing tags; using defaults', { detail: String(err) })
+    log.warn('could not read the school record for its routing tags; using defaults', { detail: describeError(err) })
   }
   return DEFAULT_ROUTING_TAGS
 }
@@ -476,7 +476,7 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
     } catch (err) {
       // Removing a listing is moderation (Steward-gated). A host who is not a steward
       // cannot unilaterally unlist their own class; it stays listed until one does.
-      log.warn('could not auto-remove the school listing on retag; a steward must remove it', { detail: String(err) })
+      log.warn('could not auto-remove the school listing on retag; a steward must remove it', { detail: describeError(err) })
       unlisted = false
     }
   }

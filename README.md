@@ -41,19 +41,11 @@ Note: this dev PDS publishes to the **production** PLC directory, so every local
 
 ### 2. Put the AppView's env in your shell
 
-`apps/appview/src/config.ts` is the only thing that reads `process.env`, and nothing loads `.env` for you — export it yourself, in the shell you will run everything else from:
+`apps/appview/src/config.ts` is the only thing that reads `process.env`, and nothing loads `.env` for you — export it yourself, in the shell you will run everything else from. **Copy `.env.example` and fill it in**: it lists every variable the AppView reads, with a one-line comment each, and marks the four that have no safe default (`PDS_ADMIN_PASSWORD`, `SESSION_SECRET`, `CUSTODY_KEYS`, `FEEDBACK_BALLOT_PEPPER`).
 
 ```bash
 cp .env.example .env
-# then add to .env:
-#   PDS_HANDLE_DOMAIN=test
-#   PDS_ADMIN_PASSWORD=<the value in infra/pds.env>
-#   SESSION_SECRET=<32+ random chars>
-#   CUSTODY_KEYS=v1:<base64 of 32 random bytes>    # node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"
-#   CUSTODY_KEY_VERSION=v1
-#   FEEDBACK_BALLOT_PEPPER=<random>
-#   ALLOWED_PRIVATE_PDS_HOSTS=localhost,127.0.0.1
-#   WEB_PUBLIC_URL=http://localhost:5173
+$EDITOR .env                 # fill the four REQUIRED blanks; the rest already works locally
 set -a; . ./.env; set +a
 ```
 

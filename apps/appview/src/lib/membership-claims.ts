@@ -48,7 +48,7 @@ import { schoolActor } from './school-actor.js'
 import { getRecord } from './pds.js'
 import { config } from '../config.js'
 import { NSID } from '../lexicons/nsids.js'
-import { log } from './logging.js'
+import { describeError, log } from './logging.js'
 
 const B32 = '234567abcdefghijklmnopqrstuvwxyz'
 
@@ -111,7 +111,7 @@ export async function retractRoleClaim(schoolDid: Did, subjectDid: Did): Promise
       audit: { reason: 'retracting a role claim: opted out, or role dropped below Host' },
     })
   } catch (err) {
-    log.warn('retractRoleClaim failed (likely nothing to retract)', { detail: String(err) })
+    log.warn('retractRoleClaim failed (likely nothing to retract)', { detail: describeError(err) })
   }
 }
 
@@ -128,7 +128,7 @@ async function fetchExistingCid(schoolDid: Did, subjectDid: Did): Promise<string
     const existing = await getRecord(schoolDid, NSID.membership, membershipClaimRkey(schoolDid, subjectDid))
     return existing?.cid
   } catch (err) {
-    log.warn('fetchExistingCid failed; publishing without a swapRecord', { detail: String(err) })
+    log.warn('fetchExistingCid failed; publishing without a swapRecord', { detail: describeError(err) })
     return undefined
   }
 }
@@ -193,7 +193,7 @@ export async function publishRoleClaim(
     })
     return { published: true, reason: 'published', uri: res.uri }
   } catch (err) {
-    log.warn('publishRoleClaim failed', { detail: String(err) })
+    log.warn('publishRoleClaim failed', { detail: describeError(err) })
     return { published: false, reason: 'error' }
   }
 }

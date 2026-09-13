@@ -142,6 +142,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (!parsed.CUSTODY_KEYS.has(parsed.CUSTODY_KEY_VERSION)) {
     throw new Error(`CUSTODY_KEY_VERSION ${parsed.CUSTODY_KEY_VERSION} is not present in CUSTODY_KEYS`)
   }
+  /**
+   * A production deployment with no SMTP transport cannot sign ANYBODY in: the primary
+   * door is a magic link, and the dev fallback appends it to a FILE on the server — which
+   * in production is both useless to the member and a plaintext magic-link log. Refuse at
+   * boot rather than accept signups nobody can complete. (`DEV_MAIL_LOG` is ignored once
+   * SMTP is set; there is no production use for it.)
+   */
+  if (parsed.NODE_ENV === 'production' && !parsed.SMTP_URL) {
+    throw new Error(
+      'SMTP_URL is required when NODE_ENV=production: the magic-link door cannot work without a mail ' +
+        'transport, and the dev file sink would write magic links to disk instead of sending them.',
+    )
+  }
   return {
     ...parsed,
     APPVIEW_PUBLIC_URL: publicUrl,

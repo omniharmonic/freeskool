@@ -43,6 +43,11 @@ import {
   type OrderedFrame,
 } from './host-subscription.js'
 import type { PeerStateStore } from './peer-state.js'
+// Lives in `lib/logging.ts` now: every module that logs an error needs it, and importing
+// the PDS change source from an HTTP route just to label an error would be a cycle.
+import { describeError } from '../lib/logging.js'
+
+export { describeError }
 
 export const DEFAULT_SOURCE_ID = 'pds-subscribe-repos'
 
@@ -579,26 +584,6 @@ function frameTimeUs(time: string): number {
   return Number.isFinite(ms) ? ms * 1000 : Date.now() * 1000
 }
 
-/**
- * A bounded error label for a log line: the class name, plus the XRPC error CODE when
- * the error carries one.
- *
- * **Never the message.** R9 forbids DIDs, handles, emails, record contents and AT-URIs
- * in logs, and `safe()` redacts only the first, third and fifth of those — an XRPC
- * message like `could not find repo for alice.test` would walk a HANDLE straight into
- * a log line. The `error` code (`RepoNotFound`, `FutureCursor`, `ConsumerTooSlow`, …)
- * is a closed vocabulary from the lexicon and carries the diagnostic value anyway.
- *
- * The code arrives from a peer, so it is only used when it looks like the identifier
- * the lexicon says it is; anything else is dropped rather than echoed.
- */
-const XRPC_ERROR_CODE = /^[A-Za-z][A-Za-z0-9_]{0,63}$/
-
-export function describeError(err: unknown): string {
-  if (!(err instanceof Error)) return typeof err === 'string' ? 'error' : 'unknown'
-  const code = (err as { error?: unknown }).error
-  return typeof code === 'string' && XRPC_ERROR_CODE.test(code) ? `${err.name}: ${code}` : err.name
-}
 
 /** `<collection>/<rkey>` from a `#commit` op path. */
 function splitDataKey(path: string): [string | undefined, string | undefined] {

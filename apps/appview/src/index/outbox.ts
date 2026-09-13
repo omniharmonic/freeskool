@@ -11,7 +11,7 @@
  * position is the current head: we never replay history into notifications.
  */
 import { NSID } from '../lexicons/nsids.js'
-import { log } from '../lib/logging.js'
+import { describeError, log } from '../lib/logging.js'
 import type { Indexer } from './indexer.js'
 import { refreshPolicyCache } from '../lib/policy.js'
 import { syncPeersFromSchoolRecord } from './peers.js'
@@ -50,7 +50,7 @@ export async function drainOutbox(indexer: Indexer, limit = 200): Promise<Outbox
       undefined,
       indexer.db,
     )
-    log.warn('outbox batch failed', { code: 'handler_failed', detail: String(err) })
+    log.warn('outbox batch failed', { code: 'handler_failed', detail: describeError(err) })
     return { claimed: 0, handled: 0 }
   }
 }

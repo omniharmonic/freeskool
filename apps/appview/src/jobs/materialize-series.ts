@@ -38,7 +38,7 @@ import { tid } from '../lib/ids.js'
 import { schoolActor, schoolDid } from '../lib/school-actor.js'
 import { getRecord } from '../lib/pds.js'
 import { resolvePdsEndpoint } from '../lib/identity.js'
-import { log } from '../lib/logging.js'
+import { describeError, log } from '../lib/logging.js'
 import { openFeedbackWindow } from '../lib/feedback.js'
 
 export const DEFAULT_WINDOW_DAYS = 90
@@ -151,7 +151,7 @@ export async function materializeAllSeries(now = new Date()): Promise<Materializ
       out.written += res.written
       out.skipped += res.skipped
     } catch (err) {
-      log.warn('series materialization failed', { detail: String(err) })
+      log.warn('series materialization failed', { detail: describeError(err) })
     }
   }
   return out

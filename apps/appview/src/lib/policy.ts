@@ -14,7 +14,7 @@ import { policyCache } from '../db/schema.js'
 import { config } from '../config.js'
 import { getRecord } from './pds.js'
 import { NSID } from '../lexicons/nsids.js'
-import { log } from './logging.js'
+import { describeError, log } from './logging.js'
 
 const CACHE_TTL_MS = 60_000
 const memo = new Map<string, { thresholds: Thresholds; policyUri: string | null; at: number }>()
@@ -77,7 +77,7 @@ export async function refreshPolicyCache(
       }
     }
   } catch (err) {
-    log.warn('policy refresh failed; using defaults', { detail: String(err) })
+    log.warn('policy refresh failed; using defaults', { detail: describeError(err) })
   }
   await getDb()
     .insert(policyCache)

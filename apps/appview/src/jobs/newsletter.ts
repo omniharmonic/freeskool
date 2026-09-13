@@ -24,7 +24,7 @@ import { isListed } from '../http/visibility.js'
 import { getDb } from '../db/index.js'
 import { newsletterIssue } from '../db/schema.js'
 import { rowId } from '../lib/ids.js'
-import { log } from '../lib/logging.js'
+import { describeError, log } from '../lib/logging.js'
 import { config } from '../config.js'
 import { sendMail, type Mail } from '../lib/mail.js'
 import { activeSubscribers, rotateUnsubscribeToken } from '../lib/newsletter-subscriptions.js'
@@ -131,8 +131,15 @@ export type SendNewsletterResult =
   | { ok: true; recipientCount: number; failedCount: number; skipped?: number }
   | { ok: false; status: number; error: string; message?: string }
 
+/**
+ * One-click unsubscribe, on the PWA's origin (A1: every link a human clicks is on
+ * `webPublicUrl`). The path is still the API route — there is no PWA screen for it and it
+ * needs none, a GET is the whole interaction — so the PWA origin must forward `/api/*` to
+ * the AppView, which is exactly what the dev server proxy and the production deployment
+ * already do. With `WEB_PUBLIC_URL` unset this is byte-identical to the old link.
+ */
 function unsubscribeUrl(token: string): string {
-  return `${config().APPVIEW_PUBLIC_URL}/api/newsletter/unsubscribe/${token}`
+  return `${config().webPublicUrl}/api/newsletter/unsubscribe/${token}`
 }
 
 /**
@@ -177,7 +184,7 @@ export async function sendNewsletterIssue(id: string, deps: SendNewsletterDeps =
       // rest of the run, and must never be retried with a newly-rotated (and now
       // unsent) token at this recipient's expense.
       failed++
-      log.warn('newsletter send failed for one recipient', { detail: String(err) })
+      log.warn('newsletter send failed for one recipient', { detail: describeError(err) })
     }
   }
 

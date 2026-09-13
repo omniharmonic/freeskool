@@ -112,7 +112,11 @@ export async function sendVerificationEmail(did: string, email: string): Promise
     purpose: 'verify-email',
     expiresAt: new Date(Date.now() + VERIFY_TTL_MS),
   })
-  const url = `${config().APPVIEW_PUBLIC_URL}/api/auth/verify?token=${encodeURIComponent(token)}`
+  // The PWA's own `/verify` screen, NOT the API endpoint: `VerifyScreen` is what calls
+  // `GET /api/auth/verify` (and shows a human a page either way). Every link a person
+  // clicks is on `webPublicUrl`; only the OAuth client metadata/jwks/callback, which are
+  // fetched by a PDS rather than clicked, stay on `APPVIEW_PUBLIC_URL`.
+  const url = `${config().webPublicUrl}/verify?token=${encodeURIComponent(token)}`
   await sendMail({
     to: email,
     subject: 'Confirm your Free School account',

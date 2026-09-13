@@ -26,7 +26,7 @@ import { config } from '../../config.js'
 import { roleOf } from '../../lib/roles.js'
 import { getDb } from '../../db/index.js'
 import { custodialAccount } from '../../db/schema.js'
-import { log } from '../../lib/logging.js'
+import { describeError, log } from '../../lib/logging.js'
 
 export const auth = new Hono<AppEnv>()
 
@@ -45,10 +45,19 @@ auth.post('/signup', async (c) => {
     const result = await signup(parsed.data)
     // The DID and handle go back to the caller (they are about to be public anyway);
     // the email, the password and the invite code never do.
-    return c.json({ did: result.did, handle: result.handle, verifyUrl: result.verifyUrl }, 201)
+    //
+    // `verifyUrl` is a MAGIC LINK and is a development affordance only: `lib/custody.ts`
+    // already withholds it once SMTP is configured, and this is the second, independent
+    // gate — in production the link is only ever delivered to the address that asked for
+    // it, never echoed to whoever posted the form. (`config().isProd` && no SMTP cannot
+    // happen: `loadConfig` refuses to boot.)
+    return c.json(
+      { did: result.did, handle: result.handle, ...(config().isProd ? {} : { verifyUrl: result.verifyUrl }) },
+      201,
+    )
   } catch (err) {
     if (err instanceof SignupError) return c.json({ error: err.code, message: err.message }, err.status as 400)
-    log.error('signup failed', { detail: String(err) })
+    log.error('signup failed', { detail: describeError(err) })
     return c.json({ error: 'SignupFailed', message: 'could not create the account' }, 502)
   }
 })
@@ -61,7 +70,7 @@ auth.get('/verify', async (c) => {
     await createSession(c, did, 'custodial')
     const accept = c.req.header('accept') ?? ''
     if (accept.includes('application/json')) return c.json({ ok: true, did })
-    return c.redirect(`${config().APPVIEW_PUBLIC_URL}/?verified=1`)
+    return c.redirect(`${config().webPublicUrl}/?verified=1`)
   } catch (err) {
     if (err instanceof SignupError) return c.json({ error: err.code, message: err.message }, err.status as 400)
     throw err
@@ -93,7 +102,7 @@ auth.get('/oauth/start', async (c) => {
     return c.redirect(url.toString())
   } catch (err) {
     if (err instanceof OAuthUnavailableError) return c.json({ error: err.code, message: err.message }, 503)
-    log.warn('oauth start failed', { detail: String(err) })
+    log.warn('oauth start failed', { detail: describeError(err) })
     return c.json({ error: 'OAuthStartFailed', message: 'could not start authorization' }, 502)
   }
 })

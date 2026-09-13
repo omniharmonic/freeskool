@@ -12,10 +12,10 @@
  * Bodies are plain text plus an optional `.ics` attachment. No tracking pixels, no
  * per-recipient URLs beyond the one-time token.
  */
-import { appendFile } from 'node:fs/promises'
+import { appendFile, writeFile } from 'node:fs/promises'
 import nodemailer, { type Transporter } from 'nodemailer'
 import { config } from '../config.js'
-import { log } from './logging.js'
+import { describeError, log } from './logging.js'
 
 export interface Mail {
   to: string
@@ -28,6 +28,23 @@ export interface Mail {
 }
 
 let transport: Transporter | undefined
+
+/**
+ * Truncate the dev sink at boot (A11). The file is append-only at runtime, so without
+ * this it is an unbounded, growing plaintext record of every magic link and every address
+ * the stack has ever handled — exactly the artifact R9 exists to prevent, and a local
+ * reader ends up `tail`ing past yesterday's tokens to find today's. One run, one file.
+ * Never touched when SMTP is configured (there is no sink then), and a failure here is a
+ * warning, not a boot failure: mail still works.
+ */
+export async function resetDevMailSink(): Promise<void> {
+  if (config().SMTP_URL) return
+  try {
+    await writeFile(config().devMailLog, '', 'utf8')
+  } catch (err) {
+    log.warn('could not truncate the dev mail sink at boot', { detail: describeError(err) })
+  }
+}
 
 function getTransport(): Transporter | null {
   const url = config().SMTP_URL
@@ -54,7 +71,7 @@ export async function sendMail(mail: Mail): Promise<{ delivered: boolean; transp
       console.log(`[appview] mail written to the dev sink (SMTP_URL unset): ${file}`)
     } catch (err) {
       log.warn('dev mail sink write failed; the magic link is only in the signup response', {
-        detail: String(err),
+        detail: describeError(err),
       })
     }
     return { delivered: true, transport: 'file' }
