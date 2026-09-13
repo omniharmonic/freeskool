@@ -197,6 +197,11 @@ function EventEditForm() {
     ? flatSkills.filter((s) => s.path.toLowerCase().includes(skillSearch.trim().toLowerCase())).slice(0, 8)
     : [];
 
+  // B1: the server derives "venue needed" as no address AND no neighbourhood
+  // (`isVenueNeeded`, `apps/appview/src/http/visibility.ts`) — so ticking this
+  // box has to actually clear every field that derivation looks at, not just
+  // hide them, or a host could tick it while a stale address/neighbourhood
+  // still sits in state and submit a body that isn't venue-needed at all.
   const onVenueNeededChange = (checked: boolean) => {
     setVenueNeeded(checked);
     if (checked) {
@@ -205,6 +210,7 @@ function EventEditForm() {
       setLocality('');
       setRegion('');
       setPostalCode('');
+      setNeighborhood('');
     }
   };
 
@@ -465,41 +471,70 @@ function EventEditForm() {
               <span className="text-body">Venue needed — we don't have a room for this yet</span>
             </label>
 
-            {!venueNeeded ? (
-              <div className="mt-3 space-y-3">
+            {venueNeeded ? (
+              <p className="mt-2 text-caption text-ink-faint">
+                Location fields are off while venue needed is checked — they're what "no venue" means.
+              </p>
+            ) : null}
+            <div className="mt-3 space-y-3">
+              <label className="block">
+                <span className={labelText}>Place name</span>
+                <input
+                  className={field}
+                  value={locationName}
+                  onChange={(e) => setLocationName(e.target.value)}
+                  placeholder="Sanitas Kitchen"
+                  disabled={venueNeeded}
+                />
+              </label>
+              <label className="block">
+                <span className={labelText}>Street</span>
+                <input
+                  className={field}
+                  value={street}
+                  onChange={(e) => setStreet(e.target.value)}
+                  disabled={venueNeeded}
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-3">
                 <label className="block">
-                  <span className={labelText}>Place name</span>
+                  <span className={labelText}>Town or city</span>
                   <input
                     className={field}
-                    value={locationName}
-                    onChange={(e) => setLocationName(e.target.value)}
-                    placeholder="Sanitas Kitchen"
+                    value={locality}
+                    onChange={(e) => setLocality(e.target.value)}
+                    disabled={venueNeeded}
                   />
                 </label>
                 <label className="block">
-                  <span className={labelText}>Street</span>
-                  <input className={field} value={street} onChange={(e) => setStreet(e.target.value)} />
-                </label>
-                <div className="grid grid-cols-2 gap-3">
-                  <label className="block">
-                    <span className={labelText}>Town or city</span>
-                    <input className={field} value={locality} onChange={(e) => setLocality(e.target.value)} />
-                  </label>
-                  <label className="block">
-                    <span className={labelText}>Region</span>
-                    <input className={field} value={region} onChange={(e) => setRegion(e.target.value)} />
-                  </label>
-                </div>
-                <label className="block">
-                  <span className={labelText}>Postal code</span>
-                  <input className={field} value={postalCode} onChange={(e) => setPostalCode(e.target.value)} />
+                  <span className={labelText}>Region</span>
+                  <input
+                    className={field}
+                    value={region}
+                    onChange={(e) => setRegion(e.target.value)}
+                    disabled={venueNeeded}
+                  />
                 </label>
               </div>
-            ) : null}
+              <label className="block">
+                <span className={labelText}>Postal code</span>
+                <input
+                  className={field}
+                  value={postalCode}
+                  onChange={(e) => setPostalCode(e.target.value)}
+                  disabled={venueNeeded}
+                />
+              </label>
+            </div>
 
             <label className="mt-3 block">
               <span className={labelText}>Neighbourhood (shown publicly, e.g. "North Boulder")</span>
-              <input className={field} value={neighborhood} onChange={(e) => setNeighborhood(e.target.value)} />
+              <input
+                className={field}
+                value={neighborhood}
+                onChange={(e) => setNeighborhood(e.target.value)}
+                disabled={venueNeeded}
+              />
             </label>
 
             <fieldset className="mt-4">

@@ -109,6 +109,74 @@ describe('EventEditScreen', () => {
     expect(body.name).toBe('Sourdough basics');
   });
 
+  it('B1: ticking "venue needed" clears and disables the address and neighbourhood fields; unticking re-enables them', async () => {
+    renderScreen();
+
+    await screen.findByLabelText(/class title/i);
+    fireEvent.change(screen.getByLabelText(/street/i), { target: { value: '123 Main St' } });
+    fireEvent.change(screen.getByLabelText(/^neighbourhood/i), { target: { value: 'North Boulder' } });
+
+    fireEvent.click(screen.getByLabelText(/venue needed/i));
+
+    expect(screen.getByLabelText(/place name/i)).toBeDisabled();
+    expect(screen.getByLabelText(/street/i)).toHaveValue('');
+    expect(screen.getByLabelText(/street/i)).toBeDisabled();
+    expect(screen.getByLabelText(/town or city/i)).toBeDisabled();
+    expect(screen.getByLabelText(/^region$/i)).toBeDisabled();
+    expect(screen.getByLabelText(/postal code/i)).toBeDisabled();
+    expect(screen.getByLabelText(/^neighbourhood/i)).toHaveValue('');
+    expect(screen.getByLabelText(/^neighbourhood/i)).toBeDisabled();
+    // One-line explanation of why the fields went dead.
+    expect(screen.getByText(/venue needed.*location.*fields|location fields.*venue needed/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByLabelText(/venue needed/i));
+
+    expect(screen.getByLabelText(/street/i)).not.toBeDisabled();
+    expect(screen.getByLabelText(/^neighbourhood/i)).not.toBeDisabled();
+  });
+
+  it('B1: submits neither address nor neighbourhood when "venue needed" is checked, even if previously filled in', async () => {
+    renderScreen();
+
+    fireEvent.change(await screen.findByLabelText(/class title/i), { target: { value: 'Sourdough basics' } });
+    fireEvent.change(screen.getByLabelText(/^starts$/i), { target: { value: '2026-10-01T18:00' } });
+    fireEvent.change(screen.getByLabelText(/street/i), { target: { value: '123 Main St' } });
+    fireEvent.change(screen.getByLabelText(/^neighbourhood/i), { target: { value: 'North Boulder' } });
+
+    fireEvent.click(screen.getByLabelText(/venue needed/i));
+    fireEvent.click(screen.getByRole('button', { name: /post this class/i }));
+
+    await waitFor(() => expect(api.events.create).toHaveBeenCalled());
+    const body = vi.mocked(api.events.create).mock.calls[0]![0];
+    expect(body.locations).toBeUndefined();
+    expect(body.neighborhood).toBeUndefined();
+  });
+
+  it('B1: edit prefills the "venue needed" checkbox from the loaded event, and the fields load disabled', async () => {
+    paramsReturn = { id: EVENT_URI };
+    vi.mocked(api.events.get).mockResolvedValue({
+      uri: EVENT_URI,
+      name: 'Sourdough basics',
+      startsAt: '2026-10-01T18:00:00-06:00',
+      locationRedacted: false,
+      hostDid: 'did:plc:host1',
+      venueNeeded: true,
+      tags: [],
+      listed: true,
+      skills: [],
+      materials: [],
+      rsvps: { going: 0, interested: 0 },
+      viewerRelation: 'host' as const,
+    });
+
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Edit class' });
+
+    expect(screen.getByLabelText(/venue needed/i)).toBeChecked();
+    expect(screen.getByLabelText(/street/i)).toBeDisabled();
+    expect(screen.getByLabelText(/^neighbourhood/i)).toBeDisabled();
+  });
+
   it('submits a body shape matching CreateEventInput: required fields, timezone from the browser, and no series for "one time"', async () => {
     renderScreen();
 
