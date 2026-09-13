@@ -71,7 +71,7 @@ afterAll(async () => {
 })
 
 function tokenFromRevealUrl(url: string): string {
-  return decodeURIComponent(url.split('/take-ownership/')[1]!)
+  return decodeURIComponent(url.split('/account/reveal/')[1]!)
 }
 
 async function makeCustodialAccount(suffix: string) {
@@ -86,6 +86,9 @@ describe('takeOwnership', () => {
     const result = await takeOwnership(account.did)
     expect(result.handle).toBe(account.handle)
     expect(result.revealUrl).toBeDefined() // SMTP is unconfigured in this test env
+    // The emailed link must open the app's reveal page, not the raw JSON endpoint.
+    expect(result.revealUrl).toMatch(new RegExp(`^${config().webPublicUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+    expect(result.revealUrl).toContain('/account/reveal/')
 
     const rows = await testDb().select().from(custodialAccount).where(eq(custodialAccount.did, account.did))
     expect(rows[0]?.isCustodial).toBe(false)

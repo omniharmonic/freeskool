@@ -273,7 +273,7 @@ export async function takeOwnership(did: string): Promise<TakeOwnershipResult> {
     throw new SignupError('could not rotate the PDS password — nothing changed; please try again', 502, 'PdsRotationFailed')
   }
 
-  const url = `${config().APPVIEW_PUBLIC_URL}/api/auth/take-ownership/${encodeURIComponent(token)}`
+  const url = `${config().webPublicUrl}/account/reveal/${encodeURIComponent(token)}`
   let mailOk = true
   try {
     await sendMail({
@@ -282,7 +282,7 @@ export async function takeOwnership(did: string): Promise<TakeOwnershipResult> {
       text: [
         `You asked to take full ownership of @${row.handle}.`,
         '',
-        'Open this link to see your new password (it is shown ONCE, so save it somewhere safe):',
+        'Open this link in the app to see your new password (it is shown ONCE, so save it somewhere safe):',
         url,
         '',
         'After that, sign in with it at your PDS and change it to one of your own choosing.',
