@@ -48,7 +48,7 @@ import { tid } from '../../lib/ids.js'
 import { getIndexer } from '../../index/indexer.js'
 import { getRecordByUri, listCollection } from '../../index/queries.js'
 import { getDb } from '../../db/index.js'
-import { appMeta, attendanceTally } from '../../db/schema.js'
+import { appMeta, attendanceTally, memberPrefs, skillClaimIndex } from '../../db/schema.js'
 import { getThresholds } from '../../lib/policy.js'
 import { tierOf, type SkillTierValue } from '../../lib/skill-tiers.js'
 import { config } from '../../config.js'
@@ -74,14 +74,26 @@ async function loadProfile(did: string): Promise<Profile> {
   return (rows[0]?.value as Profile | undefined) ?? {}
 }
 
+/**
+ * `fs_member_prefs` row for the directory/onboarding flags — `directoryListing`
+ * defaults true and `onboarded` false when the member has no row yet (see the column
+ * comments on `memberPrefs` in `db/schema.ts`).
+ */
+async function loadDirectoryPrefs(did: string): Promise<{ directoryListing: boolean; onboarded: boolean }> {
+  const rows = await getDb().select().from(memberPrefs).where(eq(memberPrefs.did, did)).limit(1)
+  const row = rows[0]
+  return { directoryListing: row?.directoryListing ?? true, onboarded: row?.onboardedAt != null }
+}
+
 me.get('/', async (c) => {
   const did = c.var.viewer!.did
-  const [role, evidence, thresholds, rsvps, profile] = await Promise.all([
+  const [role, evidence, thresholds, rsvps, profile, directoryPrefs] = await Promise.all([
     roleOf(did),
     evidenceFor(did),
     getThresholds(),
     myRsvps(did),
     loadProfile(did),
+    loadDirectoryPrefs(did),
   ])
   return c.json({
     did,
@@ -92,6 +104,7 @@ me.get('/', async (c) => {
     thresholds,
     rsvps: rsvps.map((r) => ({ eventUri: r.eventUri, status: r.status, alsoPublicRecord: r.alsoPublicRecord })),
     profile: visibleProfile(profile),
+    ...directoryPrefs,
   })
 })
 
@@ -354,10 +367,30 @@ me.put('/skill-claims', async (c) => {
       appSide.push({ skill: claim.skill, level: claim.level, ...(claim.note ? { note: claim.note } : {}) })
     }
   }
-  await getDb()
-    .insert(appMeta)
-    .values({ key: APP_SIDE_CLAIMS_KEY(viewer.did), value: appSide, updatedAt: new Date() })
-    .onConflictDoUpdate({ target: appMeta.key, set: { value: appSide, updatedAt: new Date() } })
+  const indexedAt = new Date()
+  await getDb().transaction(async (tx) => {
+    await tx
+      .insert(appMeta)
+      .values({ key: APP_SIDE_CLAIMS_KEY(viewer.did), value: appSide, updatedAt: indexedAt })
+      .onConflictDoUpdate({ target: appMeta.key, set: { value: appSide, updatedAt: indexedAt } })
+
+    // `fs_skill_claim_index` is a query-only projection of the member's WHOLE claim set
+    // (public and school), rebuilt wholesale here: delete-then-insert in the same
+    // transaction as the app-side write, so the two never disagree about what was just
+    // saved. See the table's doc comment in `db/schema.ts`.
+    await tx.delete(skillClaimIndex).where(eq(skillClaimIndex.did, viewer.did))
+    if (parsed.data.claims.length > 0) {
+      await tx.insert(skillClaimIndex).values(
+        parsed.data.claims.map((claim) => ({
+          did: viewer.did,
+          skillUri: claim.skill,
+          level: claim.level,
+          visibility: claim.visibility,
+          updatedAt: indexedAt,
+        })),
+      )
+    }
+  })
 
   /**
    * Does this request need the member's own credential at all? Publishing obviously does;

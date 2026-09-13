@@ -577,6 +577,63 @@ export const memberPrefs = pgTable('fs_member_prefs', {
   did: text('did').primaryKey(),
   publicRole: boolean('public_role').notNull().default(false),
   updatedAt: ts('updated_at').notNull().defaultNow(),
+  // Members directory (R9-adjacent): ON by default, so a member has to opt OUT rather
+  // than opt in to being found by other members. No row for a `did` means "default",
+  // i.e. listed — see `directoryListing` in `GET /api/me`.
+  directoryListing: boolean('directory_listing').notNull().default(true),
+  // Set once, the first time a member completes onboarding (propose-a-skill / directory
+  // intro flow). Never cleared. `onboarded` in `GET /api/me` is just `onboardedAt != null`.
+  onboardedAt: ts('onboarded_at'),
+})
+
+/**
+ * A query-only projection of members' OWN skill claims (public repo records AND
+ * app-side 'school'-visibility ones), rebuilt wholesale from `PUT /api/me/skill-claims`
+ * in the same transaction as the app-side write. Lets the directory and vouching UI
+ * search "who claims skill X" without re-walking every member's repo or the contrail
+ * index. Never a source of truth: the repo record (public) or `fs_app_meta` blob
+ * (school) is authoritative, and a `did` is fully replaced on every save.
+ */
+export const skillClaimIndex = pgTable(
+  'fs_skill_claim_index',
+  {
+    did: text('did').notNull(),
+    skillUri: text('skill_uri').notNull(),
+    level: text('level').notNull(), // learning|practicing|proficient|teaching
+    visibility: text('visibility').notNull(), // public|school
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.did, t.skillUri] }), index('fs_skill_claim_index_skill_idx').on(t.skillUri)],
+)
+
+/**
+ * A member vouching that another member has a skill — "skill vouching" in the directory.
+ * `contextEventUri` is optional provenance (a class where the vouch happened), never
+ * required. One vouch per (attester, subject, skill): re-vouching is a no-op, not a pile-up.
+ */
+export const attestation = pgTable(
+  'fs_attestation',
+  {
+    id: text('id').primaryKey(), // rowId() from lib/ids.ts
+    attesterDid: text('attester_did').notNull(),
+    subjectDid: text('subject_did').notNull(),
+    skillUri: text('skill_uri').notNull(),
+    contextEventUri: text('context_event_uri'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [
+    uniqueIndex('fs_attestation_unique').on(t.attesterDid, t.subjectDid, t.skillUri),
+    index('fs_attestation_subject_idx').on(t.subjectDid),
+  ],
+)
+
+/** A member-proposed addition to the skill taxonomy, pending or already in use. */
+export const skillProposal = pgTable('fs_skill_proposal', {
+  id: text('id').primaryKey(), // rowId() from lib/ids.ts
+  skillUri: text('skill_uri').notNull(),
+  proposerDid: text('proposer_did').notNull(),
+  status: text('status').notNull().default('published'), // published|deprecated
+  createdAt: ts('created_at').notNull().defaultNow(),
 })
 
 /**
@@ -678,6 +735,9 @@ export const schema = {
   newsletterIssue,
   newsletterSubscription,
   memberPrefs,
+  skillClaimIndex,
+  attestation,
+  skillProposal,
   handoff,
   space,
   spaceMember,
