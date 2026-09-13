@@ -1,0 +1,159 @@
+import type { ReactNode } from 'react';
+import { LEVEL_LABEL, type SkillLevel } from '../lib/mock';
+
+/** Three stamped squares. Filled ones say how much practice the class assumes. */
+export function LevelDots({
+  level,
+  className,
+  inkColor,
+}: {
+  level: SkillLevel;
+  className?: string;
+  /** Set when the dots sit on a printed ink block and need a readable colour. */
+  inkColor?: string;
+}) {
+  const color = inkColor ?? 'var(--c-ink)';
+  return (
+    <span className={`inline-flex items-center gap-[3px] ${className ?? ''}`} title={LEVEL_LABEL[level]}>
+      <span className="sr-only">{LEVEL_LABEL[level]}</span>
+      {[1, 2, 3].map((n) => (
+        <span
+          key={n}
+          aria-hidden="true"
+          className="h-[7px] w-[7px] border-[1.5px]"
+          style={{ borderColor: color, background: n <= level ? color : 'transparent' }}
+        />
+      ))}
+    </span>
+  );
+}
+
+export function SkillChip({ children, ink = 'ink' }: { children: ReactNode; ink?: 'ink' | 'pink' | 'blue' }) {
+  const color = ink === 'ink' ? 'var(--c-ink)' : ink === 'pink' ? 'var(--c-pink)' : 'var(--c-blue)';
+  return (
+    <span
+      className="inline-flex items-center rounded-full border-[1.5px] px-2.5 py-[3px] text-[12.5px] leading-none font-medium"
+      style={{ borderColor: color, color }}
+    >
+      {children}
+    </span>
+  );
+}
+
+export function Button({
+  children,
+  onClick,
+  ink = 'pink',
+  variant = 'solid',
+  type = 'button',
+  disabled,
+  href,
+  wide,
+}: {
+  children: ReactNode;
+  onClick?: () => void;
+  ink?: 'pink' | 'blue' | 'ink' | 'green' | 'amber';
+  variant?: 'solid' | 'quiet';
+  type?: 'button' | 'submit';
+  disabled?: boolean;
+  href?: string;
+  wide?: boolean;
+}) {
+  const inkVar = `var(--c-${ink === 'ink' ? 'ink' : ink})`;
+  const base = `plate plate-press plate-${ink} display inline-flex items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold ${
+    wide ? 'w-full' : ''
+  } ${disabled ? 'opacity-45' : ''}`;
+  const style =
+    variant === 'solid'
+      ? {
+          background: inkVar,
+          // Pink and amber are light inks: they take dark type, not paper.
+          color: ink === 'pink' || ink === 'amber' ? 'var(--c-on-pink)' : 'var(--c-paper-2)',
+          borderColor: 'var(--c-ink)',
+        }
+      : { background: 'var(--c-paper-2)', color: 'var(--c-ink)' };
+
+  if (href) {
+    return (
+      <a href={href} target="_self" className={base} style={style}>
+        {children}
+      </a>
+    );
+  }
+  return (
+    <button type={type} onClick={onClick} disabled={disabled} className={base} style={style}>
+      {children}
+    </button>
+  );
+}
+
+/** A filled rule, not a rounded pill: how close a request is to happening. */
+export function ThresholdRule({ count, threshold }: { count: number; threshold: number }) {
+  const pct = Math.min(100, Math.round((count / Math.max(1, threshold)) * 100));
+  const met = count >= threshold;
+  return (
+    <div>
+      <div className="threshold" role="img" aria-label={`${count} of ${threshold} people needed`}>
+        <i style={{ width: `${pct}%`, backgroundColor: met ? 'var(--c-green)' : 'var(--c-amber)' }} />
+      </div>
+      <p className="mt-1.5 text-caption text-ink-soft">
+        {met
+          ? `${count} people in — enough to run it`
+          : `${count} of ${threshold} people needed before someone teaches it`}
+      </p>
+    </div>
+  );
+}
+
+export function SectionHeading({ children }: { children: ReactNode }) {
+  return <h2 className="safe-x mt-7 mb-2.5 text-lede font-bold">{children}</h2>;
+}
+
+/**
+ * A real `<input type="checkbox" switch>` where WebKit supports it — that is the
+ * one control on iOS that still produces a native haptic tick. Everywhere else,
+ * a stamped toggle that matches the rest of the press.
+ */
+const supportsNativeSwitch =
+  typeof document !== 'undefined' && 'switch' in document.createElement('input');
+
+export function Toggle({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean;
+  onChange: (next: boolean) => void;
+  label: string;
+}) {
+  if (supportsNativeSwitch) {
+    return (
+      <input
+        type="checkbox"
+        {...({ switch: '' } as unknown as React.InputHTMLAttributes<HTMLInputElement>)}
+        checked={checked}
+        aria-label={label}
+        onChange={(event) => onChange(event.target.checked)}
+        className="h-[31px] w-[51px] shrink-0"
+        style={{ accentColor: 'var(--c-green)' }}
+      />
+    );
+  }
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className="relative h-[30px] w-[52px] shrink-0 border-[1.5px] border-ink transition-colors duration-150"
+      style={{ background: checked ? 'var(--c-green)' : 'var(--c-paper-3)' }}
+    >
+      <span
+        aria-hidden="true"
+        className="absolute top-[2px] h-[22px] w-[22px] border-[1.5px] border-ink transition-[left] duration-150"
+        style={{ left: checked ? '26px' : '2px', background: 'var(--c-paper-2)' }}
+      />
+    </button>
+  );
+}

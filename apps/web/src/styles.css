@@ -127,32 +127,44 @@ body {
 }
 
 #root {
+  position: relative;
   height: 100dvh; /* never an animation endpoint — dvh jitter is specified */
-  display: flex;
-  flex-direction: column;
   overflow: hidden;
 }
 
+/* The only scrolling element. Chrome overlays it so the frosted bars have
+   something to blur. */
 .app-scroll {
-  flex: 1 1 auto;
-  min-height: 0;
+  position: absolute;
+  inset: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
 
-h1,
-h2,
-h3,
-.display {
-  font-family: var(--font-display);
-  font-weight: 700;
-  letter-spacing: -0.017em;
-  margin: 0;
+/* Spacers that keep content clear of the overlaid chrome. */
+.pad-header {
+  height: calc(max(12px, env(safe-area-inset-top)) + 46px);
+}
+.pad-tabbar {
+  height: calc(max(10px, env(safe-area-inset-bottom, 0px)) + 56px);
 }
 
-a {
-  color: inherit;
+/* Element defaults belong in @layer base, so every Tailwind utility still wins.
+   Unlayered, these would beat `mt-7` on a heading and `text-blue` on a link. */
+@layer base {
+  h1,
+  h2,
+  h3,
+  .display {
+    font-family: var(--font-display);
+    font-weight: 700;
+    letter-spacing: -0.017em;
+  }
+
+  a {
+    color: inherit;
+  }
 }
 
 :focus-visible {
@@ -160,12 +172,14 @@ a {
   outline-offset: 2px;
 }
 
-button {
-  font: inherit;
-  color: inherit;
-  background: none;
-  border: 0;
-  padding: 0;
+@layer base {
+  button {
+    font: inherit;
+    color: inherit;
+    background: none;
+    border: 0;
+    padding: 0;
+  }
 }
 
 /* Tappables: kills the 300ms delay and the long-press callout. */
@@ -230,6 +244,7 @@ summary {
 
 .stamp {
   font-family: var(--font-display);
+  font-stretch: 88%;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   letter-spacing: 0.01em;
@@ -269,7 +284,10 @@ summary {
 }
 
 .tab-bar {
-  flex: 0 0 auto;
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+  z-index: 20;
   /* max() so Safari-tab toolbar collapse (inset changes mid-scroll) can't
      reflow the bar. safe-area-max-inset-* is Chromium-only; the nested env()
      upgrades for free if WebKit ever ships it. */
@@ -300,9 +318,15 @@ dialog.sheet {
   border: 0;
   background: transparent;
   color: var(--c-ink);
-  display: flex;
+  /* The UA sheet's `dialog:not([open]){display:none}` loses to this rule's
+     specificity, so the closed state has to be restated here. */
+  display: none;
   align-items: flex-end;
   overflow: hidden;
+}
+
+dialog.sheet[open] {
+  display: flex;
 }
 
 dialog.sheet::backdrop {
@@ -348,18 +372,32 @@ dialog.sheet::backdrop {
   background: var(--c-ink-faint);
 }
 
+/* Sticky day stamps sit above the cards, so they need real paper under them. */
+.day-stamp {
+  background: var(--c-paper);
+}
+
 /* ── large title that collapses on scroll ──────────────────────────────── */
 
 .lt-wrap {
-  flex: 0 0 auto;
-  position: relative;
-  z-index: 10;
+  position: absolute;
+  inset-inline: 0;
+  top: 0;
+  z-index: 20;
+  border-bottom: 1.5px solid transparent;
+  transition: border-color 160ms ease-out;
+}
+.lt-wrap[data-collapsed='true'] {
+  border-bottom-color: var(--c-rule);
 }
 
 .lt-title {
   display: block;
-  transform-origin: left center;
-  transition: font-size 160ms ease-out, opacity 160ms ease-out;
+  /* Bricolage is a variable face: narrowing the width axis at display sizes is
+     where its character lives. Body copy stays at the system face. */
+  font-stretch: 84%;
+  font-weight: 800;
+  letter-spacing: -0.028em;
 }
 
 @media (prefers-reduced-motion: reduce) {

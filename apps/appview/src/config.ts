@@ -1,0 +1,139 @@
+/**
+ * Env parsing. Everything the AppView needs is declared here and nowhere else.
+ *
+ * Privacy note (R9): nothing in this file is ever logged. `redactedConfig()` is the
+ * only thing allowed near a log line.
+ */
+import { z } from 'zod'
+
+const csv = (s: string) =>
+  s.split(',').map((x) => x.trim()).filter(Boolean)
+
+const b64key = z
+  .string()
+  .refine((s) => {
+    try {
+      return Buffer.from(s, 'base64').length === 32
+    } catch {
+      return false
+    }
+  }, 'must be base64 of exactly 32 bytes')
+
+const schema = z.object({
+  NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+
+  DATABASE_URL: z.string().default('postgres://freeschool:freeschool@localhost:5434/freeschool'),
+  APPVIEW_PORT: z.coerce.number().int().positive().default(4000),
+  APPVIEW_PUBLIC_URL: z.string().url().default('http://localhost:4000'),
+
+  /** Our reference PDS — the primary door mints accounts here. */
+  PDS_URL: z.string().url().default('http://localhost:3000'),
+  PDS_ADMIN_PASSWORD: z.string().default(''),
+  /**
+   * Handle domain for generated handles, WITHOUT a leading dot, e.g. `test`
+   * produces `calm-otter-417.test`. Must be one of the PDS's
+   * PDS_SERVICE_HANDLE_DOMAINS and must not be a reserved TLD
+   * (`.localhost` IS reserved — see README "Local PDS handle domain").
+   */
+  PDS_HANDLE_DOMAIN: z.string().default('test'),
+
+  /** The school DID the hosted service custodies in v1. */
+  SCHOOL_DID: z.string().default(''),
+  SCHOOL_HANDLE: z.string().default(''),
+  SCHOOL_APP_PASSWORD: z.string().default(''),
+
+  /** Peer registry seed. The school record's `peers` field adds more at runtime. */
+  PEER_PDS_HOSTS: z.string().default('http://localhost:3000').transform(csv),
+
+  /** Hosts allowed past contrail's SSRF guard (local/private PDSes). */
+  ALLOWED_PRIVATE_PDS_HOSTS: z.string().default('localhost,127.0.0.1,host.docker.internal').transform(csv),
+
+  CONTRAIL_NAMESPACE: z.string().default('org.freeschool.appview'),
+  /** Jetstream live ingest only makes sense on the public network; off locally. */
+  CONTRAIL_LIVE_INGEST: z.stringbool().default(false),
+  CONTRAIL_ORDERED_SOURCE_EPOCH: z.string().default('freeschool-dev-1'),
+
+  /** Signed-cookie session secret. Sessions themselves live in Postgres. */
+  SESSION_SECRET: z.string().min(16).default('dev-only-session-secret-change-me'),
+  SESSION_COOKIE: z.string().default('fs_session'),
+  SESSION_TTL_DAYS: z.coerce.number().int().positive().default(30),
+
+  /** Versioned AES-256-GCM keys for custodial account passwords: `v1:<base64>,v2:<base64>`. */
+  CUSTODY_KEYS: z
+    .string()
+    .default('v1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=')
+    .transform((s, ctx) => {
+      const out = new Map<string, Buffer>()
+      for (const part of csv(s)) {
+        const i = part.indexOf(':')
+        const version = part.slice(0, i)
+        const raw = part.slice(i + 1)
+        if (!version || !b64key.safeParse(raw).success) {
+          ctx.addIssue({ code: 'custom', message: `CUSTODY_KEYS entry "${version}" is not v<n>:<base64 32 bytes>` })
+          continue
+        }
+        out.set(version, Buffer.from(raw, 'base64'))
+      }
+      if (out.size === 0) ctx.addIssue({ code: 'custom', message: 'CUSTODY_KEYS must contain at least one key' })
+      return out
+    }),
+  CUSTODY_KEY_VERSION: z.string().default('v1'),
+
+  /** Pepper mixed into each per-event feedback ballot key before it is derived. */
+  FEEDBACK_BALLOT_PEPPER: z.string().default('dev-only-ballot-pepper'),
+
+  /** Confidential OAuth client private key (JWK JSON). Generated at boot if absent. */
+  OAUTH_PRIVATE_JWK: z.string().optional(),
+
+  VAPID_PUBLIC_KEY: z.string().default(''),
+  VAPID_PRIVATE_KEY: z.string().default(''),
+  VAPID_SUBJECT: z.string().default('mailto:hello@example.org'),
+
+  SMTP_URL: z.string().default(''),
+  MAIL_FROM: z.string().default('Free School <no-reply@localhost>'),
+})
+
+export type Config = z.infer<typeof schema> & {
+  /** `<word><word><3 digits>.<handleDomain>` */
+  handleDomain: string
+  oauthClientId: string
+  isProd: boolean
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
+  const parsed = schema.parse(env)
+  const publicUrl = parsed.APPVIEW_PUBLIC_URL.replace(/\/$/, '')
+  if (!parsed.CUSTODY_KEYS.has(parsed.CUSTODY_KEY_VERSION)) {
+    throw new Error(`CUSTODY_KEY_VERSION ${parsed.CUSTODY_KEY_VERSION} is not present in CUSTODY_KEYS`)
+  }
+  return {
+    ...parsed,
+    APPVIEW_PUBLIC_URL: publicUrl,
+    handleDomain: parsed.PDS_HANDLE_DOMAIN.replace(/^\./, ''),
+    // A confidential client's client_id IS the metadata URL.
+    oauthClientId: `${publicUrl}/oauth/client-metadata.json`,
+    isProd: parsed.NODE_ENV === 'production',
+  }
+}
+
+/** The ONLY config shape allowed near a log line. */
+export function redactedConfig(c: Config) {
+  return {
+    env: c.NODE_ENV,
+    port: c.APPVIEW_PORT,
+    publicUrl: c.APPVIEW_PUBLIC_URL,
+    pds: c.PDS_URL,
+    handleDomain: c.handleDomain,
+    peers: c.PEER_PDS_HOSTS.length,
+    schoolConfigured: Boolean(c.SCHOOL_DID && c.SCHOOL_APP_PASSWORD),
+    liveIngest: c.CONTRAIL_LIVE_INGEST,
+    custodyKeyVersion: c.CUSTODY_KEY_VERSION,
+    push: Boolean(c.VAPID_PUBLIC_KEY && c.VAPID_PRIVATE_KEY),
+    smtp: Boolean(c.SMTP_URL),
+  }
+}
+
+let cached: Config | undefined
+export function config(): Config {
+  return (cached ??= loadConfig())
+}
