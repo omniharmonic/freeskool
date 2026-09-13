@@ -18,11 +18,12 @@ import { loadProfile } from './me.js'
 
 export const members = new Hono<AppEnv>()
 
-members.use('*', requireViewer)
+// Header first, gate second: even the 401 for an anonymous caller must say noindex.
 members.use('*', async (c, next) => {
   c.header('X-Robots-Tag', 'noindex, nofollow')
   await next()
 })
+members.use('*', requireViewer)
 
 const listQuery = z.object({
   q: z.string().trim().min(1).max(200).optional(),
