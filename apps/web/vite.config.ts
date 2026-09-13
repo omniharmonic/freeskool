@@ -54,7 +54,17 @@ export default defineConfig({
       // without `changeOrigin` rewriting the Host header the AppView's CORS
       // check and OAuth client metadata both key off of.
       '/api': { target: 'http://localhost:4000', changeOrigin: false },
-      '/oauth': { target: 'http://localhost:4000', changeOrigin: false },
+      // Exact AppView OAuth paths only (`apps/appview/src/http/routes/oauth.ts`):
+      // `/oauth/client-metadata.json`, `/oauth/jwks.json`, `/oauth/callback`.
+      // `/api/auth/oauth/start` already lives under the `/api` rule above.
+      // Vite's proxy matches by URL *prefix*, so a blanket `'/oauth'` key here
+      // would also swallow the SPA's own `/oauth/confirm` route (no AppView
+      // route answers it, so a hard refresh or a shared link 404s there
+      // instead of rendering `OAuthConfirmScreen`) — list the real paths
+      // individually instead of widening the prefix.
+      '/oauth/client-metadata.json': { target: 'http://localhost:4000', changeOrigin: false },
+      '/oauth/jwks.json': { target: 'http://localhost:4000', changeOrigin: false },
+      '/oauth/callback': { target: 'http://localhost:4000', changeOrigin: false },
     },
   },
 });

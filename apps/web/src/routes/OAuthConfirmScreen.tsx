@@ -11,14 +11,14 @@ const UNAVAILABLE_MESSAGE = "Signing in with an existing account isn't available
 /**
  * The secondary door, one hard confirm away from `GET /api/auth/oauth/start`.
  *
- * That endpoint redirects the browser on success but answers with JSON on
- * failure — 428 `ConfirmationRequired` without `?confirm=1` (never reached
- * here, since this screen always sends it) and 503 `OAuthUnavailable` when
- * the AppView is not on an https origin. A blind `window.location` assignment
- * can't tell those apart ahead of time and would just render the JSON as a
- * page, so the button probes first with `redirect: 'manual'`: a real 302
- * comes back as an opaque-redirect response (no CORS error, even though the
- * OAuth provider is cross-origin) and only then does the browser navigate.
+ * That endpoint itself is never a good pre-flight probe: on success it does
+ * real upstream work (PAR, an `oauthState` row — `apps/appview/src/http/oauth.ts`),
+ * so hitting it twice (once to check, once to navigate) would double that cost on
+ * every click. `GET /oauth/client-metadata.json` checks the same `oauthUsable`
+ * flag (`assertOauthUsable()`, `apps/appview/src/http/routes/oauth.ts`) and
+ * answers the same 503 when it is false, but does nothing else on success — it
+ * just returns a static JSON document — so it is free to use as the probe.
+ * Only a probe that succeeds navigates, once, straight to the start URL.
  */
 export function OAuthConfirmScreen() {
   const [handle, setHandle] = useState('');
@@ -28,25 +28,22 @@ export function OAuthConfirmScreen() {
   const onContinue = async () => {
     setChecking(true);
     setError('');
-    const url = api.auth.oauthStartUrl(true, handle);
     try {
-      const res = await fetch(url, { redirect: 'manual', credentials: 'include' });
-      if (res.type === 'opaqueredirect' || res.status === 0) {
-        window.location.href = url;
+      const res = await fetch('/oauth/client-metadata.json', { credentials: 'include' });
+      if (res.status === 503) {
+        // The route's error *status* is the stable contract here, not the error
+        // *code* string: the AppView's class is named `OAuthUnavailableError` but
+        // its `.code` is `OAuthNotConfigured` (confirmed against the running dev
+        // server) — matching on 503 survives that kind of rename, and 503 has no
+        // other meaning on this route.
+        setError(UNAVAILABLE_MESSAGE);
         return;
       }
-      const body = (await res.json().catch(() => ({}))) as { error?: string; message?: string };
-      // The route's error *status* (503) is the stable contract here, not the error
-      // *code* string: the AppView's class is named `OAuthUnavailableError` but its
-      // `.code` is `OAuthNotConfigured` (confirmed against the running dev server) —
-      // matching on 503 survives that kind of rename, and 503 has no other meaning
-      // on this route (`apps/appview/src/http/routes/auth.ts`: everything else that
-      // can fail here is 400, 428, or 502).
-      setError(
-        res.status === 503 || body.error === 'OAuthUnavailable'
-          ? UNAVAILABLE_MESSAGE
-          : body.message ?? 'Could not start sign-in. Try again.',
-      );
+      if (!res.ok) {
+        setError('Could not start sign-in. Try again.');
+        return;
+      }
+      window.location.href = api.auth.oauthStartUrl(true, handle);
     } catch {
       setError('Could not start sign-in. Try again.');
     } finally {

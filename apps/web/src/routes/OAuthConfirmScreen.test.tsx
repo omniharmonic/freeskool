@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 
 const CONFIRM_COPY =
@@ -19,9 +19,19 @@ vi.mock('../lib/api', () => ({
 
 const { OAuthConfirmScreen } = await import('./OAuthConfirmScreen');
 
+const originalLocation = window.location;
+
 describe('OAuthConfirmScreen', () => {
   beforeEach(() => {
     vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    // Only the navigation test below replaces `window.location` (jsdom's isn't
+    // directly assignable); restore it unconditionally here rather than at the
+    // end of that test body, so a thrown assertion can never leave it swapped
+    // out for every test that runs after.
+    Object.defineProperty(window, 'location', { value: originalLocation, writable: true });
   });
 
   it('renders the verbatim hard-confirm copy and both buttons', () => {
@@ -44,10 +54,13 @@ describe('OAuthConfirmScreen', () => {
     expect(screen.getByRole('button', { name: 'Continue anyway' })).toBeEnabled();
   });
 
-  it('navigates to the start URL when the server allows it (detected via an opaque redirect)', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce({ type: 'opaqueredirect', status: 0 } as Response);
-    const originalLocation = window.location;
-    // jsdom's window.location is not directly assignable; replace it for the assertion.
+  it('probes /oauth/client-metadata.json exactly once, then navigates to the start URL once', async () => {
+    // `/oauth/client-metadata.json` does nothing on success but return a static
+    // document (`apps/appview/src/http/oauth.ts`'s `clientMetadata()`), unlike
+    // `/api/auth/oauth/start`, which does real upstream work (PAR, an
+    // `oauthState` row) even just to answer — so the probe must never be that
+    // endpoint, and the button must never hit the network twice.
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('{}', { status: 200 }));
     Object.defineProperty(window, 'location', { value: { ...originalLocation, href: '' }, writable: true });
 
     render(<OAuthConfirmScreen />);
@@ -60,10 +73,11 @@ describe('OAuthConfirmScreen', () => {
       expect(window.location.href).toBe('/api/auth/oauth/start?confirm=1&handle=wren.bsky.social'),
     );
 
-    Object.defineProperty(window, 'location', { value: originalLocation, writable: true });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('/oauth/client-metadata.json');
   });
 
-  it("shows the unavailable message when the start endpoint returns 503 OAuthUnavailable", async () => {
+  it('shows the unavailable message when the probe returns 503 OAuthUnavailable', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(JSON.stringify({ error: 'OAuthUnavailable', message: 'no https origin' }), { status: 503 }),
     );
@@ -75,12 +89,14 @@ describe('OAuthConfirmScreen', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Continue anyway' }));
 
     expect(await screen.findByText(UNAVAILABLE_MESSAGE)).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('also shows the unavailable message for the real server error code (OAuthNotConfigured, status 503)', async () => {
     // `apps/appview/src/http/oauth.ts`'s `OAuthUnavailableError.code` is actually
     // `OAuthNotConfigured` — confirmed against the running dev AppView — so the
-    // match must not depend on the `OAuthUnavailable` string alone.
+    // match must not depend on the `OAuthUnavailable` string alone; it keys off
+    // the 503 status, which this route has no other reason to return.
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(JSON.stringify({ error: 'OAuthNotConfigured', message: 'needs https' }), { status: 503 }),
     );
@@ -92,5 +108,29 @@ describe('OAuthConfirmScreen', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Continue anyway' }));
 
     expect(await screen.findByText(UNAVAILABLE_MESSAGE)).toBeInTheDocument();
+  });
+
+  it('shows a generic message when the probe fails for some other reason', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('{}', { status: 500 }));
+
+    render(<OAuthConfirmScreen />);
+    fireEvent.change(screen.getByLabelText('Your handle, like name.bsky.social'), {
+      target: { value: 'wren.bsky.social' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue anyway' }));
+
+    expect(await screen.findByText('Could not start sign-in. Try again.')).toBeInTheDocument();
+  });
+
+  it('shows a generic message when the probe throws (network failure)', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('network down'));
+
+    render(<OAuthConfirmScreen />);
+    fireEvent.change(screen.getByLabelText('Your handle, like name.bsky.social'), {
+      target: { value: 'wren.bsky.social' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue anyway' }));
+
+    expect(await screen.findByText('Could not start sign-in. Try again.')).toBeInTheDocument();
   });
 });
