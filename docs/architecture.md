@@ -79,7 +79,7 @@ Base: `community.lexicon.calendar.event` (class or occurrence), `.rsvp` (opt-in 
 Authorship: hosts write their own events into **their own repo** via OAuth (or via the school when custodial and the policy says so); the school writes listings, policy, roles, moderation, and materialized occurrences **through the actor port**. Skill references are at-uri; event references are strongRef.
 
 ### 3.2 Derived (never stored as truth)
-Role (`deriveRole` over evidence: profile, invite/vouch, confirmed attendance, hosted events, upheld negative feedback, steward appointment), badges, per-skill practitioner directory, skill pages, guild suggestions, feedback aggregates (`aggregateFeedback`, k=3 numeric / 5 text).
+Skill taxonomy: 525 `freeschool.draft.skill` records seeded under the taxonomy authority DID (`infra/seed/skills`), `rkey = slug`, Tier A/B flag held app-side until Lucian decides whether it belongs on the record. Events may carry zero `skillLevel` sidecars; an event with no `locations` is the "venue needed" state (R7). Role (`deriveRole` over evidence: profile, invite/vouch, confirmed attendance, hosted events, upheld negative feedback, steward appointment), badges, per-skill practitioner directory, skill pages, guild suggestions, feedback aggregates (`aggregateFeedback`, k=3 numeric / 5 text).
 
 ### 3.3 App-only (R9 defaults)
 - `rsvp(event_uri, did, status, public_opt_in)` — never a repo record unless `public_opt_in`.

@@ -44,8 +44,8 @@ The app is the directory and the reminder. The school is the people in the room.
 
 ### 4.1 In v1 (priority order)
 1. **Sign-in**: create a new Free School identity with an email (primary); sign in with an existing AT Protocol account (secondary, with a plain permanent-linkage warning). Pseudonymous generated handle; no real-name prompt.
-2. **Profile + skill claims**: display name optional, generated identicon, bio; skills I can share / want to learn, each with a level (learning, practicing, proficient, teaching) and a visibility choice (school-only by default, public pre-ticked only for ordinary skills).
-3. **Class creation**: title, description, skill + depth (1–3), date/time (timezone-aware), place with tiered disclosure (open / listed: neighborhood only until RSVP / unlisted), capacity and waitlist, materials list, optional supplies note, recurrence (weekly, biweekly, monthly; edit this one / this and following; cancel one).
+2. **Profile + skill claims**: display name optional, generated identicon, bio; skills I can share / want to learn, each with a level (learning, practicing, proficient, teaching) and a visibility choice (school-only by default, public pre-ticked only for ordinary skills). The taxonomy is the 525-node seed from R5 (8 domains, 52 areas, 465 skills; ESCO and Wikidata anchored, community extensions marked proposed) in two tiers: Tier A ordinary skills, Tier B legal-exposure-adjacent skills that are never public by default.
+3. **Class creation**: title, description, skill + depth (1–3), date/time (timezone-aware), place with tiered disclosure (open / listed: neighborhood only until RSVP / unlisted), capacity and waitlist, materials list, optional supplies note, recurrence (weekly, biweekly, monthly; edit this one / this and following; cancel one). A class may reference zero skills (reading groups, socials, open shop hours are a third of real free-skool offerings per R5) and may be posted as "venue needed", which is a valid, findable state rather than an error (R7).
 4. **RSVP**: going / interested; private by default; per-class opt-in to publish the RSVP with a permanence warning; waitlist in TID order.
 5. **Host-attested attendance**: the host checks off who came; stored app-side; feeds counts and badges.
 6. **Needs board**: "I want to learn X" with a threshold; people add themselves; at threshold a host can claim it and it becomes a class.
@@ -56,6 +56,7 @@ The app is the directory and the reminder. The school is the people in the room.
 11. **Tag-routed calendar exchange with COhere**: classes tagged `skillshare` / `free-school` appear on the COhere calendar and vice versa via `coop.lexicon.event.listing`.
 12. **PWA**: installable; offline next 30 days; install nudge after first RSVP; reminders (24 h, 1 h, day-of) by push after install and by email always; badge count.
 13. **Monthly print zine**: one click, black-and-white, photocopy-legible, folds.
+14. **Continuity**: a printable "how this skool works" page rendered from the policy record, and a steward hand-off flow so a stranger can restart the school after a year of silence (R7).
 
 ### 4.2 Out of v1
 Real Spaces in production; steward elections; labelers; wiki adapter; one-click self-host; venue records (Phase 2); Telegram/Bluesky DM notifications; payments of any kind (never).
