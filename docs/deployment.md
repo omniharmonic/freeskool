@@ -47,10 +47,10 @@ lets Caddy mint a certificate per handle on demand.
 | A | `*` | `167.233.100.123` | 300 |
 
 Resend adds its own records once the domain is created there (a `resend._domainkey` TXT for DKIM,
-an MX plus SPF TXT on the `send` subdomain, and optionally `_dmarc`). Until `freeskool.xyz` is a
-verified Resend domain, mail goes out from the already-verified `omniharmonic.com`
-(`MAIL_FROM=Free School <freeskool@omniharmonic.com>`): the Resend account is at its plan's domain
-limit, so adding `freeskool.xyz` needs an upgrade or a freed domain first.
+an MX plus SPF TXT on the `send` subdomain, and optionally `_dmarc`). `freeskool.xyz` is a verified
+Resend domain (since 2026-09-13; `cosense.us` was removed to make room) and mail goes out as
+`Free School <hello@freeskool.xyz>`. Namecheap only keeps MX records once Mail Settings is set to
+**Custom MX** in its UI; the API silently drops them otherwise.
 
 ## Email (Resend)
 

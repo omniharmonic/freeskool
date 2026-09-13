@@ -35,6 +35,11 @@
 }
 
 www.{$WEB_HOST} {
+	# An explicit policy, so the wildcard's on-demand policy below does not claim this
+	# name (the PDS's tls-check would refuse it and no certificate would ever be issued).
+	tls {
+		issuer acme
+	}
 	redir https://{$WEB_HOST}{uri} permanent
 }
 
