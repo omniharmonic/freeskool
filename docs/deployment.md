@@ -1,62 +1,137 @@
-# Deploy Free School
+# Deploying Free School
 
-This application needs a persistent Node service, Postgres and a production AT Protocol PDS. The frontend alone is not a working deployment. The supplied Compose stack runs the frontend, HTTPS proxy, API, indexing, background jobs and database; it connects to a separately provisioned PDS.
+One small VPS runs the whole stack under Docker Compose: Caddy (TLS, the built PWA, reverse proxy),
+the AppView (indexer + API + jobs), Postgres, and the school's own reference PDS. Files:
 
-## Required deployment inputs
+- `Dockerfile` — `appview` and `web` targets from one pnpm workspace layer
+- `infra/production/compose.yml` — the four services; only Caddy publishes ports
+- `infra/production/Caddyfile` — three site blocks: web+API, `www` redirect, PDS + handles
+- `infra/production/.env.example` — every variable, with how to generate each secret
+- `infra/production/backup.sh` — nightly Postgres dump + PDS volume tarball, 14-day retention
 
-- A Linux server with Docker Compose and a public web hostname pointed to it. Ports 80/443 must be available to the supplied Caddy proxy. If the server already runs Caddy, merge the route configuration into that proxy rather than bind the ports twice.
-- A production PDS on a neutral hostname, with working DNS and TLS, including generated-handle resolution. Follow the [official PDS deployment guide](https://github.com/bluesky-social/pds). Do not deploy the development PDS configuration: its dev mode and localhost endpoint are intentionally local-only. Never copy local `.test` identities into production.
-- An SMTP transport and verified sender domain. Magic-link signup requires email. A production boot without SMTP fails deliberately.
-- Fresh session, custody, feedback and stable OAuth keys; the school account's credentials; and named maintainers for backups and the school's rotation keys.
+## The current deployment (2026-09-13)
 
-## Build and configure
+| | |
+|---|---|
+| Host | Hetzner Cloud `freeskool-1`, CX33 (4 vCPU, 8 GB, 80 GB), Falkenstein (`fsn1`), Ubuntu 24.04 |
+| Firewall | Hetzner `freeskool-fw`: 22/tcp, 80/tcp, 443/tcp, 443/udp, ICMP |
+| SSH | `root@167.233.100.123`, key `frontrange-twin deploy` (the Bioregional Twin key) |
+| Checkout | `/opt/freeskool` (branch `deploy/hetzner`), env at `/opt/freeskool/infra/production/.env` |
+| Web + API | `https://freeskool.xyz` (`www.` redirects) |
+| PDS | `https://pds.freeskool.xyz`; handles `<name>.freeskool.xyz` |
+| Email | Resend over SMTP (`smtps://resend:<key>@smtp.resend.com:2465`) |
+| Registrar / DNS | Namecheap, `freeskool.xyz` |
+| School | `boulder.freeskool.xyz` = `did:plc:wv2kwwxv2keocw52uaugwbis` (policy `3mvg3wgw2ps2x`) |
+| Skills authority | `skills.freeskool.xyz` = `did:plc:yekh7akcatgn7o7foedjpgj4`, 525 skills seeded |
+| First steward | Benjamin (`calmalder301.freeskool.xyz`), appointed 2026-09-13 |
+| Secrets | `/opt/freeskool/infra/production/.env` + `.authority.env` on the server; copies in `~/.config/freeskool/` on Benjamin's Mac |
 
-From the repository root:
+Why Falkenstein and not a US location: Hetzner's CX line (CX33 €9.99/month, 20 TB traffic) is EU-only;
+the US locations only offer CPX at roughly four to seven times the price. Boulder sees ~130 ms to
+Falkenstein, which the PWA's offline-first calendar absorbs. Move later with the runbook below.
+
+**Still open (R9):** the PDS hostname is `pds.freeskool.xyz`, which is not neutral — the hostname
+itself says what the school is. Changing it later means a new `PDS_HOSTNAME`, DNS, and a PLC
+operation per existing account to re-point the service endpoint, so decide before inviting members.
+
+## DNS
+
+All `A` records point at the server. The wildcard is what lets every generated handle resolve and
+lets Caddy mint a certificate per handle on demand.
+
+| Type | Host | Value | TTL |
+|---|---|---|---|
+| A | `@` | `167.233.100.123` | 300 |
+| A | `www` | `167.233.100.123` | 300 |
+| A | `pds` | `167.233.100.123` | 300 |
+| A | `*` | `167.233.100.123` | 300 |
+
+Resend adds its own records once the domain is created there (a `resend._domainkey` TXT for DKIM,
+an MX plus SPF TXT on the `send` subdomain, and optionally `_dmarc`). `freeskool.xyz` is a verified
+Resend domain (since 2026-09-13; `cosense.us` was removed to make room) and mail goes out as
+`Free School <hello@freeskool.xyz>`. Namecheap only keeps MX records once Mail Settings is set to
+**Custom MX** in its UI; the API silently drops them otherwise.
+
+## Email (Resend)
+
+1. Resend → Domains → add `freeskool.xyz` (region `us-east-1`). Put the DNS records it prints into
+   Namecheap. Verify.
+2. Resend → API keys → new key, **sending access**, restricted to that domain.
+3. In `.env`: `SMTP_URL=smtps://resend:<key>@smtp.resend.com:2465`,
+   `MAIL_FROM=Free School <hello@freeskool.xyz>`, `PDS_EMAIL_FROM=hello@freeskool.xyz`.
+4. `docker compose … up -d appview pds` to pick the new values up.
+
+Port 2465, not 465: Hetzner Cloud blocks outbound 25 and 465 on new accounts (587 and Resend's
+alternates 2465/2587 are open). The server's resolver is pinned to 1.1.1.1/9.9.9.9 in
+`/etc/systemd/resolved.conf.d/freeskool.conf` because Hetzner's resolvers negatively cached the zone
+for an hour during the first deploy.
+
+The AppView refuses to boot in production without `SMTP_URL` (the magic-link door cannot work, and
+the dev file sink would write magic links to disk). The PDS uses the same transport for its own mail.
+
+## First deploy, step by step
 
 ```sh
-cp infra/production/.env.example infra/production/.env
-chmod 600 infra/production/.env
-# Fill the production values. Use URL-safe hex for POSTGRES_PASSWORD.
-docker compose --env-file infra/production/.env -f infra/production/compose.yml config --quiet
-docker compose --env-file infra/production/.env -f infra/production/compose.yml build
+# On the server, as root
+git clone https://github.com/omniharmonic/freeskool.git /opt/freeskool
+cd /opt/freeskool && git checkout deploy/hetzner
+cp infra/production/.env.example infra/production/.env && chmod 600 infra/production/.env
+$EDITOR infra/production/.env            # every blank; generators are in the comments
+
+C="docker compose --env-file infra/production/.env -f infra/production/compose.yml"
+$C config --quiet && $C build            # ~5 minutes on a CX33 the first time
+$C up -d postgres pds web                # Caddy starts fetching certificates once DNS resolves
+
+# Mint the school account + its school/policy records (permanent public identity — run once)
+$C run --rm appview pnpm --filter @freeschool/appview create-school
+# Paste SCHOOL_DID / SCHOOL_HANDLE / SCHOOL_APP_PASSWORD into infra/production/.env, then
+$C up -d
+curl -s https://freeskool.xyz/api/health   # {"status":"ok","checks":{"postgres":"ok","pds":"ok"},"school":true}
 ```
 
-The API runs as the unprivileged `node` user. Only Caddy exposes public ports; Postgres and the API remain on the internal Compose network. API and frontend share an origin so session cookies and OAuth callbacks round-trip correctly. The Docker context excludes environment files, local data and mail logs. Fonts are self-hosted. Photos and avatars are stored in Postgres with other app-side data, resized and stripped of metadata; no extra storage account is required for this MVP.
-
-Set `SCHOOL_HANDLE`, `SCHOOL_NAME`, `SCHOOL_REGION` and `SCHOOL_EMAIL` for the actual city before bootstrap (the development defaults are Boulder). Create a fresh production school once, using `create-school` with the production environment (see the root README). It creates permanent public identity records: do not use it as a health check. Save `SCHOOL_DID`, `SCHOOL_HANDLE` and `SCHOOL_APP_PASSWORD` in the production environment. The primary PDS hostname and its identity DNS must already work. Bootstrap can run via:
+The AppView migrates `fs_*` and initialises contrail at every boot, and seeds the skill-tier
+classifications. The public skill taxonomy (525 `freeschool.draft.skill` records) is published
+under an **authority account** on this PDS:
 
 ```sh
-docker compose --env-file infra/production/.env -f infra/production/compose.yml up -d postgres
-docker compose --env-file infra/production/.env -f infra/production/compose.yml run --rm appview pnpm --filter @freeschool/appview create-school
-# Save the printed school configuration privately in infra/production/.env.
-docker compose --env-file infra/production/.env -f infra/production/compose.yml up -d
+# Create the authority account once (an admin invite code, then createAccount), then:
+$C run --rm -e AUTHORITY_HANDLE=skills.freeskool.xyz -e AUTHORITY_PASSWORD=… \
+   -e PDS_URL=https://pds.freeskool.xyz appview pnpm --filter @freeschool/lexicons seed:skills
 ```
 
-AppView runs migrations at startup. It seeds skill visibility classifications, but the public taxonomy still needs to be published under a production authority account and indexed; use the seed command documented in the root README. Appoint the first steward with `STEWARD_DID` and the `appoint-steward` command; use the in-app handoff flow to add the second key holder/steward. Keep `FREESCHOOL_NO_JOBS` unset in production so reminders, retention, recurrence, newsletters and peer repair run.
+Appoint the first steward after that person has signed in once (steward is the one role that is not
+derived): `$C run --rm -e STEWARD_DID=did:plc:… appview pnpm --filter @freeschool/appview appoint-steward`.
 
-## Acceptance after launch
+Backups: `crontab -e` → `17 3 * * * /opt/freeskool/infra/production/backup.sh >> /var/log/freeskool-backup.log 2>&1`.
+Copies that leave the server must be encrypted first; they contain member email addresses and
+custodial credentials (wrapped, but still).
 
-1. `/api/health` reports Postgres and PDS healthy, with the school configured.
-2. Sign up with a real address; receive and consume the email link on the public origin. Confirm the session survives reload.
-3. Post a class with a photo and neighborhood. Visit signed out: image/title/coarse neighborhood visible, private address absent. RSVP privately from another account; verify address access and roster restrictions.
-4. Set and remove a profile image. Keep the profile private and verify another account cannot retrieve it. Explicitly opt into a public profile, verify its public skill/resource links, then revoke and verify profile/avatar access ends.
-5. Complete attendance and feedback on a test class, and verify the summary suppression/release thresholds.
-6. Publish, edit and remove a knowledge note linked to a skill/class. Verify the school moderation approval threshold and restore path. Print busy Letter and A4 calendars across multiple pages. Install the PWA and confirm public calendar access offline. Enable push with real VAPID keys if offered; verify email reminder delivery.
-7. Test the secondary OAuth door on HTTPS and the COhere listing exchange with its operator. The local test stack cannot prove either external integration.
+## Releasing a change
 
-## Backup and rollback
+```sh
+ssh -i ~/.ssh/frontrange-twin root@167.233.100.123 /opt/freeskool/infra/production/release.sh
+```
 
-Back up the production Postgres database, PDS data/blob volumes, PDS signing/rotation keys, and environment secrets together. Encrypt copies before sending them off-server. Do not log mail links, email addresses or credential values. Set backup retention consistently with the project's privacy retention policy; restoring a database also restores the data present at that time.
+`release.sh` = `git pull --ff-only` on the branch the server is on, `backup.sh`, rebuild `appview` +
+`web`, `up -d`, wait for `/api/health`. Postgres and the PDS are untouched. To move the server from
+`deploy/hetzner` to `main` once these files are merged: `git checkout main` first, then run it.
 
-Before each release, take a database backup and record the current image IDs. Deploy the new images, check health, then walk signup and a class RSVP. If those fail, return to the recorded images. A schema-changing release requires a compatible database restore strategy as well; never automatically delete volumes. Perform a restore drill on a separate private machine before inviting the school.
+Roll back with `git checkout <previous commit> && $C build && $C up -d`. A release that changes the
+schema also needs the pre-release dump to roll back to; never delete a volume.
 
-## Current release status
+## Moving the stack
 
-The production configuration is prepared for a specific server and domain to be supplied. Building containers or passing local tests is not evidence of production email, OAuth, federation, backups or mobile push working. Record their actual verification results here after deployment.
+Everything that moves: the two volumes (`postgres`, `pds`) and `infra/production/.env`. Stop the
+stack, `backup.sh`, copy the dump, the PDS tarball and `.env` to the new host, `up -d postgres`,
+restore the dump, untar into the `pds` volume, `up -d`, then flip the four A records. The PDS's
+rotation key is in `.env`; losing it means losing the ability to recover the school's DID.
 
+## Acceptance checks after a deploy
 
-### Local release verification, September 13, 2026
-
-The web build, workspace typechecks, 384 backend tests (one skipped), 205 frontend tests, and live MVP journey pass. A temporary production frontend preview also passed five calendar/print/contribution-management browser checks. Compose configuration validation passed with placeholder values and `--no-env-resolution`; actual production secrets remain unconfigured.
-
-The production Docker build was attempted, but Docker Hub timed out while resolving `node:22-bookworm-slim` and `caddy:2-alpine`. Neither base image is cached locally. Retry the image build once registry connectivity is available; the production image has not been verified or deployed. Supply the production domain/server, PDS, SMTP and operator-owned secrets before launch acceptance.
+1. `/api/health` is `ok` with `school: true`.
+2. Sign up with a real address on `https://freeskool.xyz`; the magic link arrives from Resend and the
+   session survives a reload.
+3. Post a class, RSVP from a second account, confirm the address is hidden from a signed-out viewer.
+4. `https://<handle>.freeskool.xyz/.well-known/atproto-did` returns the DID for a minted handle.
+5. `pnpm --filter @freeschool/appview privacy-audit` against `PDS_URL=https://pds.freeskool.xyz` ends
+   in `PRIVACY AUDIT OK`.

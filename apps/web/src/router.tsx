@@ -7,30 +7,6 @@ import { OfflineBanner } from './components/OfflineBanner';
 import { InstallProvider } from './components/InstallNudge';
 import { CalendarScreen } from './routes/CalendarScreen';
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // Load each flow when it is opened; the public calendar remains immediately available.
 const KnowledgeScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'KnowledgeScreen');
 const ResourceScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'ResourceScreen');
