@@ -43,6 +43,13 @@ describe('AppCustodyAdapter', () => {
     if (!r.ok) expect(r.error).toBe('ErrThresholdNotMet')
     expect(calls).toHaveLength(0)
   })
+  it('write-policy is single-steward: one steward alone succeeds, no approvals needed', async () => {
+    const { adapter, audit, calls } = make(roles)
+    const r = await adapter.putRecordAsSchool({ schoolDid: school, callerDid: steward1, scope: 'freeschool.draft.policy', action: 'write-policy', collection: 'freeschool.draft.policy', rkey: 'self', record: { title: 'policy' }, audit: { reason: 'lower the threshold' } })
+    expect(r.uri).toBe('at://did:plc:school/x/y')
+    expect(calls).toHaveLength(1)
+    expect(audit[0]).toMatchObject({ decision: 'allow', action: 'write-policy', callerDid: steward1 })
+  })
   it('destructive action succeeds with a second steward approval', async () => {
     const { adapter, audit } = make(roles)
     const r = await adapter.deleteRecordAsSchool({ schoolDid: school, callerDid: steward1, scope: 's', action: 'remove-listing', collection: 'coop.lexicon.event.listing', rkey: '3k', audit: { reason: 'duplicate listing', approvals: [{ stewardDid: steward2, at: '2026-09-12T00:00:00Z' }] } })

@@ -43,9 +43,18 @@ export type SchoolAction =
    */
   | 'retract-role-claim'
 
-/** Actions that require the policy's destructiveActionStewards threshold (default 2). */
+/**
+ * Actions that require the policy's destructiveActionStewards threshold (default 2).
+ *
+ * `write-policy` is deliberately NOT here: PRD F15 requires an admin to change every
+ * policy default without a deploy, and the first school has exactly one steward — a
+ * two-steward threshold on policy writes would make the policy unwritable. Policy writes
+ * stay single-steward but remain audit-logged (every `actAs`/`putRecordAsSchool` call
+ * writes an `AuditRow` regardless of threshold), and the policy record itself is public,
+ * so any steward changing the threshold (or anything else) is visible to the community.
+ */
 export const DESTRUCTIVE_ACTIONS: ReadonlySet<SchoolAction> = new Set<SchoolAction>([
-  'remove-listing', 'suspend-role', 'void-attendance', 'write-policy',
+  'remove-listing', 'suspend-role', 'void-attendance',
 ])
 
 export interface Approval { stewardDid: Did; at: string; sig?: string }

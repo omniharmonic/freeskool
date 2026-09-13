@@ -4,7 +4,7 @@
  * audited, with no exceptions and no second path.
  *
  *   GET  /policy                the current policy record + derived thresholds
- *   PUT  /policy                write a new version (destructive -> needs approvals)
+ *   PUT  /policy                write a new version (single-steward, audited, public)
  *   GET  /moderation            the queue
  *   POST /moderation            open an item. `reason` is REQUIRED.
  *   POST /moderation/:id/approve  a second steward signs on
@@ -64,7 +64,13 @@ const policyBody = z.object({
     })
     .optional(),
   reason: z.string().min(3).max(1000),
-  /** Co-signing stewards. `write-policy` is a destructive action. */
+  /**
+   * Optional: `write-policy` is single-steward (not in `DESTRUCTIVE_ACTIONS`), since the
+   * first school has exactly one steward and PRD F15 requires policy to be editable
+   * without a deploy. Still audited, and the policy record itself is public, so any
+   * threshold change a steward makes is visible. Accepted here only so a school that
+   * later raises its threshold, or a multi-steward school, can co-sign if it chooses.
+   */
   approvals: z
     .array(z.object({ stewardDid: z.custom<`did:${string}`>((v) => typeof v === 'string' && v.startsWith('did:')), at: z.string() }))
     .optional(),
