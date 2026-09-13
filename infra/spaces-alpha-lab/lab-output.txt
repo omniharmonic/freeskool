@@ -1,0 +1,519 @@
+
+==============================================================================
+1. Accounts (school authority, member, non-member)
+==============================================================================
+  created freeskool.test -> did:plc:koirur33e3iyn47bc27h4qey
+  created alice.test -> did:plc:32myvnlpnbo7oxstppzp3r6d
+  created carol.test -> did:plc:l54rmrko376kfkjww6b2wcqs
+
+==============================================================================
+2. com.atproto.simplespace.createSpace — the school DID owns the space
+==============================================================================
+input.body: {
+  "type": "org.freeschool.members",
+  "skey": "v1",
+  "readPolicy": {
+    "$type": "com.atproto.simplespace.defs#memberListPolicy"
+  },
+  "writePolicy": {
+    "$type": "com.atproto.simplespace.defs#memberListPolicy"
+  },
+  "appAccess": {
+    "$type": "com.atproto.simplespace.defs#open"
+  }
+}
+output.uri: at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1
+
+--- a SECOND, separate space for feedback (the isolation boundary is the space)
+input.body: {
+  "type": "org.freeschool.feedback",
+  "skey": "v1",
+  "readPolicy": {
+    "$type": "com.atproto.simplespace.defs#memberListPolicy"
+  },
+  "writePolicy": {
+    "$type": "com.atproto.simplespace.defs#memberListPolicy"
+  },
+  "appAccess": {
+    "$type": "com.atproto.simplespace.defs#open"
+  }
+}
+output.uri: at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.feedback/v1
+
+--- com.atproto.simplespace.getSpace (as the owner)
+space config: {
+  "uri": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1",
+  "readPolicy": {
+    "$type": "com.atproto.simplespace.defs#memberListPolicy"
+  },
+  "writePolicy": {
+    "$type": "com.atproto.simplespace.defs#memberListPolicy"
+  },
+  "appAccess": {
+    "$type": "com.atproto.simplespace.defs#open"
+  }
+}
+
+==============================================================================
+3. com.atproto.simplespace.putMember — add alice, leave carol out
+==============================================================================
+input.body: {
+  "space": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1",
+  "did": "did:plc:32myvnlpnbo7oxstppzp3r6d",
+  "read": true,
+  "write": true
+}
+  putMember returned 200 with an empty body
+
+--- com.atproto.simplespace.listMembers (owner-only; a space credential is NOT enough)
+members: {
+  "cursor": "did:plc:32myvnlpnbo7oxstppzp3r6d",
+  "members": [
+    {
+      "did": "did:plc:32myvnlpnbo7oxstppzp3r6d",
+      "read": true,
+      "write": true
+    }
+  ]
+}
+
+==============================================================================
+4. com.atproto.space.createRecord — alice writes into HER OWN repo in the space
+==============================================================================
+input.body (freeschool.draft.skill): {
+  "space": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1",
+  "repo": "did:plc:32myvnlpnbo7oxstppzp3r6d",
+  "collection": "freeschool.draft.skill",
+  "rkey": "r1lab",
+  "record": {
+    "$type": "freeschool.draft.skill",
+    "title": "Sourdough starter basics",
+    "createdAt": "2026-09-13T01:20:43.316Z"
+  }
+}
+  output: {
+  "uri": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1/did:plc:32myvnlpnbo7oxstppzp3r6d/freeschool.draft.skill/r1lab",
+  "cid": "bafyreibiu25slqhjowxlvb5magdypmm5hewxlor6sxkazmlkcsqzykzzpm",
+  "validationStatus": "unknown"
+}
+input.body (freeschool.draft.feedback): {
+  "space": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1",
+  "repo": "did:plc:32myvnlpnbo7oxstppzp3r6d",
+  "collection": "freeschool.draft.feedback",
+  "rkey": "r1lab",
+  "record": {
+    "$type": "freeschool.draft.feedback",
+    "text": "loved the bread class",
+    "createdAt": "2026-09-13T01:20:43.316Z"
+  }
+}
+  output: {
+  "uri": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1/did:plc:32myvnlpnbo7oxstppzp3r6d/freeschool.draft.feedback/r1lab",
+  "cid": "bafyreifr2c3vo4dkevskqsitv6ya3kz6crex4ybbpbqjilxuhpvdk7c3o4",
+  "validationStatus": "unknown"
+}
+
+==============================================================================
+5. Read as the author with an ordinary account token (action: read_self)
+==============================================================================
+alice listRecords on her own repo: {
+  "records": [
+    {
+      "collection": "freeschool.draft.skill",
+      "rkey": "r1lab",
+      "cid": "bafyreibiu25slqhjowxlvb5magdypmm5hewxlor6sxkazmlkcsqzykzzpm",
+      "value": {
+        "$type": "freeschool.draft.skill",
+        "title": "Sourdough starter basics",
+        "createdAt": "2026-09-13T01:20:43.316Z"
+      }
+    },
+    {
+      "collection": "freeschool.draft.feedback",
+      "rkey": "r1lab",
+      "cid": "bafyreifr2c3vo4dkevskqsitv6ya3kz6crex4ybbpbqjilxuhpvdk7c3o4",
+      "value": {
+        "text": "loved the bread class",
+        "$type": "freeschool.draft.feedback",
+        "createdAt": "2026-09-13T01:20:43.316Z"
+      }
+    }
+  ]
+}
+
+==============================================================================
+6. Read as a MEMBER via the delegation-token -> space-credential exchange
+==============================================================================
+  DPoP key thumbprint (jkt): fH08DR9p0Rgzdk-yWRUdyMp--rnjTxnYCNNyKcVn5rE
+  delegation token (minted by alice.test's PDS)
+  raw (522 chars): eyJhbGciOiJFUzI1NksiLCJ0eXAiOiJhdHByb3RvLXNwYWNlLWRlbGVnYXRpb24r...
+  header:  {"alg":"ES256K","typ":"atproto-space-delegation+jwt","kid":"#atproto"}
+  payload: {
+    "iss": "did:plc:32myvnlpnbo7oxstppzp3r6d",
+    "sub": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1",
+    "aud": "did:plc:koirur33e3iyn47bc27h4qey#atproto_space_host",
+    "iat": 1789262443,
+    "exp": 1789262503,
+    "jti": "ab16f776ecc5faa037f3249d6094d293"
+  }
+  lifetime: 60s   signature: 64 bytes
+  DPoP proof (no `ath`: obtaining a credential)
+  raw (500 chars): eyJhbGciOiJFUzI1NiIsInR5cCI6ImRwb3Arand0IiwiandrIjp7Imt0eSI6IkVD...
+  header:  {"alg":"ES256","typ":"dpop+jwt","jwk":{"kty":"EC","crv":"P-256","x":"QvfWfDAtcXpmOGQdSf_EH2keBpMF8NmPuX7E1e9R-PY","y":"c6KGFxaeRErpxFqf2kUgdSs-praApHz-6hpCX0YTZcg"}}
+  payload: {
+    "jti": "4f6b4447cf3fdc50aa414a388c56790e",
+    "htm": "POST",
+    "htu": "http://localhost:2583/xrpc/com.atproto.space.getSpaceCredential",
+    "iat": 1789262443
+  }
+  no `exp` (DPoP proofs are bounded by `iat` + MAX_PROOF_AGE_SEC=60)   signature: 64 bytes
+  SPACE CREDENTIAL (issued by the school authority)
+  raw (522 chars): eyJhbGciOiJFUzI1NksiLCJ0eXAiOiJhdHByb3RvLXNwYWNlLWNyZWRlbnRpYWwr...
+  header:  {"alg":"ES256K","typ":"atproto-space-credential+jwt","kid":"#atproto"}
+  payload: {
+    "iss": "did:plc:koirur33e3iyn47bc27h4qey",
+    "sub": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1",
+    "cnf": {
+      "jkt": "fH08DR9p0Rgzdk-yWRUdyMp--rnjTxnYCNNyKcVn5rE"
+    },
+    "iat": 1789262443,
+    "exp": 1789269643,
+    "jti": "da02607c83e9e7baacd4899bed001167"
+  }
+  lifetime: 7200s   signature: 64 bytes
+
+--- com.atproto.space.listRepos — the writer set (authority-maintained)
+repos: {
+  "repos": [
+    {
+      "did": "did:plc:32myvnlpnbo7oxstppzp3r6d",
+      "rev": "3mvegk7lmms2x",
+      "hash": {
+        "$bytes": "JzXlAUF9pNBlkenFdKKE18b/mx+IDP/mP+KcQevn/w8"
+      }
+    }
+  ]
+}
+
+--- com.atproto.space.listRecords with the credential — ALL collections, no filter
+records: {
+  "records": [
+    {
+      "collection": "freeschool.draft.skill",
+      "rkey": "r1lab",
+      "cid": "bafyreibiu25slqhjowxlvb5magdypmm5hewxlor6sxkazmlkcsqzykzzpm",
+      "value": {
+        "$type": "freeschool.draft.skill",
+        "title": "Sourdough starter basics",
+        "createdAt": "2026-09-13T01:20:43.316Z"
+      }
+    },
+    {
+      "collection": "freeschool.draft.feedback",
+      "rkey": "r1lab",
+      "cid": "bafyreifr2c3vo4dkevskqsitv6ya3kz6crex4ybbpbqjilxuhpvdk7c3o4",
+      "value": {
+        "text": "loved the bread class",
+        "$type": "freeschool.draft.feedback",
+        "createdAt": "2026-09-13T01:20:43.316Z"
+      }
+    }
+  ]
+}
+
+--- Same credential, narrowed to one collection (client-side choice, not a policy)
+records: {
+  "records": [
+    {
+      "collection": "freeschool.draft.feedback",
+      "rkey": "r1lab",
+      "cid": "bafyreifr2c3vo4dkevskqsitv6ya3kz6crex4ybbpbqjilxuhpvdk7c3o4",
+      "value": {
+        "text": "loved the bread class",
+        "$type": "freeschool.draft.feedback",
+        "createdAt": "2026-09-13T01:20:43.316Z"
+      }
+    }
+  ]
+}
+
+==============================================================================
+7. Read as a NON-MEMBER (carol)
+==============================================================================
+
+--- carol CAN mint a delegation token from her own PDS (her PDS is not the gate)
+  delegation token (minted by carol.test's PDS)
+  raw (522 chars): eyJhbGciOiJFUzI1NksiLCJ0eXAiOiJhdHByb3RvLXNwYWNlLWRlbGVnYXRpb24r...
+  header:  {"alg":"ES256K","typ":"atproto-space-delegation+jwt","kid":"#atproto"}
+  payload: {
+    "iss": "did:plc:l54rmrko376kfkjww6b2wcqs",
+    "sub": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1",
+    "aud": "did:plc:koirur33e3iyn47bc27h4qey#atproto_space_host",
+    "iat": 1789262443,
+    "exp": 1789262503,
+    "jti": "c5df8e66a84f83f01868214416b74755"
+  }
+  lifetime: 60s   signature: 64 bytes
+  DPoP proof (no `ath`: obtaining a credential)
+  raw (500 chars): eyJhbGciOiJFUzI1NiIsInR5cCI6ImRwb3Arand0IiwiandrIjp7Imt0eSI6IkVD...
+  header:  {"alg":"ES256","typ":"dpop+jwt","jwk":{"kty":"EC","crv":"P-256","x":"-WiJYGIbaodbac5bkEmEMjUVpIC2_ALr86ECd9xBNdc","y":"tkitlZ-Y66S4uNQBQTUsHU2fMNRVHZwbHyE38isQJOQ"}}
+  payload: {
+    "jti": "86fcf1ba23972c025da92f90b61287fc",
+    "htm": "POST",
+    "htu": "http://localhost:2583/xrpc/com.atproto.space.getSpaceCredential",
+    "iat": 1789262443
+  }
+  no `exp` (DPoP proofs are bounded by `iat` + MAX_PROOF_AGE_SEC=60)   signature: 64 bytes
+[REFUSED] carol exchanges her delegation token for a credential
+  HTTP 400  error="UserNotAuthorized"  message="User not authorized for this space"
+
+--- carol tries to read alice's repo with her own account token
+[REFUSED] carol listRecords on alice's repo (account token)
+  HTTP 400  error="RepoNotFound"  message="Could not find repo for DID: did:plc:32myvnlpnbo7oxstppzp3r6d"
+
+--- carol writes into her OWN repo in a space she is not a member of
+[ALLOWED] carol putRecord into the space
+  body: {
+  "uri": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1/did:plc:l54rmrko376kfkjww6b2wcqs/freeschool.draft.feedback/r1lab-carol",
+  "cid": "bafyreieu4x2hjsdksiydwaxrehcl6rnqsja4olqqztoyoe2g4aebkzj2ca",
+  "validationStatus": "unknown"
+}
+
+--- Did carol end up in the authority-maintained writer set?
+repos after carol attempt: {
+  "repos": [
+    {
+      "did": "did:plc:32myvnlpnbo7oxstppzp3r6d",
+      "rev": "3mvegk7lmms2x",
+      "hash": {
+        "$bytes": "JzXlAUF9pNBlkenFdKKE18b/mx+IDP/mP+KcQevn/w8"
+      }
+    }
+  ]
+}
+
+==============================================================================
+8. Can the AUTHORITY (the school) read a member's rows?
+==============================================================================
+  delegation token (minted by freeskool.test's PDS)
+  raw (522 chars): eyJhbGciOiJFUzI1NksiLCJ0eXAiOiJhdHByb3RvLXNwYWNlLWRlbGVnYXRpb24r...
+  header:  {"alg":"ES256K","typ":"atproto-space-delegation+jwt","kid":"#atproto"}
+  payload: {
+    "iss": "did:plc:koirur33e3iyn47bc27h4qey",
+    "sub": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1",
+    "aud": "did:plc:koirur33e3iyn47bc27h4qey#atproto_space_host",
+    "iat": 1789262443,
+    "exp": 1789262503,
+    "jti": "2e9a196230b37798722fbd7086693c38"
+  }
+  lifetime: 60s   signature: 64 bytes
+  DPoP proof (no `ath`: obtaining a credential)
+  raw (500 chars): eyJhbGciOiJFUzI1NiIsInR5cCI6ImRwb3Arand0IiwiandrIjp7Imt0eSI6IkVD...
+  header:  {"alg":"ES256","typ":"dpop+jwt","jwk":{"kty":"EC","crv":"P-256","x":"t8LmkXxILU1Ax7x86LgmTtF3QViDVYArQ3VzkMjS0VY","y":"CJWq3P2LiuWV4jVqXPR43kQO9gg5yCRrqS6kaiugLzI"}}
+  payload: {
+    "jti": "16a2044fcb1f264226b9acc9a8b19222",
+    "htm": "POST",
+    "htu": "http://localhost:2583/xrpc/com.atproto.space.getSpaceCredential",
+    "iat": 1789262443
+  }
+  no `exp` (DPoP proofs are bounded by `iat` + MAX_PROOF_AGE_SEC=60)   signature: 64 bytes
+[ALLOWED] school mints itself a space credential
+  body: {
+  "credential": "eyJhbGciOiJFUzI1NksiLCJ0eXAiOiJhdHByb3RvLXNwYWNlLWNyZWRlbnRpYWwrand0Iiwia2lkIjoiI2F0cHJvdG8ifQ.eyJpc3MiOiJkaWQ6cGxjOmtvaXJ1cjMzZTNpeW40N2JjMjdoNHFleSIsInN1YiI6ImF0Oi8vZGlkOnBsYzprb2lydXIzM2UzaXluNDdiYzI3aDRxZXkvc3BhY2Uvb3JnLmZyZWVzY2hvb2wubWVtYmVycy92MSIsImNuZiI6eyJqa3QiOiI4MmpXdVl1Wi10VkNOc0UtTHdkNlNwUHU0UWozdGpzMUticUpzQjhDT3hFIn0sImlhdCI6MTc4OTI2MjQ0MywiZXhwIjoxNzg5MjY5NjQzLCJqdGkiOiIzNmFhZDAwZGNjYjQxZDJkZjA3ZjYzYjAyYmI4NzQ0OCJ9.o2hWClf6tHNbvylxacIU4s6DcRqKY9CNtErUzzq5SxltR89-sooMrreR_spD-hrQo4FT4P375iOuZjbycWCzFA",
+  "delegationToken": "eyJhbGciOiJFUzI1NksiLCJ0eXAiOiJhdHByb3RvLXNwYWNlLWRlbGVnYXRpb24rand0Iiwia2lkIjoiI2F0cHJvdG8ifQ.eyJpc3MiOiJkaWQ6cGxjOmtvaXJ1cjMzZTNpeW40N2JjMjdoNHFleSIsInN1YiI6ImF0Oi8vZGlkOnBsYzprb2lydXIzM2UzaXluNDdiYzI3aDRxZXkvc3BhY2Uvb3JnLmZyZWVzY2hvb2wubWVtYmVycy92MSIsImF1ZCI6ImRpZDpwbGM6a29pcnVyMzNlM2l5bjQ3YmMyN2g0cWV5I2F0cHJvdG9fc3BhY2VfaG9zdCIsImlhdCI6MTc4OTI2MjQ0MywiZXhwIjoxNzg5MjYyNTAzLCJqdGkiOiIyZTlhMTk2MjMwYjM3Nzk4NzIyZmJkNzA4NjY5M2MzOCJ9.MdW42QVIEOOm_6Cs8H48zK6k7XdN8XKMdsMiC5ecMNMJQlojCBUO4X0KNL-QykmtqxKEzUIS5bTXkZnZRrtqHQ"
+}
+  school's own space credential
+  raw (522 chars): eyJhbGciOiJFUzI1NksiLCJ0eXAiOiJhdHByb3RvLXNwYWNlLWNyZWRlbnRpYWwr...
+  header:  {"alg":"ES256K","typ":"atproto-space-credential+jwt","kid":"#atproto"}
+  payload: {
+    "iss": "did:plc:koirur33e3iyn47bc27h4qey",
+    "sub": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1",
+    "cnf": {
+      "jkt": "82jWuYuZ-tVCNsE-Lwd6SpPu4Qj3tjs1KbqJsB8COxE"
+    },
+    "iat": 1789262443,
+    "exp": 1789269643,
+    "jti": "36aad00dccb41d2df07f63b02bb87448"
+  }
+  lifetime: 7200s   signature: 64 bytes
+school reads alice's rows: {
+  "records": [
+    {
+      "collection": "freeschool.draft.skill",
+      "rkey": "r1lab",
+      "cid": "bafyreibiu25slqhjowxlvb5magdypmm5hewxlor6sxkazmlkcsqzykzzpm",
+      "value": {
+        "$type": "freeschool.draft.skill",
+        "title": "Sourdough starter basics",
+        "createdAt": "2026-09-13T01:20:43.316Z"
+      }
+    },
+    {
+      "collection": "freeschool.draft.feedback",
+      "rkey": "r1lab",
+      "cid": "bafyreifr2c3vo4dkevskqsitv6ya3kz6crex4ybbpbqjilxuhpvdk7c3o4",
+      "value": {
+        "text": "loved the bread class",
+        "$type": "freeschool.draft.feedback",
+        "createdAt": "2026-09-13T01:20:43.316Z"
+      }
+    }
+  ]
+}
+
+==============================================================================
+9. The syncer / AppView read path (all with the same space credential)
+==============================================================================
+
+--- com.atproto.space.listRepoOps — per-author oplog + signed commit at head
+ops: {
+  "ops": [
+    {
+      "rev": "3mvegk7kkh22x",
+      "collection": "freeschool.draft.skill",
+      "rkey": "r1lab",
+      "cid": "bafyreibiu25slqhjowxlvb5magdypmm5hewxlor6sxkazmlkcsqzykzzpm",
+      "prev": null,
+      "value": {
+        "$type": "freeschool.draft.skill",
+        "title": "Sourdough starter basics",
+        "createdAt": "2026-09-13T01:20:43.316Z"
+      }
+    },
+    {
+      "rev": "3mvegk7lmms2x",
+      "collection": "freeschool.draft.feedback",
+      "rkey": "r1lab",
+      "cid": "bafyreifr2c3vo4dkevskqsitv6ya3kz6crex4ybbpbqjilxuhpvdk7c3o4",
+      "prev": null,
+      "value": {
+        "text": "loved the bread class",
+        "$type": "freeschool.draft.feedback",
+        "createdAt": "2026-09-13T01:20:43.316Z"
+      }
+    }
+  ],
+  "commit": {
+    "ver": 1,
+    "hash": {
+      "$bytes": "JzXlAUF9pNBlkenFdKKE18b/mx+IDP/mP+KcQevn/w8"
+    },
+    "ikm": {
+      "$bytes": "d4A7EAFz8LjcyQfSifPnWR71Ui74XgHSF/3RjJNQH+U"
+    },
+    "mac": {
+      "$bytes": "iRNqqgyoJeglDUV8k3M9PQpzpklOn+VwomvMyDufj04"
+    },
+    "sig": {
+      "$bytes": "SmghzTYsCEsLvEJt7aXBhR9TF0f1XhzNRbpvQWVxfwFG0Ue3LdaBr9caTiR+Rv9N0Toq8h4GI2BHHSFwQod3Ig"
+    },
+    "rev": "3mvegk7lmms2x"
+  }
+}
+
+--- com.atproto.space.getRepo — whole-repo snapshot
+[ALLOWED] getRepo for alice
+  body: {
+  "error": "NonJson",
+  "message": "c�eroots��*X%\u0000\u0001q\u0012 �ଈ1�1 *��bH���l�~@��_�E�C!I\"��*X%\u0000\u0001q\u0012 �\u0006�Ir���!PČ�X\u0002*\u0002��س\u000f������gversion\u0001�\u0001\u0001q\u0012 �ଈ1�1 *��bH���l�~@��_�E�C!I\"��cikmX ��R(�҅\u00100�\u001b�%\u00153L�ۿ\tB�'���IP�wcmacX �m��;��� \u0005��\u0015;��\u0003�˞�\\k\u001b3]���]crevm3mvegk7lmms2xcsigX@PY�X.���:�\u0016\u001c\nu2�u;�td6\u0002�\u0011�Z$�L�7/�A{\u000e��a��n�P.M��i����/v�\u0000'e\u001a��cver\u0001dhashX '5�"
+}
+
+--- com.atproto.space.registerNotify — subscribe a service to write notifications
+[ALLOWED] registerNotify service=did:plc:32myvnlpnbo7oxstppzp3r6d (a bare DID resolves to its #atproto_pds)
+  body: {
+  "expiresAt": "2026-09-14T01:20:43.655Z"
+}
+[REFUSED] registerNotify with an unresolvable service
+  HTTP 400  error="ServiceNotResolvable"  message="Could not resolve a service endpoint for did:web:syncer.invalid#atproto_space_syncer"
+
+==============================================================================
+10. Is a credential usable against a DIFFERENT space of the same owner?
+==============================================================================
+[REFUSED] alice's org.freeschool.members credential used against org.freeschool.feedback
+  HTTP 400  error="InvalidCredential"  message="Credential is not scoped to this space"
+
+==============================================================================
+11. com.atproto.simplespace.removeMember — revoke alice
+==============================================================================
+  removeMember returned 200
+members now: {
+  "members": []
+}
+
+--- alice can no longer obtain a NEW credential
+  delegation token (minted by alice.test's PDS)
+  raw (522 chars): eyJhbGciOiJFUzI1NksiLCJ0eXAiOiJhdHByb3RvLXNwYWNlLWRlbGVnYXRpb24r...
+  header:  {"alg":"ES256K","typ":"atproto-space-delegation+jwt","kid":"#atproto"}
+  payload: {
+    "iss": "did:plc:32myvnlpnbo7oxstppzp3r6d",
+    "sub": "at://did:plc:koirur33e3iyn47bc27h4qey/space/org.freeschool.members/v1",
+    "aud": "did:plc:koirur33e3iyn47bc27h4qey#atproto_space_host",
+    "iat": 1789262443,
+    "exp": 1789262503,
+    "jti": "3b7a9486b430e9afa9746ab057f71818"
+  }
+  lifetime: 60s   signature: 64 bytes
+  DPoP proof (no `ath`: obtaining a credential)
+  raw (500 chars): eyJhbGciOiJFUzI1NiIsInR5cCI6ImRwb3Arand0IiwiandrIjp7Imt0eSI6IkVD...
+  header:  {"alg":"ES256","typ":"dpop+jwt","jwk":{"kty":"EC","crv":"P-256","x":"jbBRpGgHmCncDgOJVACF9WS8aum1mhAU5PY-ZeOXh-g","y":"cbwwya7e3TelAlr_umo1ydWG_WB864tSP-hMG9PXCdU"}}
+  payload: {
+    "jti": "1b2ecf63c2d71dcab9cb7a154c43a672",
+    "htm": "POST",
+    "htu": "http://localhost:2583/xrpc/com.atproto.space.getSpaceCredential",
+    "iat": 1789262443
+  }
+  no `exp` (DPoP proofs are bounded by `iat` + MAX_PROOF_AGE_SEC=60)   signature: 64 bytes
+[REFUSED] alice re-exchanges after removal
+  HTTP 400  error="UserNotAuthorized"  message="User not authorized for this space"
+
+--- but her ALREADY-ISSUED credential is still accepted until it expires
+[ALLOWED] alice reuses the old credential
+  body: {
+  "records": [
+    {
+      "collection": "freeschool.draft.skill",
+      "rkey": "r1lab",
+      "cid": "bafyreibiu25slqhjowxlvb5magdypmm5hewxlor6sxkazmlkcsqzykzzpm",
+      "value": {
+        "$type": "freeschool.draft.skill",
+        "title": "Sourdough starter basics",
+        "createdAt": "2026-09-13T01:20:43.316Z"
+      }
+    },
+    {
+      "collection": "freeschool.draft.feedback",
+      "rkey": "r1lab",
+      "cid": "bafyreifr2c3vo4dkevskqsitv6ya3kz6crex4ybbpbqjilxuhpvdk7c3o4",
+      "value": {
+        "text": "loved the bread class",
+        "$type": "freeschool.draft.feedback",
+        "createdAt": "2026-09-13T01:20:43.316Z"
+      }
+    }
+  ]
+}
+  >>> revocation lag: the credential stays valid for 7200s from issuance (until 2026-09-13T03:20:43.000Z)
+
+==============================================================================
+12. DPoP replay protection (same proof twice)
+==============================================================================
+  first use:
+[ALLOWED] listRepos with a fresh proof
+  body: {
+  "repos": [
+    {
+      "did": "did:plc:32myvnlpnbo7oxstppzp3r6d",
+      "rev": "3mvegk7lmms2x",
+      "hash": {
+        "$bytes": "JzXlAUF9pNBlkenFdKKE18b/mx+IDP/mP+KcQevn/w8"
+      }
+    }
+  ]
+}
+  second use of the SAME proof:
+[REFUSED] listRepos replaying that proof
+  HTTP 401  error="BadDpopProof"  message="DPoP proof replayed"
+
+==============================================================================
+LAB COMPLETE
+==============================================================================

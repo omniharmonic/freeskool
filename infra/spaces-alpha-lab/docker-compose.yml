@@ -1,0 +1,35 @@
+# Spaces-alpha PDS for the R1 lab.
+# NOTE: the ghcr image publishes only a linux/amd64 manifest, so on Apple Silicon
+# the `platform:` line below is required (Docker Desktop emulates it).
+services:
+  pds:
+    image: ghcr.io/bluesky-social/atproto:pds-spaces-alpha
+    platform: linux/amd64
+    container_name: r1-spaces-pds
+    ports:
+      - "2583:2583"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # hostname "localhost" makes the PDS advertise http://localhost:2583 in DID docs
+      PDS_DEV_MODE: "1"
+      PDS_HOSTNAME: "localhost"
+      PDS_PORT: "2583"
+      PDS_DATA_DIRECTORY: "/data"
+      PDS_BLOBSTORE_DISK_LOCATION: "/data/blobs"
+      # the local in-memory did:plc directory run by plc-server.mjs on the host
+      PDS_DID_PLC_URL: "http://host.docker.internal:2582"
+      PDS_SERVICE_HANDLE_DOMAINS: ".test"
+      PDS_INVITE_REQUIRED: "0"
+      # required: the PLC + other lab services live on private IPs
+      PDS_DISABLE_SSRF_PROTECTION: "1"
+      PDS_REPO_SIGNING_KEY_K256_PRIVATE_KEY_HEX: "3ee6892a2d10a23ca48ce8b1a2b4e7a96a0ba0f1cf43b7f2a1c0cdd1dd3ca111"
+      PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: "e049f5a1f17b1a8e9b1ab1d2cc93dd1ca2a2f2e5c1b0a9f8e7d6c5b4a3928171"
+      PDS_DPOP_SECRET: "6b6579626f6172646361746b6579626f6172646361746b6579626f6172646361"
+      PDS_JWT_SECRET: "r1-lab-jwt-secret"
+      PDS_ADMIN_PASSWORD: "r1-lab-admin"
+      LOG_ENABLED: "1"
+      LOG_LEVEL: "info"
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
+    volumes:
+      - ./pds-data:/data
