@@ -6,12 +6,17 @@ import { Button } from '../components/bits';
 
 type Status = 'checking' | 'redeeming' | 'redeemed' | 'error' | 'signed-out';
 
+/**
+ * A real redeem error the server returns (`apps/appview/src/http/routes/invites.ts`).
+ * There is deliberately no `AlreadyInvited` case here: a redeemer who already
+ * satisfies the invite-or-vouch gate is NOT an error response — the route
+ * succeeds with `{ ok: true, alreadyMember: true }` (the class deep-link
+ * case), handled in the component below, not here.
+ */
 function messageFor(err: ApiError): string {
   switch (err.code) {
     case 'SelfRedeem':
       return "That's your own invite link — share it with someone else instead.";
-    case 'AlreadyInvited':
-      return "You're already in — no need to redeem this one.";
     case 'InviteExpired':
       return 'This invite link has expired.';
     case 'InviteExhausted':
@@ -40,7 +45,9 @@ export function InviteScreen() {
   const navigate = useNavigate();
   const [status, setStatus] = useState<Status>('checking');
   const [message, setMessage] = useState('');
+  const [alreadyMember, setAlreadyMember] = useState(false);
   const started = useRef(false);
+  const delayRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (isPending) return;
@@ -55,16 +62,26 @@ export function InviteScreen() {
       .redeem(token)
       .then((result) => {
         setStatus('redeemed');
-        if (result.eventUri) {
-          void navigate({ to: '/events/$id', params: { id: result.eventUri } });
+        const goOn = () => {
+          if (result.eventUri) void navigate({ to: '/events/$id', params: { id: result.eventUri } });
+          else void navigate({ to: '/requests' });
+        };
+        if (result.alreadyMember) {
+          // Not an error — the class deep-link case. Hold the note on screen
+          // for a beat before moving on, rather than silently skipping it.
+          setAlreadyMember(true);
+          delayRef.current = setTimeout(goOn, 1200);
         } else {
-          void navigate({ to: '/requests' });
+          goOn();
         }
       })
       .catch((err: unknown) => {
         setStatus('error');
         setMessage(err instanceof ApiError ? messageFor(err) : 'Could not accept this invite. Try again.');
       });
+    return () => {
+      if (delayRef.current) clearTimeout(delayRef.current);
+    };
   }, [isPending, isError, me, token, navigate]);
 
   return (
@@ -72,6 +89,10 @@ export function InviteScreen() {
       <div className="safe-top safe-x pb-10 pt-10">
         {status === 'checking' || status === 'redeeming' ? (
           <p className="text-body text-ink-soft">Getting you in…</p>
+        ) : null}
+
+        {status === 'redeemed' && alreadyMember ? (
+          <p className="text-body text-ink-soft">You're already in — taking you there now.</p>
         ) : null}
 
         {status === 'signed-out' ? (

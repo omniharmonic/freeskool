@@ -46,7 +46,7 @@ function localDateFromDayString(yyyyMmDd: string): Date {
 export function ZineScreen() {
   const [trim, setTrim] = useState<Trim>('letter');
   const [month, setMonth] = useState(currentYyyyMm());
-  const { data } = useZineMonth(month);
+  const { data, isPending } = useZineMonth(month);
   const days = data?.days ?? [];
   const schoolName = data?.school.name ?? 'Free School';
   const weekdayFormat = useMemo(() => new Intl.DateTimeFormat('en-US', { weekday: 'long' }), []);
@@ -155,7 +155,7 @@ export function ZineScreen() {
               marginTop: 16,
             }}
           >
-            {days.length === 0 ? (
+            {!isPending && days.length === 0 ? (
               <p className="text-caption text-ink-soft">Nothing posted for {monthLabel(month)} yet.</p>
             ) : null}
             {days.map((day) => (

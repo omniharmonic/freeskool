@@ -86,4 +86,10 @@ describe('ZineScreen', () => {
     expect(await screen.findByText('Sign painting')).toBeInTheDocument();
     expect(screen.getByText(/venue needed/i)).toBeInTheDocument();
   });
+
+  it('does not flash "nothing posted" copy while the month query is still pending', async () => {
+    vi.mocked(api.zine.month).mockReturnValue(new Promise(() => {})); // never resolves
+    renderScreen();
+    expect(screen.queryByText(/nothing posted for/i)).not.toBeInTheDocument();
+  });
 });

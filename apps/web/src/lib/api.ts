@@ -69,6 +69,7 @@ import type {
   SkillClaimsSetResult,
   SkillDetail,
   SkillTreeResponse,
+  UpdateEventResult,
   UpdateProfileInput,
   VerifyResult,
   ZineMonthResponse,
@@ -163,8 +164,10 @@ export const api = {
   events: {
     get: (id: string) => get<EventDetail>(`/api/events/${encodeURIComponent(id)}`),
     create: (body: CreateEventInput) => post<CreateEventResult>('/api/events', body),
-    update: (id: string, body: Partial<CreateEventInput>) =>
-      put<CreateEventResult>(`/api/events/${encodeURIComponent(id)}`, body),
+    /** `series` is never sent here — the AppView rejects it with 400
+     * `SeriesEditNotSupported` (see `EventEditScreen.tsx`'s doc comment). */
+    update: (id: string, body: Omit<Partial<CreateEventInput>, 'series'>) =>
+      put<UpdateEventResult>(`/api/events/${encodeURIComponent(id)}`, body),
     icsHref: (id: string): string => `/api/events/${encodeURIComponent(id)}.ics`,
   },
 

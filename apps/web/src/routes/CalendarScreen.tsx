@@ -43,6 +43,9 @@ function CalendarEventCard({ event, ink }: { event: CalendarEvent; ink: (typeof 
         <p className="mt-1 text-caption text-ink-soft">
           {event.venueNeeded ? 'Venue needed' : event.neighborhood ?? 'Location shared after you RSVP'}
         </p>
+        {event.origin === 'listed' ? (
+          <p className="mt-1 text-caption text-ink-faint">Listed from another school</p>
+        ) : null}
         {event.tags && event.tags.length > 0 ? (
           <div className="mt-2.5 flex flex-wrap gap-2">
             {event.tags.map((tag) => (
@@ -66,7 +69,7 @@ export function CalendarScreen() {
     }),
     [year, monthIndex],
   );
-  const { data } = useCalendar(range);
+  const { data, isPending } = useCalendar(range);
   const calendarEvents = data?.events ?? [];
 
   const groups = useMemo(
@@ -144,7 +147,7 @@ export function CalendarScreen() {
       }
     >
       <div className="mt-5">
-        {groups.length === 0 ? (
+        {!isPending && groups.length === 0 ? (
           <div className="safe-x mt-2">
             <p className="text-body text-ink-soft">
               Nothing on the calendar yet.{' '}

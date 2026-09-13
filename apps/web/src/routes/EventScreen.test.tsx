@@ -160,6 +160,56 @@ describe('EventScreen', () => {
     );
   });
 
+  it('does not resend alsoPublicRecord: true on a later RSVP after clearing, without re-accepting the warning', async () => {
+    vi.mocked(api.rsvp.get)
+      .mockReset()
+      .mockResolvedValueOnce({ rsvp: null, counts: { going: 2, interested: 1 } }) // initial mount
+      .mockResolvedValueOnce({ rsvp: { status: 'going', alsoPublicRecord: true }, counts: { going: 3, interested: 1 } }) // after the first RSVP
+      .mockResolvedValue({ rsvp: null, counts: { going: 2, interested: 1 } }); // after clearing, and from then on
+
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+
+    fireEvent.click(await screen.findByRole('switch', { name: /also publish my rsvp publicly/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /yes, make it public/i }));
+    fireEvent.click(screen.getByRole('button', { name: /i'll be there/i }));
+    await waitFor(() =>
+      expect(api.rsvp.set).toHaveBeenCalledWith(EVENT_URI, { status: 'going', alsoPublicRecord: true }),
+    );
+
+    // Tapping the now-active "going" button clears the RSVP.
+    fireEvent.click(await screen.findByRole('button', { name: /you're going/i }));
+    await waitFor(() => expect(api.rsvp.clear).toHaveBeenCalledWith(EVENT_URI));
+
+    // The toggle must visibly fall back to off once the clear is reflected —
+    // carrying the old consent forward would be invisible AND wrong.
+    await waitFor(() =>
+      expect(screen.getByRole('switch', { name: /also publish my rsvp publicly/i })).toHaveAttribute(
+        'aria-checked',
+        'false',
+      ),
+    );
+
+    // RSVP again, without touching the toggle or the warning sheet at all.
+    fireEvent.click(screen.getByRole('button', { name: /i'll be there/i }));
+
+    await waitFor(() =>
+      expect(api.rsvp.set).toHaveBeenLastCalledWith(EVENT_URI, { status: 'going', alsoPublicRecord: false }),
+    );
+  });
+
+  it('shows a "Listed from another school" marker when the event is peer-routed, not hosted here', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, origin: 'listed' });
+    renderScreen();
+    expect(await screen.findByText('Listed from another school')).toBeInTheDocument();
+  });
+
+  it('shows no origin marker for a class hosted at this school', async () => {
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+    expect(screen.queryByText('Listed from another school')).not.toBeInTheDocument();
+  });
+
   it('gates "Remind me" on install state: not installed opens the install sheet instead of requesting push', async () => {
     vi.mocked(useInstallFlow).mockReturnValue({
       surface: 'ios-safari',

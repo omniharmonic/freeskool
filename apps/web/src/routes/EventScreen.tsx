@@ -94,6 +94,7 @@ export function EventScreen() {
         </div>
 
         <div className="mt-4 flex flex-wrap items-center gap-2">
+          {event.origin === 'listed' ? <SkillChip ink="ink">Listed from another school</SkillChip> : null}
           {event.venueNeeded ? <SkillChip ink="pink">Venue needed</SkillChip> : null}
           {(event.tags ?? []).map((tag) => (
             <SkillChip key={tag} ink="blue">
@@ -152,8 +153,12 @@ function EventActions({ event }: { event: EventDetail }) {
   const [remindersOn, setRemindersOn] = useState(false);
   const [reminderNote, setReminderNote] = useState<string | null>(null);
 
+  // Mirrors the server's truth exactly, including back to `false` when there is
+  // no live RSVP any more (clearing an RSVP must force re-acceptance of the
+  // permanence warning on the next one — it must never carry the old consent
+  // forward).
   useEffect(() => {
-    if (myRsvpData?.rsvp) setAlsoPublicRecord(myRsvpData.rsvp.alsoPublicRecord);
+    setAlsoPublicRecord(myRsvpData?.rsvp?.alsoPublicRecord ?? false);
   }, [myRsvpData]);
 
   const currentStatus = myRsvpData?.rsvp?.status ?? null;

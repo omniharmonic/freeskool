@@ -8,7 +8,7 @@
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
-import type { CreateEventInput, RsvpSetInput } from './types';
+import type { AttendanceRow, CreateEventInput, RsvpSetInput } from './types';
 
 export function useCalendar(range: { from?: string; to?: string; school?: string } = {}) {
   return useQuery({
@@ -151,6 +151,40 @@ export function useCreateEventMutation() {
     mutationFn: (body: CreateEventInput) => api.events.create(body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['calendar'] });
+    },
+  });
+}
+
+/** `body` never carries `series` — see the doc comment on `api.events.update`. */
+export function useUpdateEventMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Omit<Partial<CreateEventInput>, 'series'> }) =>
+      api.events.update(id, body),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ['event', variables.id] });
+      void queryClient.invalidateQueries({ queryKey: ['calendar'] });
+    },
+  });
+}
+
+/** Host-only counts for one class (`GET /api/events/:id/attendance`) — 401s/403s
+ * for anyone but the host, so `retry: false` matches `useMe()`/`useMyRsvp()`. */
+export function useAttendance(eventId: string | undefined) {
+  return useQuery({
+    queryKey: ['attendance', eventId],
+    queryFn: () => api.attendance.list(eventId as string),
+    enabled: Boolean(eventId),
+    retry: false,
+  });
+}
+
+export function useSetAttendanceMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ eventId, rows }: { eventId: string; rows: AttendanceRow[] }) => api.attendance.set(eventId, rows),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ['attendance', variables.eventId] });
     },
   });
 }

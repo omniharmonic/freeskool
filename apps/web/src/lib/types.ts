@@ -138,10 +138,33 @@ export interface CreateEventInput {
   series?: EventSeriesInput;
 }
 
+/**
+ * Mirrors `CreatedEvent` in `apps/appview/src/lib/events.ts` exactly —
+ * `createEventAsHost`'s return shape, not a flat `{uri, cid}` (the earlier,
+ * wrong guess from Task 1; see the Task 4 carry-forward note in
+ * `.superpowers/sdd/mvp-plan/progress.md`). `series`/`listing` are present
+ * only when the request had a `series`/routed on its tags.
+ */
 export interface CreateEventResult {
-  uri: string;
-  cid: string;
-  [key: string]: unknown;
+  event: { uri: string; cid: string };
+  config: { uri: string; cid: string };
+  skillLevels: Array<{ uri: string; cid: string }>;
+  series?: { uri: string; cid: string };
+  listing?: { uri: string; cid: string };
+}
+
+/**
+ * Mirrors `UpdatedEvent` in `apps/appview/src/lib/events.ts` — `PUT
+ * /api/events/:id`'s return shape. `skillLevels` is present only when the
+ * request carried `skills`; `unlisted` only when a retag tried to drop the
+ * school's curation listing.
+ */
+export interface UpdateEventResult {
+  event: { uri: string; cid: string };
+  config: { uri: string; cid: string };
+  listing?: { uri: string; cid: string };
+  skillLevels?: Array<{ uri: string; cid: string }>;
+  unlisted?: boolean;
 }
 
 // ── rsvp ─────────────────────────────────────────────────────────────────
@@ -331,6 +354,13 @@ export interface InviteMintResult {
 export interface InviteRedeemResult {
   ok: boolean;
   eventUri?: string;
+  /**
+   * True when the redeemer already satisfied the invite-or-vouch member gate
+   * (`apps/appview/src/http/routes/invites.ts`'s class-deep-link case) —
+   * redemption still succeeds, it just consumed no use and wrote no new
+   * evidence. Not an error: `AlreadyInvited` is not a real response code.
+   */
+  alreadyMember?: boolean;
 }
 
 // ── push / notifications ────────────────────────────────────────────────
