@@ -27,7 +27,7 @@ import { member, steward } from '../src/db/schema.js'
 import { runMigrations } from '../src/db/migrate.js'
 import { seedSkillTiers } from '../src/lib/skill-tiers.js'
 import { isMain } from '../src/lib/is-main.js'
-import { log } from '../src/lib/logging.js'
+import { describeError, log } from '../src/lib/logging.js'
 
 export interface CreateSchoolResult {
   did: string
@@ -134,7 +134,7 @@ export async function createSchool(options?: {
     .insert(member)
     .values({ did, door: 'custodial', firstSeenAt: seenAt, lastSeenAt: seenAt })
     .onConflictDoUpdate({ target: member.did, set: { lastSeenAt: seenAt } })
-    .catch((err) => log.warn('could not record the school as fs_member', { detail: String(err) }))
+    .catch((err) => log.warn('could not record the school as fs_member', { detail: describeError(err) }))
 
   // The founder is the bootstrap steward: the one role that cannot be derived.
   if (options?.stewardDid) {
@@ -146,11 +146,11 @@ export async function createSchool(options?: {
       .insert(member)
       .values({ did: options.stewardDid, door: 'custodial', firstSeenAt: seenAt, lastSeenAt: seenAt })
       .onConflictDoUpdate({ target: member.did, set: { lastSeenAt: seenAt } })
-      .catch((err) => log.warn('could not record the steward as fs_member', { detail: String(err) }))
+      .catch((err) => log.warn('could not record the steward as fs_member', { detail: describeError(err) }))
   }
 
   // A fresh deploy enforces the Tier B gate from the moment the school exists.
-  await seedSkillTiers().catch((err) => log.warn('skill-tier seed failed during create-school', { detail: String(err) }))
+  await seedSkillTiers().catch((err) => log.warn('skill-tier seed failed during create-school', { detail: describeError(err) }))
 
   return {
     did,

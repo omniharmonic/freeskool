@@ -27,7 +27,7 @@ process.env.CUSTODY_KEYS ??= `v1:${Buffer.alloc(32, 13).toString('base64')}`
 process.env.FEEDBACK_BALLOT_PEPPER ??= 'occ-host-test-pepper'
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { eq } from 'drizzle-orm'
+import { and, eq } from 'drizzle-orm'
 import type { Context } from 'hono'
 
 const SCHOOL = 'did:plc:occ-host-school'
@@ -102,6 +102,7 @@ import { signSessionId } from '../src/lib/crypto.js'
 import { config } from '../src/config.js'
 import { attendance, attendanceTally, custodialAccount, rsvp as rsvpTable, seriesOccurrence } from '../src/db/schema.js'
 import { resolveHostDid, resolveHostDids } from '../src/lib/events.js'
+import { bumpTally } from '../src/lib/roles.js'
 
 let available = false
 
@@ -306,5 +307,29 @@ describe('A5: re-saving the attendance sheet', () => {
     // Re-ticking credits once more, not twice.
     await save(cookie, [{ did: ATTENDEE, participated: true }])
     expect(await tallyOf(ATTENDEE)).toBe(1)
+  })
+
+  it('R3: a steward void stays voided when the host re-saves the sheet, and the tally does not move', async () => {
+    if (!available) return
+    const cookie = await cookieFor(HOST)
+    await save(cookie, [{ did: ATTENDEE, participated: true }])
+    expect(await tallyOf(ATTENDEE)).toBe(1)
+
+    // A steward voids it directly (what admin.ts#voidAttendance does), taking the credit back.
+    await testDb()
+      .update(attendance)
+      .set({ voidedAt: new Date() })
+      .where(and(eq(attendance.eventUri, OCCURRENCE_URI), eq(attendance.attendeeDid, ATTENDEE)))
+    await bumpTally(ATTENDEE, { attendedConfirmed: -1 })
+    expect(await tallyOf(ATTENDEE)).toBe(0)
+
+    // The host re-saves the sheet with the attendee still ticked.
+    const resave = await save(cookie, [{ did: ATTENDEE, participated: true }])
+    expect(resave.status).toBe(200)
+    expect(await resave.json()).toMatchObject({ tallyChanged: 0 })
+    expect(await tallyOf(ATTENDEE)).toBe(0)
+
+    const row = await testDb().select().from(attendance).where(and(eq(attendance.eventUri, OCCURRENCE_URI), eq(attendance.attendeeDid, ATTENDEE)))
+    expect(row[0]?.voidedAt).not.toBeNull()
   })
 })

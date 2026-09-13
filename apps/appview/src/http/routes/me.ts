@@ -268,6 +268,27 @@ async function hasPublishedClaim(did: string): Promise<boolean> {
 }
 
 /**
+ * R1: an index-based estimate of how many currently-public `skillClaim` records this
+ * request could not retract, used ONLY when the repo write itself could not be attempted
+ * (`NoActorCredentialError` — see `me.put('/skill-claims')` below). `keep` is the set of
+ * rkeys this request wants to remain public; anything else counts as pending. A record
+ * whose rkey cannot be parsed counts as pending too — the same fail-towards-caution
+ * direction as `hasPublishedClaim`.
+ */
+async function countPendingRetractions(did: string, keep: Set<string>): Promise<number> {
+  try {
+    const indexer = await getIndexer()
+    const { records } = await listCollection(indexer, 'skillClaim', { did, limit: 200 })
+    return records.filter((r) => {
+      const rkey = r.uri.split('/').pop()
+      return !rkey || !keep.has(rkey)
+    }).length
+  } catch {
+    return 0
+  }
+}
+
+/**
  * One claim per skill, so re-stating a level updates the existing record rather than
  * accumulating duplicates — and so that a claim can be found again in order to DELETE it
  * (A6) without keeping an app-side uri index beside the repo.
@@ -291,10 +312,31 @@ me.put('/skill-claims', async (c) => {
 
   const published: Array<{ uri: string; skill: string; level: string }> = []
   const retracted: string[] = []
-  const appSide: Array<{ skill: string; level: string; note?: string }> = []
   // The rkeys this request wants to EXIST publicly afterwards. Anything else in the repo
   // is consent that has been withdrawn.
   const keep = new Set(toPublish.map((claim) => skillClaimRkey(claim.skill)))
+
+  /**
+   * R1: PERSIST THE APP-SIDE CLAIM SET FIRST, BEFORE TOUCHING THE REPO.
+   *
+   * `needsRepo` below is true whenever anything is published OR anything might need
+   * retracting — which is most saves. If the repo write then fails with a lapsed
+   * credential (`NoActorCredentialError`), that must not cost a member their school-only
+   * save: a member who only changed a 'school'-visibility claim, or who also has an
+   * unrelated stale public claim sitting in their repo, should not lose their whole save
+   * because of a credential problem that has nothing to do with what they just typed.
+   * So the app-side set is written unconditionally, before the repo is ever touched.
+   */
+  const appSide: Array<{ skill: string; level: string; note?: string }> = []
+  for (const claim of parsed.data.claims) {
+    if (claim.visibility === 'school') {
+      appSide.push({ skill: claim.skill, level: claim.level, ...(claim.note ? { note: claim.note } : {}) })
+    }
+  }
+  await getDb()
+    .insert(appMeta)
+    .values({ key: APP_SIDE_CLAIMS_KEY(viewer.did), value: appSide, updatedAt: new Date() })
+    .onConflictDoUpdate({ target: appMeta.key, set: { value: appSide, updatedAt: new Date() } })
 
   /**
    * Does this request need the member's own credential at all? Publishing obviously does;
@@ -356,19 +398,16 @@ me.put('/skill-claims', async (c) => {
       await indexer.notify([...published.map((p) => p.uri), ...retracted]).catch(() => {})
     }
   } catch (err) {
-    if (err instanceof NoActorCredentialError) return c.json({ error: 'ReauthRequired' }, 401)
+    if (err instanceof NoActorCredentialError) {
+      // R1: the app-side claim set is already saved (above, before the repo was ever
+      // touched) — this is not a failed save, it is a save that could not reach the PDS.
+      // 200, not 401: a 401 here told the UI the whole PUT failed, which discarded the
+      // school-only write that had, in fact, already happened.
+      const pendingRetractions = await countPendingRetractions(viewer.did, keep)
+      return c.json({ published, retracted, keptAppSide: appSide.length, reauthRequired: true, pendingRetractions })
+    }
     throw err
   }
-
-  for (const claim of parsed.data.claims) {
-    if (claim.visibility === 'school') {
-      appSide.push({ skill: claim.skill, level: claim.level, ...(claim.note ? { note: claim.note } : {}) })
-    }
-  }
-  await getDb()
-    .insert(appMeta)
-    .values({ key: APP_SIDE_CLAIMS_KEY(viewer.did), value: appSide, updatedAt: new Date() })
-    .onConflictDoUpdate({ target: appMeta.key, set: { value: appSide, updatedAt: new Date() } })
 
   return c.json({ published, retracted, keptAppSide: appSide.length })
 })

@@ -40,14 +40,16 @@ const REQUEST_URI = `at://${ASKER}/freeschool.draft.request/req1`
 
 /** The member's repo, as a map — so a delete is observable. Shared with the fake agent. */
 const { repo } = vi.hoisted(() => ({ repo: new Map<string, Record<string, unknown>>() }))
-/** Flipped per test: whether the event has a live school listing. */
-const { state } = vi.hoisted(() => ({ state: { listed: true } }))
+/** Flipped per test: whether the event has a live school listing, and (R1) whether the
+ * viewer's repo credential has lapsed. */
+const { state } = vi.hoisted(() => ({ state: { listed: true, credentialLapsed: false } }))
 
 vi.mock('../src/lib/actor-agent.js', async () => {
   const actual = await vi.importActual<typeof import('../src/lib/actor-agent.js')>('../src/lib/actor-agent.js')
   return {
     ...actual,
     async actorAgent(viewer: { did: string }) {
+      if (state.credentialLapsed) throw new actual.NoActorCredentialError(viewer.did)
       return {
         com: {
           atproto: {
@@ -179,6 +181,7 @@ beforeEach(async () => {
   )
   repo.clear()
   state.listed = true
+  state.credentialLapsed = false
   await testDb().insert(custodialAccount).values([
     { did: MEMBER, handle: 'cb-member.test', email: 'm@example.org', keyVersion: 'v1' },
     { did: STEWARD_DID, handle: 'cb-steward.test', email: 's@example.org', keyVersion: 'v1' },
@@ -263,6 +266,52 @@ describe('A6: a public skill claim is retracted when consent ends', () => {
     const res = await putClaims(cookie, [])
     expect(res.status).toBe(200)
     expect(claimKeys()).toEqual([])
+  })
+})
+
+describe('R1: a lapsed repo credential does not cost the school-only save', () => {
+  it('persists the app-side claim first and returns 200 with reauthRequired, not 401', async () => {
+    if (!available) return
+    const cookie = await cookieFor(MEMBER)
+    state.credentialLapsed = true
+
+    // A mixed save: the public claim is what makes `needsRepo` true (and is what the
+    // lapsed credential blocks); the school claim is the app-side save that must survive
+    // regardless. A pure school-only request with nothing ever published needs no repo
+    // access at all (see `needsRepo` in `me.ts`), so would not exercise this path.
+    const res = await putClaims(cookie, [
+      { skill: SKILL_A, level: 'teaching', visibility: 'public' },
+      { skill: SKILL_B, level: 'practicing', visibility: 'school' },
+    ])
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { reauthRequired?: boolean; keptAppSide: number; published: unknown[] }
+    expect(body.reauthRequired).toBe(true)
+    expect(body.keptAppSide).toBe(1)
+    expect(body.published).toEqual([])
+    expect(claimKeys()).toEqual([]) // the public claim never reached the repo
+
+    // The save genuinely happened — not merely echoed in the PUT response — because a
+    // follow-up GET (which never touches the repo) sees it too.
+    const get = await createApp().request('/api/me/skill-claims', { headers: { Cookie: cookie } })
+    const getBody = (await get.json()) as { school: Array<{ skill: string; level: string }> }
+    expect(getBody.school).toEqual([{ skill: SKILL_B, level: 'practicing' }])
+  })
+
+  it('reports pendingRetractions for a public claim that could not be withdrawn', async () => {
+    if (!available) return
+    const cookie = await cookieFor(MEMBER)
+    await putClaims(cookie, [{ skill: SKILL_A, level: 'teaching', visibility: 'public' }])
+    expect(claimKeys().length).toBe(1)
+
+    state.credentialLapsed = true
+    const res = await putClaims(cookie, [{ skill: SKILL_A, level: 'teaching', visibility: 'school' }])
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { reauthRequired?: boolean; pendingRetractions?: number; keptAppSide: number }
+    expect(body.reauthRequired).toBe(true)
+    expect(body.pendingRetractions).toBe(1)
+    expect(body.keptAppSide).toBe(1)
+    // The record is untouched — the repo was never reached.
+    expect(claimKeys().length).toBe(1)
   })
 })
 

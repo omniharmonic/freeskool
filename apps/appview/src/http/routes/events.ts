@@ -326,16 +326,23 @@ events.post('/events/:id/attendance', requireViewer, async (c) => {
      * surviving evidence and the inflation was permanent.
      *
      * So: read the row's current state first, then bump only when `participated`
-     * genuinely flips. "Currently participated" means `participated AND NOT voided` — a
-     * voided row's credit was already taken back (`void-attendance`), and the upsert below
-     * un-voids it, which IS a transition back to true.
+     * genuinely flips. "Currently participated" means `participated AND NOT voided`.
+     *
+     * R3: A VOID IS A STEWARD DECISION, NOT THE HOST'S TO REVERSE. `voidedAt` is set only
+     * by the steward-approved `void-attendance` action (`admin.ts`). The host path below
+     * never clears it — it is left out of `onConflictDoUpdate`'s `set` entirely — and a
+     * voided row never counts towards the tally from this endpoint even if the host's
+     * sheet still shows the attendee ticked: `wasVoided` short-circuits the bump in both
+     * directions, so re-saving the sheet can neither re-credit a voided attendance nor
+     * double-debit it.
      */
     const existing = await db
       .select({ participated: attendance.participated, voidedAt: attendance.voidedAt })
       .from(attendance)
       .where(and(eq(attendance.eventUri, uri), eq(attendance.attendeeDid, a.did)))
       .limit(1)
-    const wasCounted = existing.length > 0 && existing[0]!.participated && existing[0]!.voidedAt === null
+    const wasVoided = existing.length > 0 && existing[0]!.voidedAt !== null
+    const wasCounted = existing.length > 0 && existing[0]!.participated && !wasVoided
 
     await db
       .insert(attendance)
@@ -350,10 +357,13 @@ events.post('/events/:id/attendance', requireViewer, async (c) => {
       })
       .onConflictDoUpdate({
         target: [attendance.eventUri, attendance.attendeeDid],
-        set: { participated: a.participated, role: a.role, attestedByDid: viewer.did, voidedAt: null },
+        // `voidedAt` deliberately absent: the host path never un-voids a row.
+        set: { participated: a.participated, role: a.role, attestedByDid: viewer.did },
       })
 
-    if (a.participated && !wasCounted) {
+    if (wasVoided) {
+      // No tally movement for a voided row, regardless of what the sheet says now.
+    } else if (a.participated && !wasCounted) {
       await bumpTally(a.did, { attendedConfirmed: 1 })
       tallyDelta++
     } else if (!a.participated && wasCounted) {
