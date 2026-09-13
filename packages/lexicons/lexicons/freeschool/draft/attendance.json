@@ -1,0 +1,51 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.attendance",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Host-attested attendance at a class. Written by the host (or by the school via the app-held credential). Sidecar to community.lexicon.calendar.event. The evidence that badges and roles are derived from.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "event",
+          "attendee",
+          "participated",
+          "createdAt"
+        ],
+        "properties": {
+          "event": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "attendee": {
+            "type": "string",
+            "format": "did"
+          },
+          "participated": {
+            "type": "boolean"
+          },
+          "role": {
+            "type": "string",
+            "knownValues": [
+              "attendee",
+              "assistant",
+              "co-host"
+            ]
+          },
+          "level": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 3,
+            "description": "Level of the session attended, copied from the event's skillLevel sidecar at attestation time."
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.request",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A needs-board post: \"I want to learn X\". community.lexicon.calendar.rsvp records may point at it (status going = \"I want this too\"). When RSVPs reach the threshold, a host may claim it.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "title",
+          "status",
+          "createdAt"
+        ],
+        "properties": {
+          "skill": {
+            "type": "string",
+            "format": "at-uri"
+          },
+          "title": {
+            "type": "string",
+            "maxLength": 1200,
+            "maxGraphemes": 120
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 20000,
+            "maxGraphemes": 2000
+          },
+          "threshold": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500,
+            "description": "RSVP count that unlocks \"claim to host\"."
+          },
+          "status": {
+            "type": "string",
+            "knownValues": [
+              "open",
+              "claimed",
+              "scheduled",
+              "closed"
+            ]
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

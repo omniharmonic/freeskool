@@ -1,0 +1,34 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.appeal",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "An appeal of a moderation action by the affected person. SPACE-ONLY (freeschool.moderation).",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "action",
+          "text",
+          "createdAt"
+        ],
+        "properties": {
+          "action": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 40000,
+            "maxGraphemes": 4000
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

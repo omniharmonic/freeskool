@@ -1,0 +1,23 @@
+{
+  "name": "freeskool",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Free School — a free, open-source, ATProto-native skill-sharing and events platform for community free schools.",
+  "author": "Benjamin Life (@omniharmonic)",
+  "license": "AGPL-3.0-or-later",
+  "packageManager": "pnpm@10.18.2",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter ./apps/* dev",
+    "build": "pnpm -r build",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck",
+    "lexicons:validate": "pnpm --filter @freeschool/lexicons validate",
+    "lexicons:gen": "pnpm --filter @freeschool/lexicons gen",
+    "infra:up": "docker compose -f infra/compose.yml up -d",
+    "infra:down": "docker compose -f infra/compose.yml down"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2"
+  }
+}

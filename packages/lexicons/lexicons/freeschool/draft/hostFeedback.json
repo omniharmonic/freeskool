@@ -1,0 +1,71 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.hostFeedback",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "Anonymous structured feedback about a host for one event. SPACE-ONLY (freeschool.feedback). Never public; the AppView releases only k-anonymous aggregates (k>=3). In v1 this shape is stored app-side behind a Spaces-shaped interface.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "event",
+          "host",
+          "direction",
+          "createdAt"
+        ],
+        "properties": {
+          "event": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "host": {
+            "type": "string",
+            "format": "did"
+          },
+          "direction": {
+            "type": "string",
+            "knownValues": [
+              "positive",
+              "negative"
+            ]
+          },
+          "aspects": {
+            "type": "ref",
+            "ref": "#aspects"
+          },
+          "text": {
+            "type": "string",
+            "maxLength": 10000,
+            "maxGraphemes": 1000
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    },
+    "aspects": {
+      "type": "object",
+      "description": "Optional 3-point ratings, aggregated only.",
+      "properties": {
+        "knowledge": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "teaching": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        },
+        "experience": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 3
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.course",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A multi-session grouping of events.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "title",
+          "sessions",
+          "createdAt"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 1600,
+            "maxGraphemes": 160
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 20000,
+            "maxGraphemes": 2000
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "type": "ref",
+              "ref": "com.atproto.repo.strongRef"
+            },
+            "minLength": 1,
+            "maxLength": 64
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "at-uri"
+            },
+            "maxLength": 8
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.skillClaim",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A self-reported skill. Lives in the person's own repo so it travels with them between schools.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "skill",
+          "level",
+          "createdAt"
+        ],
+        "properties": {
+          "skill": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "AT-URI of a freeschool.draft.skill record."
+          },
+          "level": {
+            "type": "string",
+            "knownValues": [
+              "learning",
+              "practicing",
+              "proficient",
+              "teaching"
+            ]
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 3000,
+            "maxGraphemes": 300
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

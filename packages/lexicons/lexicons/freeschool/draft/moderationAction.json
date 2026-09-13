@@ -1,0 +1,69 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.moderationAction",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "An audit-logged moderation action written as the school by the app. A written reason is mandatory. Never edits another repo; it controls the school's own listing/roles.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "action",
+          "reason",
+          "actors",
+          "createdAt"
+        ],
+        "properties": {
+          "subjectRecord": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "The record acted on (e.g. an event listing), if any."
+          },
+          "subjectDid": {
+            "type": "string",
+            "format": "did",
+            "description": "The account acted on, if any."
+          },
+          "action": {
+            "type": "string",
+            "knownValues": [
+              "remove-listing",
+              "restore-listing",
+              "suspend-role",
+              "restore-role",
+              "require-approval",
+              "close-request",
+              "void-attendance",
+              "other"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 20000,
+            "maxGraphemes": 2000,
+            "minLength": 1
+          },
+          "policyRef": {
+            "type": "string",
+            "format": "at-uri"
+          },
+          "actors": {
+            "type": "array",
+            "description": "Stewards who approved. Destructive actions require the policy threshold.",
+            "items": {
+              "type": "string",
+              "format": "did"
+            },
+            "minLength": 1,
+            "maxLength": 5
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

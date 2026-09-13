@@ -1,0 +1,71 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.school",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "The school's public declaration (one per school DID, rkey \"self\"): name, region, current policy, handle domain, and the peer schools whose PDS hosts this school's AppView follows. The peer registry as a record.",
+      "key": "literal:self",
+      "record": {
+        "type": "object",
+        "required": [
+          "name",
+          "createdAt"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 1200,
+            "maxGraphemes": 120
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 20000,
+            "maxGraphemes": 2000
+          },
+          "region": {
+            "type": "string",
+            "maxLength": 1200,
+            "maxGraphemes": 120
+          },
+          "policy": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "Current freeschool.draft.policy record."
+          },
+          "handleDomain": {
+            "type": "string",
+            "format": "handle"
+          },
+          "website": {
+            "type": "string",
+            "format": "uri"
+          },
+          "peers": {
+            "type": "array",
+            "description": "DIDs of peer schools this school federates with (their PDS hosts are followed directly).",
+            "items": {
+              "type": "string",
+              "format": "did"
+            },
+            "maxLength": 100
+          },
+          "tags": {
+            "type": "array",
+            "description": "Tags this school routes on for event.listing exchange (e.g. skillshare, free-school).",
+            "items": {
+              "type": "string",
+              "maxLength": 400,
+              "maxGraphemes": 40
+            },
+            "maxLength": 20
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

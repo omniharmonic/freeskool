@@ -1,0 +1,38 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.claim",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A host's claim on a request, converting it toward an event. Sidecar to freeschool.draft.request.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "request",
+          "createdAt"
+        ],
+        "properties": {
+          "request": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "event": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef",
+            "description": "Set once the class is scheduled."
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 6000,
+            "maxGraphemes": 600
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

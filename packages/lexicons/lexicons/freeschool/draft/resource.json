@@ -1,0 +1,61 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.resource",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A learning resource (link or file) attached to a skill and optionally an event. Input to derived skill pages.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "title",
+          "skills",
+          "createdAt"
+        ],
+        "properties": {
+          "title": {
+            "type": "string",
+            "maxLength": 1600,
+            "maxGraphemes": 160
+          },
+          "description": {
+            "type": "string",
+            "maxLength": 10000,
+            "maxGraphemes": 1000
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "at-uri"
+            },
+            "minLength": 1,
+            "maxLength": 8
+          },
+          "uri": {
+            "type": "string",
+            "format": "uri"
+          },
+          "file": {
+            "type": "blob",
+            "maxSize": 20000000
+          },
+          "license": {
+            "type": "string",
+            "description": "SPDX identifier; default CC-BY-SA-4.0",
+            "maxLength": 40
+          },
+          "event": {
+            "type": "ref",
+            "ref": "com.atproto.repo.strongRef"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

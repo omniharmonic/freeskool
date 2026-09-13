@@ -1,0 +1,48 @@
+# Free School local stack: reference PDS + Postgres.
+# Usage: ./infra/setup-env.sh && docker compose -f infra/compose.yml up -d
+services:
+  pds:
+    image: ghcr.io/bluesky-social/pds:latest
+    container_name: freeschool-pds
+    restart: unless-stopped
+    env_file: ./pds.env
+    environment:
+      PDS_DATA_DIRECTORY: /pds
+      PDS_BLOBSTORE_DISK_LOCATION: /pds/blocks
+      PDS_BLOB_UPLOAD_LIMIT: "52428800"
+      PDS_DID_PLC_URL: https://plc.directory
+      PDS_BSKY_APP_VIEW_URL: https://api.bsky.app
+      PDS_BSKY_APP_VIEW_DID: did:web:api.bsky.app
+      PDS_REPORT_SERVICE_URL: https://mod.bsky.app
+      PDS_REPORT_SERVICE_DID: did:plc:ar7c4by46qjdydhdevvrndac
+      PDS_CRAWLERS: ""
+      LOG_ENABLED: "true"
+      PDS_DEV_MODE: "true"
+      PDS_PORT: "3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./data/pds:/pds
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/xrpc/_health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: freeschool-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: freeschool
+      POSTGRES_PASSWORD: freeschool
+      POSTGRES_DB: freeschool
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U freeschool"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

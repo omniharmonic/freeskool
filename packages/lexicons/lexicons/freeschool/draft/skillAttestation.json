@@ -1,0 +1,52 @@
+{
+  "lexicon": 1,
+  "id": "freeschool.draft.skillAttestation",
+  "defs": {
+    "main": {
+      "type": "record",
+      "description": "A positive-only peer attestation that a subject has a skill. Candidate for replacement by coop.lexicon.evaluation (subject strongRef + direction) — see review packet.",
+      "key": "tid",
+      "record": {
+        "type": "object",
+        "required": [
+          "subject",
+          "skill",
+          "direction",
+          "createdAt"
+        ],
+        "properties": {
+          "subject": {
+            "type": "string",
+            "format": "did",
+            "description": "DID of the person being attested."
+          },
+          "skill": {
+            "type": "string",
+            "format": "at-uri"
+          },
+          "direction": {
+            "type": "string",
+            "knownValues": [
+              "positive"
+            ],
+            "description": "Only positive attestations are public records."
+          },
+          "context": {
+            "type": "string",
+            "format": "at-uri",
+            "description": "Optional AT-URI of the event where this was observed."
+          },
+          "note": {
+            "type": "string",
+            "maxLength": 3000,
+            "maxGraphemes": 300
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "datetime"
+          }
+        }
+      }
+    }
+  }
+}

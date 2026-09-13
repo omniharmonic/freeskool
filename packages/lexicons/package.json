@@ -1,0 +1,22 @@
+{
+  "name": "@freeschool/lexicons",
+  "version": "0.0.1",
+  "description": "freeschool.draft.* lexicon schemas (CC0) and generated TypeScript.",
+  "license": "CC0-1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "validate": "node scripts/validate.mjs",
+    "gen": "lex gen-api ./src/generated ./lexicons/**/*.json && echo generated",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@atproto/lexicon": "^0.7.14"
+  },
+  "devDependencies": {
+    "@atproto/lex-cli": "^0.10.13",
+    "typescript": "^5.9.2"
+  }
+}
