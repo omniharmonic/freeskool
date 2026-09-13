@@ -2,7 +2,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { LoadingState, PageState } from '../components/PageState';
 import { ImagePicker } from '../components/ImagePicker';
 import type { ImageInput } from '../lib/types';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { applyPrefs, readPrefs, writePrefs, type ThemeChoice } from '../lib/prefs';
 import { SessionGate } from '../components/SessionGate';
@@ -102,7 +102,7 @@ function MeContent() {
   const { data: visibilityDefaults, isPending: visibilityPending, isError: visibilityError, refetch: refetchVisibility } = useVisibilityDefaults();
   const { data: claimsData, isPending: claimsPending, isError: claimsLoadError, refetch: refetchClaims } = useMyClaims();
   const { data: skillTree } = useSkillTree();
-  const flatSkills = flattenSkills(skillTree?.skills ?? []);
+  const flatSkills = useMemo(() => flattenSkills(skillTree?.skills ?? []), [skillTree]);
 
   const updateProfileMutation = useUpdateProfileMutation();
   const setClaimsMutation = useSetSkillClaimsMutation();

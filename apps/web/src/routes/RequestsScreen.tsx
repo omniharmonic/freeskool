@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { LoadingState, PageState } from '../components/PageState';
 import { Screen } from '../components/Screen';
@@ -133,7 +133,7 @@ export function RequestsScreen() {
 
 function ComposerSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { data: skillTree } = useSkillTree();
-  const flatSkills = flattenSkills(skillTree?.skills ?? []);
+  const flatSkills = useMemo(() => flattenSkills(skillTree?.skills ?? []), [skillTree]);
   const createMutation = useCreateRequestMutation();
 
   const [title, setTitle] = useState('');
