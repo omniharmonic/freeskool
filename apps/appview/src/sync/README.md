@@ -81,7 +81,11 @@ the 15-minute backfill for free.
 1. **Per-host cursors.** `subscribeRepos` `seq` is per PDS, and `SourcePosition.cursor`
    is one opaque string, so `cursor-map.ts` encodes the whole map (`host=seq&…`,
    sorted so the encoding is canonical) and `epoch` is pinned to the peer set —
-   `<CONTRAIL_ORDERED_SOURCE_EPOCH>-peers-<n>`. Adding a peer is therefore a visible
+   `<CONTRAIL_ORDERED_SOURCE_EPOCH>-peers-<sha256 of the sorted host list>`
+   (`peerSetEpoch()` in `src/index/live-sync.ts`). A **hash, not a count**: with a count,
+   swapping one peer for another left the epoch identical, so `assertPosition()` would
+   accept a cursor map whose seq belonged to a host no longer in the set and `caughtUp`
+   could never be reached for the new one. Any change to the set is now a visible
    continuity break rather than a silent gap.
 2. **`caughtUp` / `through`.** There is no head to ask for, so `mark()` opens one
    socket per peer, takes the first event's `seq`, and closes (`markHostHead()`). A
@@ -127,6 +131,7 @@ table (7) is **not** done — see Limitations.
 | frame | action |
 |---|---|
 | `#commit` | decode the CAR, filter to the configured collections, `ingestRecords` |
+| *an event that will not index* | retry 3×, then enqueue a repo repair and let the cursor advance; a failed **delete** is also recorded in `peer:pending-delete:` for the repair to apply |
 | `#account` | map all six lexicon statuses to the stored repo status; `desynchronized` also enqueues a repo repair |
 | `#identity` | always re-resolve the DID document (the event is advisory and never says which field changed), compare `#atproto_pds` to this host, set `movedOffThisPeer` |
 | `#sync` | store the `rev`; enqueue a repo repair when it is ahead of ours |
@@ -164,6 +169,29 @@ directory emits goes through `src/lib/logging.ts` and names a peer only by its s
 their message, because a message can carry a URI. The test suite asserts that no
 `did:plc:` ever appears in captured output.
 
+## Failure handling
+
+Three distinct failures, three distinct answers:
+
+- **A dropped socket** — `Subscription` reconnects on its own, capped at 16 s, and each
+  attempt is logged by peer name.
+- **A fatal error frame** (`FutureCursor`, op −1 + close 1008) ends that iterator
+  instead. `HostSubscription` re-enters its read loop with its own exponential delay to
+  the same 16 s ceiling, and after 10 consecutive fatals with no frame delivered it
+  **quarantines** the host for 10 minutes behind a single `error` line. A delivered
+  frame resets the escalation. Without this a permanently-broken peer re-dialled at a
+  flat 1 s forever.
+- **An event that will not index** — three attempts with a short backoff, then the
+  source enqueues a repair for that repo, records any missed delete, logs at `error`
+  and **lets the cursor advance**. Throwing instead would escape
+  `MemoryRunner.trackEvent` before it commits the cursor, so the host would replay the
+  same poisoned event forever and every other repo on that peer would starve behind it.
+
+A cursor write that fails is neither fatal nor silent: the debounced flush never
+rejects (an unhandled rejection exits Node 22), never poisons its serialization chain
+(which would stop every later flush), re-queues the advance and reports the affected
+peers. Worst case we re-read a few events, which the idempotent upsert absorbs.
+
 ## Limitations
 
 - **Deletions missed during a gap are never noticed.** A `listRecords` repair only
@@ -171,7 +199,13 @@ their message, because a message can carry a URI. The test suite asserts that no
   Sync 1.1 record-state table (did, collection, rkey, cid) to diff against — R4
   §"Concrete changes" item 7, not in this step. The 15-minute backfill has the same
   blind spot.
-- **No per-host flap counters.** See "Cursor and repo state storage".
+- **No per-host flap counters.** See "Cursor and repo state storage". Quarantine and
+  reconnects are logged, but nothing is queryable.
+- **The host set is snapshotted at boot.** `startPeerLiveSync()` reads `fs_peer` once
+  and opens a socket per row; a peer added afterwards (via `PUT /api/admin/peers` or a
+  refreshed school record) is picked up by the 15-minute backfill but gets no live
+  socket until the process restarts. Hot-add would also have to re-epoch the cursor map
+  — the two are the same change — and is out of scope here.
 - **`mark()` on a quiet peer has no head.** Correct, but it means a bootstrap against a
   silent registry has nothing to catch up to.
 - **Scale.** Direct-PDS federation suits a curated peer set. R4 measured 445 repos

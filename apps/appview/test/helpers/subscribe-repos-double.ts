@@ -113,6 +113,21 @@ export function identityFrame(options: { seq: number; did: string; handle?: stri
   }
 }
 
+/**
+ * A fatal error frame (`op: -1`). R4 observed `FutureCursor` arriving exactly like
+ * this, followed by close 1008. `Subscription`'s `ensureChunkIsMessage` turns it into
+ * a thrown `XRPCError`, which ends the iterator rather than reconnecting — the
+ * fatal-error path the restart/quarantine escalation exists for.
+ */
+export function encodeErrorFrame(error: string, message?: string): Uint8Array {
+  const header = encode({ op: -1 })
+  const body = encode({ error, ...(message ? { message } : {}) } as never)
+  const out = new Uint8Array(header.length + body.length)
+  out.set(header, 0)
+  out.set(body, header.length)
+  return out
+}
+
 /** `#info` has no `seq`: it is stream metadata, and it always arrives first. */
 export function infoFrame(name: string, message?: string): Frame {
   return { t: '#info', body: { name, ...(message ? { message } : {}) } }
@@ -129,6 +144,8 @@ export interface FakePds {
   readonly headers: Array<Record<string, string | string[] | undefined>>
   /** Frames the next connection will be sent, before `send()` pushes any more. */
   setGreeting(frames: Frame[]): void
+  /** Answer every future connection with a fatal error frame, then close. */
+  setFatal(error: string | null): void
   /** Push frames to every open socket. */
   send(frames: Frame[]): void
   /** Drop every open socket without closing the listener, forcing a reconnect. */
@@ -149,6 +166,7 @@ export async function startFakePds(greeting: Frame[] = []): Promise<FakePds> {
   const cursors: Array<number | null> = []
   const headers: Array<Record<string, string | string[] | undefined>> = []
   let currentGreeting = greeting
+  let fatal: string | null = null
   let connections = 0
 
   wss.on('connection', (ws, req) => {
@@ -160,6 +178,11 @@ export async function startFakePds(greeting: Frame[] = []): Promise<FakePds> {
     open.add(ws)
     ws.on('close', () => open.delete(ws))
     ws.on('error', () => open.delete(ws))
+    if (fatal) {
+      ws.send(encodeErrorFrame(fatal, 'cursor is in the future'))
+      ws.close(1008)
+      return
+    }
     for (const frame of currentGreeting) ws.send(encodeFrame(frame))
   })
 
@@ -175,6 +198,9 @@ export async function startFakePds(greeting: Frame[] = []): Promise<FakePds> {
     headers,
     setGreeting(frames) {
       currentGreeting = frames
+    },
+    setFatal(error) {
+      fatal = error
     },
     send(frames) {
       for (const ws of open) for (const frame of frames) ws.send(encodeFrame(frame))

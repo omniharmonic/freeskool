@@ -15,12 +15,14 @@
  * fast path, never the only path. If a socket is down, or the process was off for
  * longer than a peer's stream retention, the periodic backfill still closes the gap.
  */
+import { createHash } from 'node:crypto'
 import { getCollectionNsids, ingestRecords, recordTimeUs, type IngestEvent } from '@atmo-dev/contrail'
 import { Identity } from '@freeschool/pds-follow'
 import { config } from '../config.js'
 import { getDb } from '../db/index.js'
 import { log } from '../lib/logging.js'
 import { AppMetaPeerState } from '../sync/peer-state.js'
+import { normalizePeerHost } from '../sync/cursor-map.js'
 import { PeerRepair } from '../sync/repair.js'
 import { PdsChangeSource, type IndexTarget, type PeerHostRef } from '../sync/pds-change-source.js'
 import { listPeers } from './peers.js'
@@ -29,6 +31,22 @@ import type { Indexer } from './indexer.js'
 export interface LiveSync {
   source: PdsChangeSource
   stop(): Promise<void>
+}
+
+/**
+ * The continuity epoch for one peer set.
+ *
+ * A cursor map is only comparable to another map over the SAME hosts, so the epoch
+ * has to change whenever the set does. Hashing the sorted, normalised host list —
+ * rather than counting it — is what makes swapping one peer for another a visible
+ * break: with a count, a swap kept the epoch identical, so `assertPosition()` would
+ * accept a stale map whose seq belonged to a host no longer in the set and
+ * `caughtUp` could never be reached for the new one.
+ */
+export function peerSetEpoch(base: string, hosts: string[]): string {
+  const canonical = [...new Set(hosts.map(normalizePeerHost))].sort().join('\n')
+  const digest = createHash('sha256').update(canonical).digest('hex').slice(0, 12)
+  return `${base}-peers-${digest}`
 }
 
 /** `freeschool-appview/<version> (+<public url>)`, so peer operators can contact us. */
@@ -95,28 +113,44 @@ export async function startPeerLiveSync(indexer: Indexer): Promise<LiveSync | un
   const target = contrailTarget(indexer)
   const identity = new Identity('https://plc.directory')
   const byHost = new Map(hosts.map((h) => [h.host, h]))
+  const nameForHost = (host: string) => byHost.get(normalizePeerHost(host))?.name ?? peerName(host)
+  const recordTime = (record: unknown, collection: string, fallbackUs: number) =>
+    recordTimeUs(record, collection, indexer.contrail.config, fallbackUs)
+
+  const state = new AppMetaPeerState(getDb(), {
+    // A cursor write that fails must not take the process down or stop later flushes;
+    // the store re-queues the advance, and we just need it to be visible.
+    onFlushError: (failedHosts, error) =>
+      log.warn('sync: cursor write failed; advance re-queued', {
+        peers: failedHosts.map(nameForHost).join(','),
+        detail: String(error instanceof Error ? error.name : 'unknown'),
+      }),
+  })
+
   const repair = new PeerRepair({
     collections,
     target,
-    nameForHost: (host) => byHost.get(host)?.name ?? peerName(host),
+    nameForHost,
     logger: log,
     identity,
-    allowPrivateNetwork: (host) => byHost.get(host)?.allowPrivateNetwork ?? false,
+    state,
+    allowPrivateNetwork: (host) => byHost.get(normalizePeerHost(host))?.allowPrivateNetwork ?? false,
+    recordTimeUs: recordTime,
   })
 
   const source = new PdsChangeSource({
     hosts,
-    // The epoch pins a cursor map to one peer set. Adding a peer must be a visible
-    // continuity break, not a silent gap, so the peer count is part of it.
-    epoch: `${c.CONTRAIL_ORDERED_SOURCE_EPOCH}-peers-${hosts.length}`,
+    epoch: peerSetEpoch(
+      c.CONTRAIL_ORDERED_SOURCE_EPOCH,
+      hosts.map((h) => h.host),
+    ),
     collections,
     userAgent,
-    state: new AppMetaPeerState(getDb()),
+    state,
     target,
     repair,
     logger: log,
-    recordTimeUs: (record, collection, fallbackUs) =>
-      recordTimeUs(record, collection, indexer.contrail.config, fallbackUs),
+    recordTimeUs: recordTime,
   })
 
   await source.start()

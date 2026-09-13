@@ -9,8 +9,9 @@
  * mirrors the eventual columns one-to-one, so promoting it to real tables is a data
  * copy, not a redesign:
  *
- *   peer:cursor:<host>       → <seq>
- *   peer:repo:<host>:<did>   → {"status","statusAt","movedOffThisPeer","pds","lastRev"}
+ *   peer:cursor:<host>            → <seq>
+ *   peer:repo:<host>:<did>        → {"status","statusAt","movedOffThisPeer","pds","lastRev"}
+ *   peer:pending-delete:<host>:<did> → [{"collection","rkey","at"}, …]
  *
  * Cursor writes are **debounced** (1 s, the same window Tap and the R4 spike use —
  * a busy host would otherwise fsync per event) and **monotonic**: a partitioned
@@ -19,6 +20,12 @@
  * lags the contiguous completed prefix, which makes delivery at-least-once — every
  * record write downstream must be an idempotent upsert, which contrail's
  * `ingestRecords` source-ordering guard provides.
+ *
+ * A failing cursor write must never take the process down or wedge persistence: the
+ * debounced flush is fire-and-forget, so an unhandled rejection would exit Node 22,
+ * and a poisoned serialization chain would silently stop every later flush. The
+ * flush below therefore reports the failure, re-queues the advance, resets the chain
+ * and schedules a retry.
  */
 import { eq, sql } from 'drizzle-orm'
 import type { Db } from '../db/index.js'
@@ -38,11 +45,28 @@ export interface PeerRepoState {
   lastRev?: string
 }
 
+/**
+ * A delete this AppView was told about but could not apply.
+ *
+ * Without this, a `#commit` delete whose indexing failed would leave the record
+ * visible forever: the cursor moves on, and a `listRecords` repair only reports what
+ * is still in the repo, so it can never infer the absence. The repair consults this
+ * list and applies any entry the repo no longer contains.
+ */
+export interface PendingDelete {
+  collection: string
+  rkey: string
+  at: string
+}
+
+/** Bound on the jsonb value, so a pathological repo cannot grow the row without limit. */
+export const MAX_PENDING_DELETES_PER_REPO = 500
+
 export interface PeerStateStore {
   getCursor(host: string): Promise<number | undefined>
-  /** Record progress. Monotonic and debounced; never awaits a write. */
+  /** Record progress. Monotonic and debounced; never awaits a write, never throws. */
   recordCursor(host: string, seq: number): void
-  /** Write out anything the debounce is still holding. */
+  /** Write out anything the debounce is still holding. Resolves even on failure. */
   flush(): Promise<void>
   getRepo(host: string, did: string): Promise<PeerRepoState | undefined>
   getRepoStatus(host: string, did: string): Promise<PeerRepoStatus | undefined>
@@ -53,13 +77,28 @@ export interface PeerStateStore {
     update: { movedOffThisPeer: boolean; pds?: string; at: string },
   ): Promise<void>
   setRepoRev(host: string, did: string, rev: string): Promise<void>
+  listPendingDeletes(host: string, did: string): Promise<PendingDelete[]>
+  recordPendingDelete(host: string, did: string, entry: PendingDelete): Promise<void>
+  clearPendingDeletes(host: string, did: string): Promise<void>
 }
 
 export const CURSOR_KEY_PREFIX = 'peer:cursor:'
 export const REPO_KEY_PREFIX = 'peer:repo:'
+export const PENDING_DELETE_KEY_PREFIX = 'peer:pending-delete:'
 
 export const cursorKey = (host: string) => `${CURSOR_KEY_PREFIX}${host}`
 export const repoKey = (host: string, did: string) => `${REPO_KEY_PREFIX}${host}:${did}`
+export const pendingDeleteKey = (host: string, did: string) => `${PENDING_DELETE_KEY_PREFIX}${host}:${did}`
+
+export interface PeerStateOptions {
+  flushIntervalMs?: number
+  /**
+   * Called when a cursor write fails. Receives the HOSTS whose advance could not be
+   * stored — never a DID — so the caller can name the peers in a log line. The batch
+   * is re-queued and retried on the next flush either way.
+   */
+  onFlushError?: (hosts: string[], error: unknown) => void
+}
 
 /**
  * Shared debounce + monotonic bookkeeping. Subclasses only have to say how a host's
@@ -70,8 +109,11 @@ abstract class BasePeerState implements PeerStateStore {
   private readonly highWater = new Map<string, number>()
   private timer: ReturnType<typeof setTimeout> | null = null
   private writing: Promise<void> = Promise.resolve()
+  protected readonly flushIntervalMs: number
 
-  constructor(protected readonly flushIntervalMs = 1_000) {}
+  constructor(private readonly stateOptions: PeerStateOptions = {}) {
+    this.flushIntervalMs = stateOptions.flushIntervalMs ?? 1_000
+  }
 
   protected abstract readCursor(host: string): Promise<number | undefined>
   /**
@@ -84,6 +126,8 @@ abstract class BasePeerState implements PeerStateStore {
   protected abstract writeCursor(host: string, seq: number): Promise<number>
   protected abstract readRepo(host: string, did: string): Promise<PeerRepoState | undefined>
   protected abstract writeRepo(host: string, did: string, state: PeerRepoState): Promise<void>
+  protected abstract readPendingDeletes(host: string, did: string): Promise<PendingDelete[] | undefined>
+  protected abstract writePendingDeletes(host: string, did: string, entries: PendingDelete[]): Promise<void>
 
   async getCursor(host: string): Promise<number | undefined> {
     const inMemory = this.highWater.get(host)
@@ -98,15 +142,31 @@ abstract class BasePeerState implements PeerStateStore {
     const prev = this.highWater.get(host)
     if (prev !== undefined && seq <= prev) return
     this.highWater.set(host, seq)
-    this.pending.set(host, seq)
+    this.queue(host, seq)
+  }
+
+  private queue(host: string, seq: number): void {
+    const queued = this.pending.get(host)
+    if (queued === undefined || seq > queued) this.pending.set(host, seq)
+    this.scheduleFlush()
+  }
+
+  private scheduleFlush(): void {
     if (this.timer) return
     this.timer = setTimeout(() => {
       this.timer = null
-      void this.flush()
+      // Fire-and-forget: `flush()` never rejects, but guard anyway so a future change
+      // here can never become the unhandled rejection that exits the process.
+      void this.flush().catch(() => {})
     }, this.flushIntervalMs)
     this.timer.unref?.()
   }
 
+  /**
+   * Resolves even when the underlying write fails. A failure re-queues the advance,
+   * resets the serialization chain (a rejected chain would swallow every later
+   * flush) and schedules a retry.
+   */
   async flush(): Promise<void> {
     if (this.timer) {
       clearTimeout(this.timer)
@@ -116,14 +176,28 @@ abstract class BasePeerState implements PeerStateStore {
     const batch = [...this.pending.entries()]
     this.pending.clear()
     // Serialize writes so two flushes cannot interleave and store an older seq last.
-    this.writing = this.writing.then(async () => {
+    const attempt = this.writing.then(async () => {
       for (const [host, seq] of batch) {
         // The store may report a higher cursor than we asked for — another writer got
         // there first — so adopt whatever it ended up holding.
         this.highWater.set(host, await this.writeCursor(host, seq))
       }
     })
-    return await this.writing
+    // Keep the chain resolvable no matter what this attempt does.
+    this.writing = attempt.then(
+      () => undefined,
+      () => undefined,
+    )
+    try {
+      await attempt
+    } catch (error) {
+      this.writing = Promise.resolve()
+      for (const [host, seq] of batch) this.queue(host, seq)
+      this.stateOptions.onFlushError?.(
+        batch.map(([host]) => host),
+        error,
+      )
+    }
   }
 
   async getRepo(host: string, did: string): Promise<PeerRepoState | undefined> {
@@ -160,15 +234,32 @@ abstract class BasePeerState implements PeerStateStore {
     if (current.lastRev !== undefined && current.lastRev >= rev) return
     await this.writeRepo(host, did, { ...current, lastRev: rev })
   }
+
+  async listPendingDeletes(host: string, did: string): Promise<PendingDelete[]> {
+    return (await this.readPendingDeletes(host, did)) ?? []
+  }
+
+  async recordPendingDelete(host: string, did: string, entry: PendingDelete): Promise<void> {
+    const current = await this.listPendingDeletes(host, did)
+    if (current.some((e) => e.collection === entry.collection && e.rkey === entry.rkey)) return
+    // Oldest entries fall off first: a newer missed delete is the more useful one to
+    // keep, and the list exists to bound damage rather than to be a durable queue.
+    const next = [...current, entry].slice(-MAX_PENDING_DELETES_PER_REPO)
+    await this.writePendingDeletes(host, did, next)
+  }
+
+  async clearPendingDeletes(host: string, did: string): Promise<void> {
+    await this.writePendingDeletes(host, did, [])
+  }
 }
 
 /** The production store: our own `fs_app_meta` key/value table. */
 export class AppMetaPeerState extends BasePeerState {
   constructor(
     private readonly db: Db,
-    flushIntervalMs = 1_000,
+    options: PeerStateOptions = {},
   ) {
-    super(flushIntervalMs)
+    super(options)
   }
 
   private async read<T>(key: string): Promise<T | undefined> {
@@ -210,15 +301,25 @@ export class AppMetaPeerState extends BasePeerState {
   protected async writeRepo(host: string, did: string, state: PeerRepoState): Promise<void> {
     await this.write(repoKey(host, did), state)
   }
+
+  protected async readPendingDeletes(host: string, did: string): Promise<PendingDelete[] | undefined> {
+    const value = await this.read<PendingDelete[]>(pendingDeleteKey(host, did))
+    return Array.isArray(value) ? value : undefined
+  }
+
+  protected async writePendingDeletes(host: string, did: string, entries: PendingDelete[]): Promise<void> {
+    await this.write(pendingDeleteKey(host, did), entries)
+  }
 }
 
 /** In-memory store. Used by the hermetic suites and by `mark()`/`read()` replays. */
 export class MemoryPeerState extends BasePeerState {
   private readonly cursors = new Map<string, number>()
   private readonly repos = new Map<string, PeerRepoState>()
+  private readonly deletes = new Map<string, PendingDelete[]>()
 
-  constructor(flushIntervalMs = 1_000) {
-    super(flushIntervalMs)
+  constructor(options: PeerStateOptions = {}) {
+    super(options)
   }
 
   protected async readCursor(host: string): Promise<number | undefined> {
@@ -238,5 +339,13 @@ export class MemoryPeerState extends BasePeerState {
 
   protected async writeRepo(host: string, did: string, state: PeerRepoState): Promise<void> {
     this.repos.set(repoKey(host, did), state)
+  }
+
+  protected async readPendingDeletes(host: string, did: string): Promise<PendingDelete[] | undefined> {
+    return this.deletes.get(pendingDeleteKey(host, did))
+  }
+
+  protected async writePendingDeletes(host: string, did: string, entries: PendingDelete[]): Promise<void> {
+    this.deletes.set(pendingDeleteKey(host, did), entries)
   }
 }

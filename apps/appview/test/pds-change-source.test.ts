@@ -18,8 +18,9 @@ import { closeTestDb, pgAvailable, testDb } from './helpers/pg.js'
 import { PdsChangeSource, PDS_SOURCE_SEMANTICS } from '../src/sync/pds-change-source.js'
 import { encodeCursorMap, decodeCursorMap, cursorMapReached } from '../src/sync/cursor-map.js'
 import { AppMetaPeerState, MemoryPeerState } from '../src/sync/peer-state.js'
-import { APPVIEW_VERSION, peerName, peerUserAgent } from '../src/index/live-sync.js'
-import { PeerRepair, REPAIR_SOURCE_ID } from '../src/sync/repair.js'
+import { APPVIEW_VERSION, peerName, peerSetEpoch, peerUserAgent } from '../src/index/live-sync.js'
+import { restartDelayFor } from '../src/sync/host-subscription.js'
+import { PeerRepair, REPAIR_SOURCE_ID, type PeerRepairOptions } from '../src/sync/repair.js'
 import { Identity } from '@freeschool/pds-follow'
 import { NSID } from '../src/lexicons/nsids.js'
 import {
@@ -69,10 +70,20 @@ function recordingRepair(): RepairQueue & { requests: PeerRepairRequest[] } {
   }
 }
 
-function capturingLogger(): { lines: string[]; info: (m: string, f?: object) => void; warn: (m: string, f?: object) => void } {
+function capturingLogger() {
   const lines: string[] = []
+  const errors: string[] = []
   const push = (m: string, f?: object) => lines.push(`${m} ${f ? JSON.stringify(f) : ''}`)
-  return { lines, info: push, warn: push }
+  return {
+    lines,
+    errors,
+    info: push,
+    warn: push,
+    error: (m: string, f?: object) => {
+      push(m, f)
+      errors.push(`${m} ${f ? JSON.stringify(f) : ''}`)
+    },
+  }
 }
 
 async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 10_000): Promise<void> {
@@ -474,6 +485,228 @@ describe('PdsChangeSource live sync', () => {
   })
 })
 
+/* ────────────────────── cursor persistence under write failure ────────────────────── */
+
+/**
+ * The CRITICAL case: a rejected cursor write must not become an unhandled rejection
+ * (Node 22 exits on one) and must not poison the serialization chain, which would
+ * silently stop every later flush and lose every advance after it.
+ */
+class FlakyPeerState extends MemoryPeerState {
+  failNextWrites = 0
+  writes = 0
+
+  protected override async writeCursor(host: string, seq: number): Promise<number> {
+    this.writes++
+    if (this.failNextWrites > 0) {
+      this.failNextWrites--
+      throw new Error('fs_app_meta write failed')
+    }
+    return await super.writeCursor(host, seq)
+  }
+}
+
+describe('cursor persistence when the store fails', () => {
+  const HOST = 'https://flaky.example'
+
+  it('neither rejects nor loses the advance, and the next flush still lands', async () => {
+    const failures: string[][] = []
+    const state = new FlakyPeerState({ flushIntervalMs: 5, onFlushError: (hosts) => failures.push(hosts) })
+    state.failNextWrites = 1
+
+    state.recordCursor(HOST, 10)
+    // Resolves rather than rejecting: this is called from a timer and from shutdown.
+    await expect(state.flush()).resolves.toBeUndefined()
+    expect(failures).toEqual([[HOST]])
+
+    // The advance was re-queued, so a later flush writes it — the chain is not poisoned.
+    await state.flush()
+    expect(await new MemoryPeerStateView(state).stored(HOST)).toBe(10)
+
+    // And the store keeps working afterwards.
+    state.recordCursor(HOST, 11)
+    await state.flush()
+    expect(await new MemoryPeerStateView(state).stored(HOST)).toBe(11)
+  })
+
+  it('does not emit an unhandled rejection from the debounced flush', async () => {
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => unhandled.push(reason)
+    process.on('unhandledRejection', onUnhandled)
+    try {
+      const state = new FlakyPeerState({ flushIntervalMs: 5 })
+      state.failNextWrites = 1
+      // No await anywhere: exactly how the live source records a cursor.
+      state.recordCursor(HOST, 7)
+      await new Promise((r) => setTimeout(r, 120))
+      expect(unhandled).toEqual([])
+      // It retried on its own schedule and the value landed.
+      expect(await new MemoryPeerStateView(state).stored(HOST)).toBe(7)
+    } finally {
+      process.off('unhandledRejection', onUnhandled)
+    }
+  })
+})
+
+/** Reads what actually reached the store, bypassing the in-memory high-water mark. */
+class MemoryPeerStateView {
+  constructor(private readonly state: MemoryPeerState) {}
+  async stored(host: string): Promise<number | undefined> {
+    // `getCursor` would answer from the optimistic high-water map; go to the backing
+    // map so a failed write cannot look like a successful one.
+    return (this.state as unknown as { cursors: Map<string, number> }).cursors.get(host)
+  }
+}
+
+/* ─────────────────────── backoff, quarantine and handler retry ─────────────────────── */
+
+describe('fatal-error backoff', () => {
+  it('escalates exponentially to the reconnect ceiling', () => {
+    expect(restartDelayFor(1, 1_000, 16_000)).toBe(1_000)
+    expect(restartDelayFor(2, 1_000, 16_000)).toBe(2_000)
+    expect(restartDelayFor(3, 1_000, 16_000)).toBe(4_000)
+    expect(restartDelayFor(5, 1_000, 16_000)).toBe(16_000)
+    // Capped, never beyond: a small registry must not park itself for minutes.
+    expect(restartDelayFor(20, 1_000, 16_000)).toBe(16_000)
+    expect(restartDelayFor(1, 30_000, 16_000)).toBe(16_000)
+  })
+})
+
+describe('PdsChangeSource resilience', () => {
+  const running: Array<{ stop: () => Promise<void> }> = []
+  const servers: FakePds[] = []
+
+  afterEach(async () => {
+    while (running.length) await running.pop()!.stop()
+    while (servers.length) await servers.pop()!.close()
+  })
+
+  it('quarantines a host that keeps answering with a fatal error frame', async () => {
+    const fake = await startFakePds([])
+    servers.push(fake)
+    fake.setFatal('FutureCursor')
+    const logger = capturingLogger()
+    const src = new PdsChangeSource({
+      hosts: [{ host: fake.host, name: 'fake-peer' }],
+      epoch: 'test-epoch-1',
+      collections: [NSID.event],
+      userAgent: 'freeschool-appview/test (+http://localhost:4000)',
+      unauthenticatedCommits: true,
+      state: new MemoryPeerState(),
+      target: recordingTarget(),
+      repair: recordingRepair(),
+      logger,
+      restartDelayMs: 5,
+      maxReconnectSeconds: 1,
+      fatalFailureLimit: 3,
+      // Long enough that a re-dial during the window would be observable.
+      quarantineMs: 5_000,
+    })
+    running.push(src)
+    await src.start()
+
+    await waitFor(() => logger.errors.some((l) => l.includes('peer quarantined')), 15_000)
+    const dialsAtQuarantine = fake.connections
+    expect(dialsAtQuarantine).toBeGreaterThanOrEqual(3)
+    // Parked: no further dials while the quarantine window is open.
+    await new Promise((r) => setTimeout(r, 300))
+    expect(fake.connections).toBe(dialsAtQuarantine)
+    // One error line, naming the peer and never a DID.
+    const quarantines = logger.errors.filter((l) => l.includes('peer quarantined'))
+    expect(quarantines).toHaveLength(1)
+    expect(quarantines[0]).toContain('fake-peer')
+    expect(logger.lines.join('\n')).not.toContain('did:plc:')
+  })
+
+  it('retries a failing event, then repairs the repo and lets the cursor advance', async () => {
+    const { frame } = await commitFrame({
+      seq: 77,
+      repo: DID,
+      collection: NSID.event,
+      rkey: '3lpoisoned001',
+      record: eventRecord('Will not index'),
+    })
+    const fake = await startFakePds([frame])
+    servers.push(fake)
+    const repair = recordingRepair()
+    const state = new MemoryPeerState({ flushIntervalMs: 5 })
+    const logger = capturingLogger()
+    let attempts = 0
+    const src = new PdsChangeSource({
+      hosts: [{ host: fake.host, name: 'fake-peer' }],
+      epoch: 'test-epoch-1',
+      collections: [NSID.event],
+      userAgent: 'freeschool-appview/test (+http://localhost:4000)',
+      unauthenticatedCommits: true,
+      state,
+      target: {
+        async ingest() {
+          attempts++
+          throw new Error('projection is down')
+        },
+      },
+      repair,
+      logger,
+      handlerAttempts: 3,
+      handlerRetryDelayMs: 5,
+      maxReconnectSeconds: 1,
+    })
+    running.push(src)
+    await src.start()
+
+    await waitFor(() => repair.requests.length >= 1)
+    expect(attempts).toBe(3)
+    expect(repair.requests[0]).toMatchObject({ host: fake.host, did: DID, reason: 'index-failed' })
+    // The cursor advances: wedging this host on one poisoned record would starve
+    // every other repo on it.
+    await src.flush()
+    expect(await state.getCursor(fake.host)).toBe(77)
+    expect(logger.errors.join('\n')).toContain('giving up on an event')
+    expect(logger.lines.join('\n')).not.toContain('did:plc:')
+  })
+
+  it('records a failed delete so a later repair can apply it', async () => {
+    const { frame } = await commitFrame({
+      seq: 78,
+      repo: DID,
+      collection: NSID.event,
+      rkey: '3lvanished002',
+      record: eventRecord('Deleted but not indexed'),
+      action: 'delete',
+    })
+    const fake = await startFakePds([frame])
+    servers.push(fake)
+    const repair = recordingRepair()
+    const state = new MemoryPeerState({ flushIntervalMs: 5 })
+    const src = new PdsChangeSource({
+      hosts: [{ host: fake.host, name: 'fake-peer' }],
+      epoch: 'test-epoch-1',
+      collections: [NSID.event],
+      userAgent: 'freeschool-appview/test (+http://localhost:4000)',
+      unauthenticatedCommits: true,
+      state,
+      target: {
+        async ingest() {
+          throw new Error('projection is down')
+        },
+      },
+      repair,
+      logger: capturingLogger(),
+      handlerAttempts: 2,
+      handlerRetryDelayMs: 5,
+      maxReconnectSeconds: 1,
+    })
+    running.push(src)
+    await src.start()
+
+    await waitFor(() => repair.requests.length >= 1)
+    // Without this the record stays visible forever: listRecords cannot report an absence.
+    expect(await state.listPendingDeletes(fake.host, DID)).toEqual([
+      { collection: NSID.event, rkey: '3lvanished002', at: expect.any(String) },
+    ])
+  })
+})
+
 /* ──────────────────────────────── the repair worker ──────────────────────────────── */
 
 describe('PeerRepair', () => {
@@ -527,18 +760,28 @@ describe('PeerRepair', () => {
     return handle
   }
 
-  it('re-reads every repo on the host with listRecords and ingests the result', async () => {
-    const pds = await fakeListRecords([{ rkey: '3lrepaired001', value: eventRecord('Recovered from a gap') }])
+  function repairFor(overrides: Partial<PeerRepairOptions> = {}) {
     const target = recordingTarget()
+    const state = new MemoryPeerState()
+    const logger = capturingLogger()
     const repair = new PeerRepair({
       collections: [NSID.event, NSID.rsvp],
       target,
+      state,
       nameForHost: () => 'fake-peer',
-      logger: capturingLogger(),
+      logger,
       identity: new Identity('https://plc.directory'),
+      // 127.0.0.1 stands in for a trusted private PDS, so the DID-document check is
+      // deliberately bypassed except in the tests that exercise it.
       allowPrivateNetwork: () => true,
-      listReposForHost: async () => [DID, OTHER_DID],
+      ...overrides,
     })
+    return { repair, target, state, logger }
+  }
+
+  it('re-reads every repo on the host with listRecords and ingests the result', async () => {
+    const pds = await fakeListRecords([{ rkey: '3lrepaired001', value: eventRecord('Recovered from a gap') }])
+    const { repair, target } = repairFor({ listReposForHost: async () => [DID, OTHER_DID] })
 
     await repair.enqueue({ host: pds.host, reason: 'OutdatedCursor' })
     await repair.drain()
@@ -556,16 +799,123 @@ describe('PeerRepair', () => {
     }
   })
 
+  it("stamps the record's own application time, not the repair's wall clock", async () => {
+    const record = eventRecord('Starts in October')
+    const pds = await fakeListRecords([{ rkey: '3lrepaired002', value: record }])
+    // The same seam live-sync hands contrail's `recordTimeUs`: for `event` the
+    // configured time field is `startsAt`.
+    const { repair, target } = repairFor({
+      listReposForHost: async () => [DID],
+      recordTimeUs: (value: unknown, collection: string, fallbackUs: number) => {
+        const startsAt = (value as { startsAt?: string }).startsAt
+        return collection === NSID.event && startsAt ? Date.parse(startsAt) * 1000 : fallbackUs
+      },
+    })
+
+    await repair.enqueue({ host: pds.host, reason: 'OutdatedCursor' })
+    await repair.drain()
+
+    expect(target.events).toHaveLength(1)
+    expect(target.events[0]!.time_us).toBe(Date.parse('2026-10-01T18:00:00.000Z') * 1000)
+  })
+
+  it('applies a delete the live source could not, once the repo confirms it is gone', async () => {
+    // The page holds a DIFFERENT rkey, so the pending one really is absent.
+    const pds = await fakeListRecords([{ rkey: '3lstillthere', value: eventRecord('Still listed') }])
+    const { repair, target, state } = repairFor({ listReposForHost: async () => [DID] })
+    await state.recordPendingDelete(pds.host, DID, {
+      collection: NSID.event,
+      rkey: '3lvanished001',
+      at: '2026-09-12T12:00:00.000Z',
+    })
+
+    await repair.enqueue({ host: pds.host, reason: 'index-failed', did: DID })
+    await repair.drain()
+
+    const deletes = target.events.filter((e) => e.operation === 'delete')
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0]!.uri).toBe(`at://${DID}/${NSID.event}/3lvanished001`)
+    expect(deletes[0]!.time_us).toBe(Date.parse('2026-09-12T12:00:00.000Z') * 1000)
+    // Applied means done: the entry must not be replayed on the next repair.
+    expect(await state.listPendingDeletes(pds.host, DID)).toEqual([])
+  })
+
+  it('drops a pending delete for a record the repo still holds rather than deleting it', async () => {
+    const pds = await fakeListRecords([{ rkey: '3lrecreated001', value: eventRecord('Created again') }])
+    const { repair, target, state } = repairFor({ listReposForHost: async () => [DID] })
+    await state.recordPendingDelete(pds.host, DID, {
+      collection: NSID.event,
+      rkey: '3lrecreated001',
+      at: '2026-09-12T12:00:00.000Z',
+    })
+
+    await repair.enqueue({ host: pds.host, reason: 'index-failed', did: DID })
+    await repair.drain()
+
+    expect(target.events.filter((e) => e.operation === 'delete')).toHaveLength(0)
+    expect(target.events).toHaveLength(1)
+    expect(await state.listPendingDeletes(pds.host, DID)).toEqual([])
+  })
+
+  it('skips a repo already flagged as moved off this peer', async () => {
+    const pds = await fakeListRecords([{ rkey: '3lmoved001', value: eventRecord('Not ours any more') }])
+    const { repair, target, state } = repairFor({ listReposForHost: async () => [DID] })
+    await state.setRepoIdentity(pds.host, DID, {
+      movedOffThisPeer: true,
+      pds: 'https://elsewhere.example',
+      at: '2026-09-12T12:00:00.000Z',
+    })
+
+    await repair.enqueue({ host: pds.host, reason: 'OutdatedCursor' })
+    await repair.drain()
+
+    expect(pds.calls).toHaveLength(0)
+    expect(target.events).toHaveLength(0)
+  })
+
+  it('will not trust a public peer for a repo whose DID document names another host', async () => {
+    const pds = await fakeListRecords([{ rkey: '3lnotours001', value: eventRecord('Someone else\u2019s repo') }])
+    const resolved: string[] = []
+    const { repair, target } = repairFor({
+      // A public peer: the DID document, not `listRepos`, decides.
+      allowPrivateNetwork: () => false,
+      listReposForHost: async () => [DID, OTHER_DID],
+      resolvePdsEndpoint: async (did: string) => {
+        resolved.push(did)
+        return did === DID ? 'https://somewhere-else.example' : pds.host
+      },
+    })
+
+    await repair.enqueue({ host: pds.host, reason: 'OutdatedCursor' })
+    await repair.drain()
+
+    expect(resolved).toEqual([DID, OTHER_DID])
+    // Only the repo the DID document actually homes here was read.
+    expect(new Set(pds.calls.map((c) => c.repo))).toEqual(new Set([OTHER_DID]))
+    expect(target.events.every((e) => e.did === OTHER_DID)).toBe(true)
+  })
+
+  it('refuses a repo whose identity cannot be resolved at all', async () => {
+    const pds = await fakeListRecords([{ rkey: '3lunknown001', value: eventRecord('Unresolvable') }])
+    const { repair, target } = repairFor({
+      allowPrivateNetwork: () => false,
+      listReposForHost: async () => [DID],
+      resolvePdsEndpoint: async () => {
+        throw new Error('plc unreachable')
+      },
+    })
+
+    await repair.enqueue({ host: pds.host, reason: 'OutdatedCursor' })
+    await repair.drain()
+
+    expect(pds.calls).toHaveLength(0)
+    expect(target.events).toHaveLength(0)
+  })
+
   it('does not repeat a repair for the same host inside the cooldown', async () => {
     const pds = await fakeListRecords([])
     let listed = 0
-    const repair = new PeerRepair({
-      collections: [NSID.event],
-      target: recordingTarget(),
-      nameForHost: () => 'fake-peer',
-      logger: capturingLogger(),
-      identity: new Identity('https://plc.directory'),
-      allowPrivateNetwork: () => true,
+    const { repair } = repairFor({
       cooldownMs: 60_000,
       listReposForHost: async () => {
         listed++
@@ -581,13 +931,7 @@ describe('PeerRepair', () => {
   it('stops accepting work once stopped', async () => {
     const pds = await fakeListRecords([])
     let listed = 0
-    const repair = new PeerRepair({
-      collections: [NSID.event],
-      target: recordingTarget(),
-      nameForHost: () => 'fake-peer',
-      logger: capturingLogger(),
-      identity: new Identity('https://plc.directory'),
-      allowPrivateNetwork: () => true,
+    const { repair } = repairFor({
       listReposForHost: async () => {
         listed++
         return [DID]
@@ -611,6 +955,19 @@ describe('live-sync wiring', () => {
     expect(peerUserAgent(APPVIEW_VERSION, 'https://freeschool.example')).toBe(
       `freeschool-appview/${manifest.version} (+https://freeschool.example)`,
     )
+  })
+
+  it('derives the epoch from the host SET, so swapping a peer is a visible break', () => {
+    const a = peerSetEpoch('dev-1', ['https://one.example', 'https://two.example'])
+    // Order and duplicates must not matter: the same set is the same epoch.
+    expect(peerSetEpoch('dev-1', ['https://two.example', 'https://one.example/'])).toBe(a)
+    expect(peerSetEpoch('dev-1', ['https://one.example', 'https://two.example', 'https://one.example'])).toBe(a)
+    // Same COUNT, different hosts — the bug a count-based epoch had, because the
+    // stale cursor map would then pass assertPosition and stall caughtUp forever.
+    expect(peerSetEpoch('dev-1', ['https://one.example', 'https://three.example'])).not.toBe(a)
+    expect(peerSetEpoch('dev-1', ['https://one.example'])).not.toBe(a)
+    expect(peerSetEpoch('dev-2', ['https://one.example', 'https://two.example'])).not.toBe(a)
+    expect(a.startsWith('dev-1-peers-')).toBe(true)
   })
 
   it('names a peer by its leading label, but keeps an IP literal whole', () => {
@@ -638,20 +995,20 @@ describe.skipIf(!PG_AVAILABLE)('AppMetaPeerState (live Postgres)', () => {
   })
 
   it('persists a cursor monotonically across store instances', async () => {
-    const one = new AppMetaPeerState(testDb(), 5)
+    const one = new AppMetaPeerState(testDb(), { flushIntervalMs: 5 })
     one.recordCursor(host, 1_030_000_000)
     await one.flush()
     // `bigint` territory: R4 notes one live host was already past 1.03e9.
     expect(await new AppMetaPeerState(testDb()).getCursor(host)).toBe(1_030_000_000)
 
-    const two = new AppMetaPeerState(testDb(), 5)
+    const two = new AppMetaPeerState(testDb(), { flushIntervalMs: 5 })
     two.recordCursor(host, 12)
     await two.flush()
     expect(await new AppMetaPeerState(testDb()).getCursor(host)).toBe(1_030_000_000)
   })
 
   it('persists repo status, the moved flag and the newest rev without losing the others', async () => {
-    const store = new AppMetaPeerState(testDb(), 5)
+    const store = new AppMetaPeerState(testDb(), { flushIntervalMs: 5 })
     await store.setRepoStatus(host, DID, 'desynchronized', '2026-09-12T10:00:00.000Z')
     await store.setRepoIdentity(host, DID, { movedOffThisPeer: true, pds: 'https://new.example', at: '2026-09-12T10:01:00.000Z' })
     await store.setRepoRev(host, DID, '3lzzzzzzzzzz2')

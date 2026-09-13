@@ -35,8 +35,15 @@ import { IdResolver } from '@atproto/identity'
 import { lexToJson } from '@freeschool/pds-follow'
 import { cursorMapReached, decodeCursorMap, encodeCursorMap, normalizePeerHost, type CursorMap } from './cursor-map.js'
 import { accountStatusFrom, collectionMatcher, OUTDATED_CURSOR, type WireFrame } from './frame-handlers.js'
-import { DEFAULT_MAX_RECONNECT_SECONDS, HostSubscription, markHostHead, SUBSCRIBE_REPOS } from './host-subscription.js'
+import {
+  DEFAULT_MAX_RECONNECT_SECONDS,
+  HostSubscription,
+  markHostHead,
+  SUBSCRIBE_REPOS,
+  type OrderedFrame,
+} from './host-subscription.js'
 import type { PeerStateStore } from './peer-state.js'
+import { safe } from '../lib/logging.js'
 
 export const DEFAULT_SOURCE_ID = 'pds-subscribe-repos'
 
@@ -75,16 +82,18 @@ export interface PeerRepairRequest {
   host: string
   /** Omitted for a whole-host repair. */
   did?: string
-  reason: 'OutdatedCursor' | 'sync-ahead' | 'desynchronized'
+  reason: 'OutdatedCursor' | 'sync-ahead' | 'desynchronized' | 'index-failed'
 }
 
 export interface RepairQueue {
   enqueue(request: PeerRepairRequest): Promise<void>
 }
 
+/** The subset of `src/lib/logging.ts`'s `log` this directory uses. */
 export interface SyncLogger {
   info(msg: string, fields?: Record<string, string | number | boolean>): void
   warn(msg: string, fields?: Record<string, string | number | boolean>): void
+  error(msg: string, fields?: Record<string, string | number | boolean>): void
 }
 
 export interface PdsChangeSourceOptions {
@@ -116,6 +125,12 @@ export interface PdsChangeSourceOptions {
   recordTimeUs?: (record: unknown, collection: string, fallbackUs: number) => number
   /** Idle timeout for one `read()` replay before it gives up on reaching `through`. */
   readIdleTimeoutMs?: number
+  /** Attempts per event before the source gives up and repairs instead. */
+  handlerAttempts?: number
+  handlerRetryDelayMs?: number
+  fatalFailureLimit?: number
+  quarantineMs?: number
+  restartDelayMs?: number
 }
 
 export class PdsChangeSource implements ChangeSource {
@@ -152,9 +167,19 @@ export class PdsChangeSource implements ChangeSource {
         ...(this.options.heartbeatIntervalMs !== undefined
           ? { heartbeatIntervalMs: this.options.heartbeatIntervalMs }
           : {}),
+        ...(this.options.restartDelayMs !== undefined ? { restartDelayMs: this.options.restartDelayMs } : {}),
+        ...(this.options.fatalFailureLimit !== undefined
+          ? { fatalFailureLimit: this.options.fatalFailureLimit }
+          : {}),
+        ...(this.options.quarantineMs !== undefined ? { quarantineMs: this.options.quarantineMs } : {}),
+        ...(this.options.handlerAttempts !== undefined ? { handlerAttempts: this.options.handlerAttempts } : {}),
+        ...(this.options.handlerRetryDelayMs !== undefined
+          ? { handlerRetryDelayMs: this.options.handlerRetryDelayMs }
+          : {}),
         onCursor: (seq) => this.options.state.recordCursor(peer.host, seq),
         handle: (frame) => this.handleFrame(peer, frame),
         handleInfo: (frame) => this.handleInfo(peer, frame),
+        onHandlerFailure: (frame, error) => this.handleIndexFailure(peer, frame, error),
         onReconnect: (attempt, error) => {
           this.options.logger.info('sync: peer reconnect', {
             peer: peer.name,
@@ -164,6 +189,13 @@ export class PdsChangeSource implements ChangeSource {
         },
         onError: (error) => {
           this.options.logger.warn('sync: peer stream error', { peer: peer.name, detail: describe(error) })
+        },
+        onQuarantine: (ms, failures) => {
+          this.options.logger.error('sync: peer quarantined after repeated fatal errors', {
+            peer: peer.name,
+            failures,
+            minutes: Math.round(ms / 60_000),
+          })
         },
       })
       this.subscriptions.set(peer.host, subscription)
@@ -190,7 +222,7 @@ export class PdsChangeSource implements ChangeSource {
 
   /* ──────────────────────────────── frame handling ────────────────────────────── */
 
-  private async handleFrame(peer: PeerHostRef, frame: WireFrame): Promise<void> {
+  private async handleFrame(peer: PeerHostRef, frame: OrderedFrame): Promise<void> {
     switch (frame.kind) {
       case 'commit':
         return await this.handleCommit(peer, frame)
@@ -200,9 +232,40 @@ export class PdsChangeSource implements ChangeSource {
         return await this.handleIdentity(peer, frame)
       case 'sync':
         return await this.handleSync(peer, frame)
-      case 'info':
-        return await this.handleInfo(peer, frame)
     }
+  }
+
+  /**
+   * An event we could not index after every retry. The cursor is about to move past
+   * it, so the only recovery left is to have the repo re-read.
+   *
+   * A failed DELETE needs more than that: `listRecords` reports what a repo still
+   * holds and can never infer an absence, so the intended deletion is recorded for
+   * the repair to apply once it confirms the record really is gone.
+   */
+  private async handleIndexFailure(peer: PeerHostRef, frame: OrderedFrame, error: unknown): Promise<void> {
+    this.options.logger.error('sync: giving up on an event; repairing the repo', {
+      peer: peer.name,
+      kind: frame.kind,
+      seq: frame.seq,
+      detail: describe(error),
+    })
+    if (frame.kind === 'commit') {
+      for (const op of frame.commit.ops) {
+        if (op.action !== 'delete') continue
+        const [collection, rkey] = splitDataKey(op.path)
+        if (!collection || !rkey || !this.matchCollection(collection)) continue
+        await this.options.state
+          .recordPendingDelete(peer.host, frame.did, { collection, rkey, at: frame.commit.time })
+          .catch((err) =>
+            this.options.logger.warn('sync: could not record a pending delete', {
+              peer: peer.name,
+              detail: describe(err),
+            }),
+          )
+      }
+    }
+    await this.options.repair.enqueue({ host: peer.host, did: frame.did, reason: 'index-failed' })
   }
 
   private async handleCommit(peer: PeerHostRef, frame: Extract<WireFrame, { kind: 'commit' }>): Promise<void> {
@@ -441,10 +504,20 @@ export class PdsChangeSource implements ChangeSource {
         clearTimeout(idle)
         idle = setTimeout(() => settle?.(), idleMs)
         if (frame.kind === 'commit') await onCommit(frame)
-        if (frame.kind !== 'info' && frame.seq >= target) {
+        if (frame.seq >= target) {
           reached = true
           settle?.()
         }
+      },
+      // A replay that cannot decode an event must not silently drop it from the batch
+      // contrail is about to trust, so end the replay short of `through` instead: the
+      // checkpoint then stays behind and `caughtUp` stays false.
+      onHandlerFailure: async (_frame, error) => {
+        this.options.logger.warn('sync: replay could not decode an event', {
+          peer: peer.name,
+          detail: describe(error),
+        })
+        settle?.()
       },
       handleInfo: async (frame) => {
         if (frame.name === OUTDATED_CURSOR) {
@@ -454,6 +527,8 @@ export class PdsChangeSource implements ChangeSource {
       onReconnect: (attempt, error) =>
         this.options.logger.info('sync: peer reconnect', { peer: peer.name, attempt, detail: describe(error) }),
       onError: (error) => this.options.logger.warn('sync: peer replay error', { peer: peer.name, detail: describe(error) }),
+      onQuarantine: (ms) =>
+        this.options.logger.warn('sync: replay host quarantined', { peer: peer.name, minutes: Math.round(ms / 60_000) }),
     })
     const onAbort = () => settle?.()
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -505,8 +580,19 @@ function frameTimeUs(time: string): number {
   return Number.isFinite(ms) ? ms * 1000 : Date.now() * 1000
 }
 
-/** Error name only. R9: never a message that could carry a DID, URI or record. */
+/**
+ * A diagnosable error string. `safe()` (src/lib/logging.ts) strips DIDs, emails and
+ * AT-URIs and truncates, so the message can be kept: the name alone made real
+ * failures ("Error") indistinguishable from each other.
+ */
 function describe(err: unknown): string {
-  if (err instanceof Error) return err.name
-  return typeof err === 'string' ? 'error' : 'unknown'
+  if (err instanceof Error) return `${err.name}: ${safe(err.message)}`
+  return safe(err)
+}
+
+/** `<collection>/<rkey>` from a `#commit` op path. */
+function splitDataKey(path: string): [string | undefined, string | undefined] {
+  const i = path.indexOf('/')
+  if (i <= 0) return [undefined, undefined]
+  return [path.slice(0, i), path.slice(i + 1) || undefined]
 }
