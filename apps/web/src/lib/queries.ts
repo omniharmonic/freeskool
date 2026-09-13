@@ -8,7 +8,18 @@
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
-import type { AttendanceRow, CreateEventInput, RsvpSetInput } from './types';
+import type {
+  AttendanceRow,
+  CreateEventInput,
+  CreateRequestInput,
+  NotificationPref,
+  RequestClaimInput,
+  RsvpSetInput,
+  SetNewsletterInput,
+  SetPublicRoleInput,
+  SkillClaimsSetInput,
+  UpdateProfileInput,
+} from './types';
 
 export function useCalendar(range: { from?: string; to?: string; school?: string } = {}) {
   return useQuery({
@@ -74,6 +85,135 @@ export function useMyClaims() {
   return useQuery({
     queryKey: ['my-claims'],
     queryFn: () => api.me.skillClaims(),
+  });
+}
+
+/** `GET /api/me` — profile fields plus role/evidence/rsvps; 401s with nobody
+ * signed in, so `retry: false` matches `useMe()`. */
+export function useMeProfile() {
+  return useQuery({
+    queryKey: ['me-profile'],
+    queryFn: () => api.me.profile(),
+    retry: false,
+  });
+}
+
+export function useMeBadges() {
+  return useQuery({
+    queryKey: ['me-badges'],
+    queryFn: () => api.me.badges(),
+    retry: false,
+  });
+}
+
+/** What this session is allowed to make public, and why (`oauthDoor`). */
+export function useVisibilityDefaults() {
+  return useQuery({
+    queryKey: ['visibility-defaults'],
+    queryFn: () => api.me.visibilityDefaults(),
+    retry: false,
+  });
+}
+
+export function useUpdateProfileMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: UpdateProfileInput) => api.me.updateProfile(body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['me-profile'] });
+    },
+  });
+}
+
+/** Never retries: a 400 `TierBConfirmRequired` (or 403 `PublicTogglesLocked`)
+ * is the caller's cue to show a confirm dialog or a locked-toggle notice, not
+ * a transient failure to retry past. */
+export function useSetSkillClaimsMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SkillClaimsSetInput) => api.me.setSkillClaims(body),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['my-claims'] });
+    },
+  });
+}
+
+export function useSetPublicRoleMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SetPublicRoleInput) => api.me.setPublicRole(body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['me-badges'] });
+    },
+  });
+}
+
+export function useNewsletterSubscription() {
+  return useQuery({
+    queryKey: ['newsletter'],
+    queryFn: () => api.me.newsletter(),
+    retry: false,
+  });
+}
+
+export function useSetNewsletterMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SetNewsletterInput) => api.me.setNewsletter(body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['newsletter'] });
+    },
+  });
+}
+
+export function useNotificationPrefs() {
+  return useQuery({
+    queryKey: ['notification-prefs'],
+    queryFn: () => api.notifications.prefs(),
+    retry: false,
+  });
+}
+
+export function useSetNotificationPrefsMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (prefs: NotificationPref[]) => api.notifications.setPrefs(prefs),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['notification-prefs'] });
+    },
+  });
+}
+
+export function useCreateRequestMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: CreateRequestInput) => api.requests.create(body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['requests'] });
+    },
+  });
+}
+
+/** Toggles the viewer's own "I want this too" interest on a request. */
+export function useRequestRsvpMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (requestUri: string) => api.requests.rsvp(requestUri),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['requests'] });
+    },
+  });
+}
+
+export function useClaimRequestMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ requestUri, body }: { requestUri: string; body: RequestClaimInput }) =>
+      api.requests.claim(requestUri, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['requests'] });
+    },
   });
 }
 

@@ -10,6 +10,7 @@ import { SkillsScreen } from './routes/SkillsScreen';
 import { SkillScreen } from './routes/SkillScreen';
 import { RequestsScreen } from './routes/RequestsScreen';
 import { MeScreen } from './routes/MeScreen';
+import { NotificationSettingsScreen } from './routes/NotificationSettingsScreen';
 import { SignInScreen } from './routes/SignInScreen';
 import { VerifyScreen } from './routes/VerifyScreen';
 import { OAuthConfirmScreen } from './routes/OAuthConfirmScreen';
@@ -63,7 +64,7 @@ const routes = [
     component: Placeholder,
   }), // Task 7
   createRoute({ getParentRoute: () => rootRoute, path: '/invite/$token', component: InviteScreen }),
-  createRoute({ getParentRoute: () => rootRoute, path: '/me/settings', component: Placeholder }), // Task 6
+  createRoute({ getParentRoute: () => rootRoute, path: '/me/settings', component: NotificationSettingsScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin', component: Placeholder }), // Task 8
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/policy', component: Placeholder }), // Task 8
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/moderation', component: Placeholder }), // Task 8

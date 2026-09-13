@@ -10,16 +10,13 @@
  * Paths mostly match an existing route exactly. One binding was simply
  * missing rather than pointed at the wrong place — `rsvp.get`, for
  * `GET /api/rsvp?eventUri=` (Task 4 added it; the route itself is Task 2's).
- * Four others do not yet exist on the AppView and are documented here rather
- * than silently guessed at:
- *   - `events.update`     → `PUT /api/events/:id` (no edit route yet; the
- *     natural counterpart to `GET /api/events/:id`)
- *   - `requests.rsvp`     → `POST /api/requests/:id/rsvp` (joining a request's
- *     interest count; distinct from `claim`, which offers to teach it)
- *   - `me.updateProfile`  → `PUT /api/me` (no profile-edit route yet)
- *   - `rsvp.mine`         → reuses `GET /api/me`, which already returns the
- *     viewer's own RSVPs; there is no dedicated "all my rsvps" route
- * A later task implements the first three; see the task-1 report for detail.
+ *   - `rsvp.mine`  → reuses `GET /api/me`, which already returns the
+ *     viewer's own RSVPs; there is no dedicated "all my rsvps" route.
+ * `me.skill-claims`/`me.badges`/`me.visibility-defaults`/`me.public-role`
+ * and `me.newsletter` all live under `/api/me` (`apps/appview/src/http/routes/
+ * me.ts`); `me.newsletter` itself is `apps/appview/src/http/routes/
+ * newsletter.ts`, mounted at `/api` (its own path already starts with
+ * `/me/newsletter`).
  */
 import type {
   AdminPolicyInput,
@@ -46,32 +43,40 @@ import type {
   ModerationExecuteResult,
   ModerationProposeInput,
   ModerationProposeResult,
+  MeBadgesResponse,
   ModerationQueueResponse,
   MyRsvp,
   NewsletterDraft,
+  NewsletterSubscriptionResult,
   NotificationPref,
   NotificationPrefsResponse,
   NotificationsResponse,
   PeersInput,
   PeersResponse,
+  PublicRoleResponse,
   PushSubscribeResult,
   PushSubscriptionInput,
   RequestClaimInput,
   RequestMutationResult,
+  RequestRsvpResult,
   RequestsResponse,
   RsvpClearResult,
   RsvpGetResult,
   RsvpSetInput,
   RsvpSetResult,
+  SetNewsletterInput,
+  SetPublicRoleInput,
   SignupResult,
-  SkillClaimInput,
   SkillClaimsResponse,
+  SkillClaimsSetInput,
   SkillClaimsSetResult,
   SkillDetail,
   SkillTreeResponse,
   UpdateEventResult,
   UpdateProfileInput,
+  UpdateProfileResult,
   VerifyResult,
+  VisibilityDefaults,
   ZineMonthResponse,
   MeResponse,
 } from './types';
@@ -189,7 +194,7 @@ export const api = {
   requests: {
     list: () => get<RequestsResponse>('/api/requests'),
     create: (body: CreateRequestInput) => post<RequestMutationResult>('/api/requests', body),
-    rsvp: (id: string) => post<{ ok: boolean }>(`/api/requests/${encodeURIComponent(id)}/rsvp`),
+    rsvp: (id: string) => post<RequestRsvpResult>(`/api/requests/${encodeURIComponent(id)}/rsvp`),
     claim: (id: string, body: RequestClaimInput) =>
       post<RequestMutationResult>(`/api/requests/${encodeURIComponent(id)}/claim`, body),
   },
@@ -201,10 +206,15 @@ export const api = {
 
   me: {
     skillClaims: () => get<SkillClaimsResponse>('/api/me/skill-claims'),
-    setSkillClaims: (claims: SkillClaimInput[]) =>
-      put<SkillClaimsSetResult>('/api/me/skill-claims', { claims }),
+    setSkillClaims: (body: SkillClaimsSetInput) => put<SkillClaimsSetResult>('/api/me/skill-claims', body),
     profile: () => get<MeResponse>('/api/me'),
-    updateProfile: (body: UpdateProfileInput) => put<MeResponse>('/api/me', body),
+    updateProfile: (body: UpdateProfileInput) => put<UpdateProfileResult>('/api/me', body),
+    badges: () => get<MeBadgesResponse>('/api/me/badges'),
+    visibilityDefaults: () => get<VisibilityDefaults>('/api/me/visibility-defaults'),
+    publicRole: () => get<PublicRoleResponse>('/api/me/public-role'),
+    setPublicRole: (body: SetPublicRoleInput) => put<PublicRoleResponse>('/api/me/public-role', body),
+    newsletter: () => get<NewsletterSubscriptionResult>('/api/me/newsletter'),
+    setNewsletter: (body: SetNewsletterInput) => put<NewsletterSubscriptionResult>('/api/me/newsletter', body),
   },
 
   feedback: {

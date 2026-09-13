@@ -1,36 +1,58 @@
 import { useState } from 'react';
-import { requests as mockRequests, skills, USE_MOCK, type LearningRequest } from '../lib/mock';
+import { useNavigate } from '@tanstack/react-router';
 import { Screen } from '../components/Screen';
 import { Sheet } from '../components/Sheet';
 import { Button, SkillChip, ThresholdRule } from '../components/bits';
-import { api } from '../lib/api';
+import { SessionGate } from '../components/SessionGate';
+import {
+  useClaimRequestMutation,
+  useCreateRequestMutation,
+  useMe,
+  useRequestRsvpMutation,
+  useRequests,
+  useSkillTree,
+} from '../lib/queries';
+import { ApiError } from '../lib/api';
+import type { RequestItem, SkillNode } from '../lib/types';
 
-// Not wired to `useRequests` yet (Task 6) — real data defaults to empty
-// rather than showing the mock board once USE_MOCK is off.
-const seed: LearningRequest[] = USE_MOCK ? mockRequests : [];
+function flattenSkills(nodes: SkillNode[], trail: string[] = []): Array<{ uri: string; path: string }> {
+  const out: Array<{ uri: string; path: string }> = [];
+  for (const node of nodes) {
+    const path = [...trail, node.label];
+    out.push({ uri: node.uri, path: path.join(' › ') });
+    out.push(...flattenSkills(node.children, path));
+  }
+  return out;
+}
 
 export function RequestsScreen() {
-  const [list, setList] = useState<LearningRequest[]>(seed);
+  const { data: me } = useMe();
+  const signedIn = Boolean(me);
+  const { data, isPending } = useRequests();
+  const list = data?.requests ?? [];
   const [composing, setComposing] = useState(false);
-  const [joined, setJoined] = useState<Set<string>>(new Set());
+  const [claimError, setClaimError] = useState<string | null>(null);
 
-  const onJoin = (request: LearningRequest) => {
-    setJoined((previous) => {
-      const next = new Set(previous);
-      if (next.has(request.uri)) next.delete(request.uri);
-      else next.add(request.uri);
-      return next;
-    });
-    void api.requests.rsvp(request.uri).catch(() => undefined);
+  const rsvpMutation = useRequestRsvpMutation();
+  const claimMutation = useClaimRequestMutation();
+  const navigate = useNavigate();
+
+  const onJoin = (request: RequestItem) => {
+    rsvpMutation.mutate(request.uri);
   };
 
-  const onClaim = async (request: LearningRequest) => {
-    setList((previous) =>
-      previous.map((candidate) =>
-        candidate.uri === request.uri ? { ...candidate, status: 'claimed', claimedBy: 'You' } : candidate,
-      ),
-    );
-    await api.requests.claim(request.uri, {}).catch(() => undefined);
+  const onClaim = async (request: RequestItem) => {
+    setClaimError(null);
+    try {
+      await claimMutation.mutateAsync({ requestUri: request.uri, body: {} });
+      void navigate({ to: '/events/new', search: { request: request.uri } });
+    } catch (err) {
+      setClaimError(
+        err instanceof ApiError && err.code === 'ThresholdNotMet'
+          ? err.message
+          : 'Could not claim this request. Try again.',
+      );
+    }
   };
 
   return (
@@ -38,15 +60,23 @@ export function RequestsScreen() {
       title="Requests"
       standfirst="Things people want to learn. When enough people want the same thing, someone turns up to teach it."
       trailing={
-        <button type="button" onClick={() => setComposing(true)} className="display text-caption font-bold text-pink">
-          Ask for one
-        </button>
+        signedIn ? (
+          <button type="button" onClick={() => setComposing(true)} className="display text-caption font-bold text-pink">
+            Ask for one
+          </button>
+        ) : null
       }
     >
       <div className="safe-x mt-4 space-y-4">
+        {!isPending && list.length === 0 ? (
+          <div className="plate plate-amber p-4">
+            <p className="text-body">Post what you'd like to learn. Someone nearby probably knows it.</p>
+          </div>
+        ) : null}
+
         {list.map((request) => {
-          const mine = joined.has(request.uri);
-          const count = request.rsvpCount + (mine ? 1 : 0);
+          const mine = request.viewerInterested;
+          const count = request.rsvpCount;
           return (
             <article key={request.uri} className="plate plate-amber p-4">
               <div className="flex items-start justify-between gap-3">
@@ -57,31 +87,39 @@ export function RequestsScreen() {
                   </SkillChip>
                 ) : null}
               </div>
-              <p className="mt-1.5 max-w-[58ch] text-body text-ink-soft">{request.description}</p>
-
-              <div className="mt-3.5">
-                <ThresholdRule count={count} threshold={request.threshold} />
-              </div>
-
-              {request.claimedBy ? (
-                <p className="mt-2.5 text-caption">
-                  {request.claimedBy} offered to teach this.
-                </p>
+              {request.description ? (
+                <p className="mt-1.5 max-w-[58ch] text-body text-ink-soft">{request.description}</p>
               ) : null}
 
-              <div className="mt-4 flex flex-wrap gap-3">
-                <Button ink={mine ? 'green' : 'amber'} onClick={() => onJoin(request)}>
-                  {mine ? "You're counted in" : 'I want this too'}
-                </Button>
-                {request.status === 'open' ? (
-                  <Button ink="ink" variant="quiet" onClick={() => void onClaim(request)}>
-                    I can teach this
+              {typeof request.threshold === 'number' ? (
+                <div className="mt-3.5">
+                  <ThresholdRule count={count} threshold={request.threshold} />
+                </div>
+              ) : null}
+
+              {signedIn ? (
+                <div className="mt-4 flex flex-wrap gap-3">
+                  <Button ink={mine ? 'green' : 'amber'} onClick={() => onJoin(request)}>
+                    {mine ? "You're counted in" : 'I want this too'}
                   </Button>
-                ) : null}
-              </div>
+                  {request.status === 'open' ? (
+                    <Button ink="ink" variant="quiet" onClick={() => void onClaim(request)}>
+                      I can teach this
+                    </Button>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="mt-3.5 text-caption text-ink-soft">
+                  <a href="/signin" className="font-bold text-blue">
+                    Sign in
+                  </a>{' '}
+                  to join or offer to teach this.
+                </p>
+              )}
             </article>
           );
         })}
+        {claimError ? <p className="text-body text-pink">{claimError}</p> : null}
       </div>
 
       <ComposerSheet open={composing} onClose={() => setComposing(false)} />
@@ -89,16 +127,20 @@ export function RequestsScreen() {
   );
 }
 
-const skillOptions = USE_MOCK ? skills : [];
-
 function ComposerSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const { data: skillTree } = useSkillTree();
+  const flatSkills = flattenSkills(skillTree?.skills ?? []);
+  const createMutation = useCreateRequestMutation();
+
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [skillId, setSkillId] = useState(skillOptions[0]?.id ?? '');
+  const [skillUri, setSkillUri] = useState('');
   const [sent, setSent] = useState(false);
 
   const submit = async () => {
-    await api.requests.create({ title, description, skill: skillId || undefined }).catch(() => undefined);
+    await createMutation
+      .mutateAsync({ title: title.trim(), description: description.trim() || undefined, skill: skillUri || undefined })
+      .catch(() => undefined);
     setSent(true);
   };
 
@@ -106,6 +148,7 @@ function ComposerSheet({ open, onClose }: { open: boolean; onClose: () => void }
     setSent(false);
     setTitle('');
     setDescription('');
+    setSkillUri('');
     onClose();
   };
 
@@ -135,7 +178,7 @@ function ComposerSheet({ open, onClose }: { open: boolean; onClose: () => void }
           teach it.
         </p>
       ) : (
-        <>
+        <SessionGate prompt="Sign in to ask for a class.">
           <p className="text-body text-ink-soft">
             Say what you want to learn in your own words. Other people add themselves, and at five or six
             someone usually volunteers.
@@ -160,15 +203,16 @@ function ComposerSheet({ open, onClose }: { open: boolean; onClose: () => void }
           </label>
           <label className="mt-4 block">
             <span className="text-caption text-ink-soft">Closest skill</span>
-            <select className={field} value={skillId} onChange={(event) => setSkillId(event.target.value)}>
-              {skillOptions.map((skill) => (
-                <option key={skill.id} value={skill.id}>
-                  {skill.label}
+            <select className={field} value={skillUri} onChange={(event) => setSkillUri(event.target.value)}>
+              <option value="">No specific skill</option>
+              {flatSkills.map((skill) => (
+                <option key={skill.uri} value={skill.uri}>
+                  {skill.path}
                 </option>
               ))}
             </select>
           </label>
-        </>
+        </SessionGate>
       )}
     </Sheet>
   );

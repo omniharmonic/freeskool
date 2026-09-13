@@ -233,6 +233,10 @@ export interface RequestItem {
   threshold?: number;
   status: 'open' | 'claimed' | 'scheduled' | 'closed';
   claims: number;
+  /** "I'm interested" count — app-side, never a roster. What `threshold` gates a claim against. */
+  rsvpCount: number;
+  /** Whether the viewer is one of the people counted in `rsvpCount`. */
+  viewerInterested: boolean;
 }
 
 export interface RequestsResponse {
@@ -255,6 +259,16 @@ export interface RequestClaimInput {
 export interface RequestMutationResult {
   uri: string;
   cid: string;
+}
+
+/**
+ * `POST /api/requests/:id/rsvp` — mirrors `ToggleResult` in
+ * `apps/appview/src/lib/request-rsvp.ts` exactly: the new state of the
+ * viewer's own interest and the total count, never a roster.
+ */
+export interface RequestRsvpResult {
+  interested: boolean;
+  count: number;
 }
 
 // ── skills ───────────────────────────────────────────────────────────────
@@ -288,11 +302,26 @@ export interface SkillDetail {
 
 // ── me ───────────────────────────────────────────────────────────────────
 
+export type SkillClaimLevel = 'learning' | 'practicing' | 'proficient' | 'teaching';
+
 export interface SkillClaimInput {
   skill: string;
-  level: 'learning' | 'practicing' | 'proficient' | 'teaching';
+  level: SkillClaimLevel;
   note?: string;
   visibility?: 'public' | 'school';
+}
+
+/**
+ * `PUT /api/me/skill-claims`'s body (`apps/appview/src/http/routes/me.ts`'s
+ * `claimsBody`). `confirmTierB` is required on a resend after the server
+ * refuses a Tier B public claim with 400 `TierBConfirmRequired` — see
+ * `checkPublicClaims` there. The client has no way to know a skill's tier up
+ * front (`GET /api/skills` does not expose it), so this is always a
+ * try-then-confirm flow, never a client-side guess.
+ */
+export interface SkillClaimsSetInput {
+  claims: SkillClaimInput[];
+  confirmTierB?: boolean;
 }
 
 export interface SkillClaimsSetResult {
@@ -301,8 +330,16 @@ export interface SkillClaimsSetResult {
 }
 
 export interface SkillClaimsResponse {
-  public: Array<{ uri: string; value: unknown }>;
+  public: Array<{
+    uri: string;
+    value: { skill?: string; level?: string; note?: string; createdAt?: string; [key: string]: unknown };
+  }>;
   school: Array<{ skill: string; level: string; note?: string }>;
+}
+
+export interface MeProfile {
+  displayName?: string;
+  bio?: string;
 }
 
 export interface MeResponse {
@@ -311,11 +348,56 @@ export interface MeResponse {
   evidence: unknown;
   thresholds: unknown;
   rsvps: MyRsvp[];
+  profile: MeProfile;
 }
 
-/** Shape guessed for the not-yet-implemented `PUT /api/me` (see api.ts). */
+/** `PUT /api/me`'s body — deliberately `.strict()` server-side (`profileBody`
+ * in `apps/appview/src/http/routes/me.ts`): app-side display fields only,
+ * never a real-name prompt. */
 export interface UpdateProfileInput {
-  [key: string]: unknown;
+  displayName?: string;
+  bio?: string;
+}
+
+export interface UpdateProfileResult {
+  did: string;
+  profile: MeProfile;
+}
+
+/** `GET /api/me/visibility-defaults` — what this session is allowed to make
+ * public, and why. `oauthDoor` true means the session can NEVER set a skill
+ * claim `visibility: 'public'` in v1 (403 `PublicTogglesLocked` if it tries). */
+export interface VisibilityDefaults {
+  oauthDoor: boolean;
+  tierBConfirmRequired: true;
+}
+
+/** `GET /api/me/badges` — plain-language sentences derived from counts and
+ * role. Counts only, never an average or a star rating. */
+export interface MeBadgesResponse {
+  counts: { hosted: number; attended: number; vouched: number };
+  role: ViewerRole;
+  badges: string[];
+}
+
+export interface PublicRoleResponse {
+  publicRole: boolean;
+}
+
+export interface SetPublicRoleInput {
+  publicRole: boolean;
+}
+
+/** `PUT /api/me/newsletter` — member-facing consent for the monthly digest
+ * (distinct from `/api/admin/newsletter*`, the steward compose/send surface).
+ * `NoEmailOnFile` (409) is a real response, not a guess: a custodial session
+ * with no email on file cannot be subscribed. */
+export interface SetNewsletterInput {
+  subscribed: boolean;
+}
+
+export interface NewsletterSubscriptionResult {
+  subscribed: boolean;
 }
 
 // ── feedback ─────────────────────────────────────────────────────────────
