@@ -8,3 +8,4 @@ dist
 infra/data
 coverage
 .turbo
+infra/seed/.authority.env

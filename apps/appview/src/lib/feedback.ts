@@ -14,9 +14,11 @@
  * Once `ballotKey` is destroyed the mapping did -> ballot is unrecoverable even with the
  * whole database, because the key was the only thing that ever existed to compute it.
  *
- * The content ALSO lands in the spaces shim (`PostgresSpaceStore`), which is what will
- * carry it when Atproto Spaces stabilizes. The shim's policy is `hostMayRead: false`:
- * the host can only ever read the k-anonymous aggregate.
+ * The spaces shim (`PostgresSpaceStore`) carries the PUBLISHED AGGREGATE, authored by the
+ * school — see `publishAggregateToSpace` below. The raw rows are deliberately never put
+ * into a space: the shim stores an `author` beside every record, which is exactly the link
+ * the ballot tables exist to destroy. The shim's policy is `hostMayRead: false` either way,
+ * so a host can only ever read the k-anonymous aggregate.
  */
 import { and, eq, isNotNull, lte, sql } from 'drizzle-orm'
 import { aggregateFeedback, type Aspect, type FeedbackAggregate, type FeedbackRow } from '@freeschool/shared'
@@ -25,6 +27,8 @@ import { feedback, feedbackBallot, feedbackWindow } from '../db/schema.js'
 import { ballotToken, newBallotKey } from './crypto.js'
 import { rowId } from './ids.js'
 import { getThresholds } from './policy.js'
+import type { Did, SpaceStore } from '@freeschool/spaces-shim'
+import { FEEDBACK_SPACE_POLICY, FEEDBACK_SPACE_TYPE } from '../spaces/postgres-store.js'
 
 /** How long after an event ends feedback may be left. */
 export const FEEDBACK_WINDOW_DAYS = 14
@@ -172,10 +176,45 @@ async function computeSummary(eventUri: string, k: number): Promise<FeedbackSumm
 }
 
 /**
+ * Publish the aggregate through the Spaces-shaped interface, authored by the SCHOOL.
+ *
+ * This is the only thing about feedback that goes into a space. The raw rows never do:
+ * the shim keeps an `author` beside every record, which is precisely the link the ballot
+ * tables exist to destroy. An aggregate has no author but the school, so it is safe there
+ * and it keeps the migration path to real Spaces on the live code path.
+ */
+export async function publishAggregateToSpace(
+  store: SpaceStore,
+  authority: Did,
+  eventUri: string,
+  summary: FeedbackSummary,
+): Promise<void> {
+  const space =
+    (await store.getSpace(`at://${authority}/${FEEDBACK_SPACE_TYPE}/default`)) ??
+    (await store.createSpace({
+      authority,
+      spaceType: FEEDBACK_SPACE_TYPE,
+      skey: 'default',
+      policy: FEEDBACK_SPACE_POLICY,
+    }))
+  await store.putRecord(
+    space.uri,
+    authority,
+    'freeschool.draft.feedbackSummary',
+    { event: { uri: eventUri }, ...summary, publishedAt: new Date().toISOString() },
+    // One summary per event, ever: the rkey is the event's rkey.
+    eventUri.split('/').pop() ?? 'self',
+  )
+}
+
+/**
  * Close every due window: compute the aggregate once, publish it, and DESTROY the
  * per-event key. Idempotent — a window with no key is already finalized.
  */
-export async function closeDueWindows(now = new Date()): Promise<{ closed: number }> {
+export async function closeDueWindows(
+  now = new Date(),
+  space?: { store: SpaceStore; authority: Did },
+): Promise<{ closed: number }> {
   const db = getDb()
   const due = await db
     .select({ eventUri: feedbackWindow.eventUri })
@@ -189,6 +228,9 @@ export async function closeDueWindows(now = new Date()): Promise<{ closed: numbe
       .update(feedbackWindow)
       .set({ ballotKey: null, keyDestroyedAt: now, publishedAt: now, summary })
       .where(eq(feedbackWindow.eventUri, row.eventUri))
+    if (space) {
+      await publishAggregateToSpace(space.store, space.authority, row.eventUri, summary)
+    }
     closed++
   }
   return { closed }

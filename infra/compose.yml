@@ -46,3 +46,9 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+# NOTE (2026-09-12): this dev PDS registers accounts on the PRODUCTION plc.directory, so every local
+# account mints a permanent public did:plc whose service endpoint is http://localhost:3000. Fine for a
+# handful of throwaway dev accounts; for heavier local work add the in-memory PLC from
+# infra/spaces-alpha-lab/plc-server.mjs and set PDS_DID_PLC_URL=http://host.docker.internal:2582
+# plus PDS_DISABLE_SSRF_PROTECTION=1 (see R1 notes).

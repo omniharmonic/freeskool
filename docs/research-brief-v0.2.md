@@ -29,7 +29,7 @@ Nine things, in order of consequence.
 8. **Notifications are built in-app (R6 + R8).** atproto-notify has no license. Take its protocol shape only. iOS push is Home-Screen-only, silent push revokes the subscription, and Declarative Web Push (iOS 18.4+) removes that risk; no background sync exists, so reminders are server-timed and email is the floor.
 9. **The v0.1 "Holmgren endorsed the Arbiter" framing was too strong (R3).** He endorses the governance *layer* and explicitly leaves hosting open; his stated priority is migration between arbiter implementations, which argues for a seam, not adoption.
 
-Pending in this draft: §8 taxonomy counts (R5) and the ten design constraints (R7) are marked where they land.
+All nine briefs are folded in. Skill taxonomy seeded from R5 (525 nodes); design constraints from R7 reconciled against the organizer's spec in §13.
 
 ---
 
@@ -107,9 +107,9 @@ Seventeen lexicons drafted and validated (`packages/lexicons`): `skill`, `skillC
 
 Principle unchanged. The role ladder is implemented as a pure function (`deriveRole`) with Lex's defaults (open hosting on day one) and an opt-in gate. Evidence for roles comes from app-side attendance rows plus host confirmations; the public artifact stays counts. Feedback anonymity is strengthened: ballots in a separate table keyed by an HMAC with a per-event key destroyed at window close; k = 3 for numeric aspects, **k = 5 for text**; aggregates published once per window to block differencing. Sybil resistance unchanged.
 
-## 8. Skill taxonomy — **confirmed in design; seed pending R5**
+## 8. Skill taxonomy — **confirmed in design; seeded (R5)**
 
-Design unchanged (records, ESCO + Wikidata backbone, `broader` and `prerequisites`, levels on events). Added by R9: a **two-tier list** — Tier A pre-checked for public; Tier B (legal-exposure adjacent) unchecked with an explicit confirm. Seed counts, domains and ESCO coverage: *[pending R5]*.
+Design unchanged (records, ESCO + Wikidata backbone, `broader` and `prerequisites`, levels on events). Added by R5: a third of real free-skool offerings are not skills at all (reading groups, socials, open shop hours), so events tolerate zero skill references and a separate topic vocabulary is likely later. Added by R9: a **two-tier list** — Tier A pre-checked for public; Tier B (legal-exposure adjacent) unchecked with an explicit confirm. **Seed (R5):** 525 nodes — 8 domains (practical trades, food, land, repair, care, arts, organizing, tech/digital) → 52 areas → 465 leaf skills; 219 canonical, 306 proposed. 159 leaves (34%) carry a verified ESCO URI, 417 nodes (79%) a Wikidata QID (87 hand-verified), 95 neither. Coverage is uneven by domain: practical trades 54% ESCO, food 20%; organizing and the free-skool-specific nodes (squatting, street medicine, know-your-rights, harm reduction, transformative justice, deschooling, running a free skool) are `proposed` with Wikidata anchors only. Nine nodes (hide tanning, flintknapping, compost toilets, cob/straw-bale, death doula, DIY gynaecology, dumpster diving, alley cat races, and one more) were **not confirmed in any archived free-skool catalog** and are flagged as first candidates for deletion. The seed is vendored at `infra/seed/skills/` with provenance and is written as `freeschool.draft.skill` records under Benjamin's authority DID, `rkey = slug`, `broader` resolved to at-uris at write time. ESCO requires attribution (text in R5 §Licensing); Wikidata is CC0.
 
 ## 9. Moderation & governance — **revised**
 

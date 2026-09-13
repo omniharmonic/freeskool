@@ -1,0 +1,114 @@
+# Hand-review decisions for ESCO mappings, 2026-09-12, reviewed by Benjamin Life (@omniharmonic).
+# Every leaf skill whose best automatic score was < 0.95 was eyeballed against its
+# top ESCO candidates (review.txt) plus ~40 extra targeted ESCO probes.
+# Accepted = the ESCO concept denotes substantially the same competence a teacher
+# would claim, even if ESCO words it differently or one level more general.
+# Rejected (absent from this file) = ESCO has nothing equivalent -> status: proposed.
+#
+# slug <TAB> exact ESCO preferredLabel (en)
+hang-and-finish-drywall	place drywall
+read-construction-drawings	read engineering drawings
+deconstruct-and-salvage-materials	demolish selectively
+weatherize-a-building	energy performance of buildings
+install-roofing	roofing techniques
+install-plumbing-fixtures	place sanitary equipment
+solder-copper-pipe	apply soldering techniques
+clear-drains-and-blockages	clear out drains
+rainwater-harvesting	manage rainwater
+diy-water-filtration	set up water filtration system
+install-outlets-and-switches	install electric switches
+read-wiring-diagrams	interpret electrical diagrams
+mig-welding	perform metal active gas welding
+tig-welding	perform tungsten inert gas welding
+stick-smaw-welding	apply arc welding techniques
+oxy-fuel-cutting	operate oxy-fuel cutting torch
+plasma-cutting	operate plasma cutting torch
+blacksmithing-and-forging	hot forging
+sharpen-hand-tools	sharpen edged tools
+cut-mortise-and-tenon-joints	create wood joints
+turn-wood-on-a-lathe	turn wood
+operate-power-saws-safely	operate wood sawing equipment
+spoon-carving-and-whittling	use wood carving knives
+change-engine-oil-and-filters	execute vehicle maintenance
+change-and-patch-tires	replace tyres
+read-diagnostic-trouble-codes	perform vehicle diagnostic procedures
+repair-a-flat-tire	perform repairs on bicycles
+tune-a-derailleur	tune bicycles
+convert-a-bike-to-electric	electric bicycles
+apply-plaster	plaster surfaces
+paint-with-brush-and-roller	paint surfaces
+work-safely-with-lead-paint-and-asbestos	follow control of substances hazardous to health procedures
+use-ladders-safely	follow safety procedures when working at heights
+use-a-fire-extinguisher	operate fire extinguishers
+use-knife-skills	use food cutting tools
+make-cheese	carry out cheese production
+bake-bread	prepare bread products
+make-pastry-and-pie	cook pastry products
+butcher-meat	handle knives for meat processing activities
+slaughter-and-process-chickens	slaughter animals
+hunt-with-bow-or-rifle	hunt animals
+water-bath-can-food	apply preservation treatments
+dehydrate-food	food dehydration processes
+sow-seed-and-raise-transplants	seed the ground
+manage-pests-without-pesticides	pest control in plants
+design-water-catchment-and-swales	manage water flows and catchments
+land-access-commons-and-land-trusts	negotiate land access
+make-compost	monitor composting
+build-fencing-and-shelter	build fences
+keep-rabbits	manage rabbit breeding
+shear-sheep-and-handle-fleece	shearing of wool
+harvest-honey	process harvested honey
+read-schematics-and-datasheets	read technical datasheet
+repair-laptops-and-computers	maintain computer hardware
+hand-sew	use manual sewing techniques
+use-a-sewing-machine	sew pieces of fabric
+draft-and-use-patterns	create patterns for garments
+knit	use manual knitting techniques
+stitch-leather-by-hand	apply stitching techniques
+perform-cpr	resuscitation
+treat-wounds-and-burns	carry out wound care
+splint-fractures-and-sprains	immobilise patients for emergency intervention
+know-herb-drug-interactions-and-contraindications	contraindications
+care-for-children	attend to children's basic physical needs
+run-play-and-activities-for-children	play with children
+keep-children-safe-and-supervise	supervise children
+care-for-older-adults	tend to elderly people
+provide-personal-assistance-on-the-disabled-persons-terms	provide in-home support for disabled individuals
+death-doula-and-end-of-life-support	support social service users at the end of life
+de-escalate-crisis-without-police	manage social crisis
+mediate-conflict	social mediation
+resolve-conflict	handle conflicts
+restorative-justice-circles	restorative justice
+anti-oppression-and-unlearning-workshops	apply anti-oppressive practices
+comprehensive-and-consent-based-sex-education	sex education
+screen-print	prepare screen printing
+radical-and-movement-archiving	manage archive
+run-live-sound-and-pa	operate sound live
+take-photographs	photography
+shoot-video	operate video equipment
+throw-pottery-on-a-wheel	create ceramic objects
+glaze-and-fire-ceramics	apply glaze coating
+weave-baskets	perform basket weaving
+natural-dyeing	dyeing technology
+act-and-perform	acting techniques
+tell-stories	tell a story
+oral-history-interviewing	conduct research interview
+facilitate-a-meeting	chair a meeting
+map-needs-and-assets-in-a-neighbourhood	analyse community needs
+outreach-to-unhoused-neighbours	integrate community outreach
+plan-a-campaign	develop campaigns
+power-mapping-and-target-research	research your target community
+court-support-and-court-watching	support witnesses
+write-grant-applications	write charity grant proposals
+write-a-press-release	draft press releases
+manage-social-media	social media management
+radical-graphic-identity-and-propaganda-design	design graphics
+refurbish-and-install-os-on-old-hardware	install hardware
+troubleshoot-a-network-connection	perform ICT troubleshooting
+encrypt-devices-and-disks	ICT encryption
+operate-amateur-radio	operate radio equipment
+program-microcontrollers	embedded systems
+use-a-3d-printer	3D printing process
+make-fire-without-matches	build a fire
+navigate-with-map-and-compass	compass navigation
+purify-water-in-the-field	operate water purifying equipment

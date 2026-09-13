@@ -24,6 +24,8 @@ export const NSID = {
   skill: 'freeschool.draft.skill',
   skillClaim: 'freeschool.draft.skillClaim',
   skillAttestation: 'freeschool.draft.skillAttestation',
+  hostFeedback: 'freeschool.draft.hostFeedback',
+  attendance: 'freeschool.draft.attendance',
   moderationAction: 'freeschool.draft.moderationAction',
   approval: 'freeschool.draft.approval',
 
