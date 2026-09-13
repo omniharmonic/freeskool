@@ -74,7 +74,12 @@ describe('verdictFor', () => {
     expect(verdictFor(NSID.approval, STEWARD, { path: 'proposal', did: SCHOOL }, facts()).allowed).toBe(true)
   })
 
-  it('flags an opt-in public RSVP, which names its host through the event at-uri', () => {
-    expect(verdictFor(NSID.rsvp, MEMBER, { path: 'subject.uri', did: HOST }, facts()).allowed).toBe(false)
+  it('allows an opt-in public RSVP to name its host through the event at-uri (the host already published that event)', () => {
+    const verdict = verdictFor(NSID.rsvp, MEMBER, { path: 'subject.uri', did: HOST }, facts())
+    expect(verdict.allowed).toBe(true)
+  })
+
+  it('does not extend the rsvp exemption to any other path in the record', () => {
+    expect(verdictFor(NSID.rsvp, MEMBER, { path: 'notSubject', did: HOST }, facts()).allowed).toBe(false)
   })
 })

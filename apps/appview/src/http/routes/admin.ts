@@ -225,8 +225,12 @@ admin.post('/moderation/:id/execute', async (c) => {
       rkey: tid(),
       record: {
         $type: NSID.moderationAction,
-        ...(row.subjectUri ? { subjectRecord: row.subjectUri } : {}),
-        ...(row.subjectDid ? { subjectDid: row.subjectDid } : {}),
+        // R9: no public record may name a DID its holder did not write, and an
+        // at-uri's authority segment IS a DID — so the subject (who/what this acted
+        // on) stays app-side in `fs_moderation_queue.subject_uri`/`subject_did` (see
+        // `GET /moderation` above, which is where stewards see it). The public record
+        // is the decision: what happened, why, and who approved — never who it was
+        // done to.
         action: row.action,
         reason: row.reason,
         policyRef: await currentPolicyUri(schoolDid()),

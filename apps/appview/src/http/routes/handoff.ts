@@ -160,7 +160,10 @@ export async function acceptHandoff(token: string, acceptorDid: string): Promise
       rkey: tid(),
       record: {
         $type: NSID.moderationAction,
-        subjectDid: acceptorDid,
+        // R9: the public record never names the subject. `acceptorDid` lives
+        // app-side — `fs_handoff.to_did` (set below) and `fs_steward.did` (also
+        // below, which is what actually grants the role; `evidenceFor` reads that
+        // table, not this record) — which is where a steward can look it up.
         action: 'set-role',
         reason: 'steward hand-off accepted',
         policyRef: await currentPolicyUri(schoolDid()),

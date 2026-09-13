@@ -44,10 +44,13 @@
  *      `freeschool.draft.school` record is a school, so the rule is right on a PDS that
  *      hosts several (which the local one does, one per smoke run).
  *
- * Nothing else is exempt. In particular a `community.lexicon.calendar.rsvp` written by the
- * opt-in public-RSVP path (`alsoPublicRecord`) names the host through its `subject` at-URI,
- * and this script flags it — see the open concerns in
- * `.superpowers/sdd/mvp-plan/task-13-report.md`.
+ *   5. `community.lexicon.calendar.rsvp`'s `subject` strongRef (`{ uri, cid }`) may name the
+ *      host at `subject.uri` — an at-uri into `community.lexicon.calendar.event`. That event
+ *      is itself a public record the host published; an RSVP pointing at it does not tell a
+ *      stranger anything about the host they could not already see by reading the event.
+ *      This is the opt-in public-RSVP path (`alsoPublicRecord`, `src/http/routes/rsvp.ts`).
+ *
+ * Nothing else is exempt.
  *
  * OUTPUT. One row per (repo, collection) that exists, with counts; then every violation,
  * with the DID truncated to 12 characters (`did:plc:abcd…`) and the offending rkey — a
@@ -150,6 +153,12 @@ export function verdictFor(
       return { allowed: true, reason: 'steward consented by acting (actors[])' }
     }
     return { allowed: false, reason: `names a DID outside actors[] (at ${named.path})` }
+  }
+
+  // Exemption 5: an RSVP's strongRef subject names the host only through an at-uri to
+  // the event the host already published publicly.
+  if (collection === NSID.rsvp && named.path === 'subject.uri') {
+    return { allowed: true, reason: 'rsvp subject is a strongRef to the host’s own public event' }
   }
 
   if (collection === NSID.skillAttestation) {

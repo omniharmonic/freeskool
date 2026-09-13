@@ -16,7 +16,7 @@ import { Role } from '@freeschool/shared'
 import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
 import { PostgresAuditSink, setSchoolActor } from '../src/lib/school-actor.js'
 import { acceptHandoff, proposeHandoff } from '../src/http/routes/handoff.js'
-import { audit, custodialAccount, steward } from '../src/db/schema.js'
+import { audit, custodialAccount, handoff as handoffTable, steward } from '../src/db/schema.js'
 import { createApp } from '../src/http/app.js'
 import { createSession } from '../src/http/session.js'
 import { signSessionId } from '../src/lib/crypto.js'
@@ -176,6 +176,40 @@ describe('acceptHandoff', () => {
     const result = await acceptHandoff(proposed.token, ACCEPTOR)
     expect(result.ok).toBe(true)
     if (result.ok) expect(result.warning).toBeUndefined()
+  })
+
+  it('never writes the acceptor’s DID into the PUBLIC moderationAction record (R9) — it lives app-side in fs_handoff.to_did and fs_steward', async () => {
+    if (!available) return
+    const captured: Array<Record<string, unknown>> = []
+    setSchoolActor(
+      new AppCustodyAdapter({
+        roles: { async roleOf(_school, did) { return did === FROM ? Role.Steward : Role.Visitor } },
+        policy: { async destructiveActionStewards() { return 2 } },
+        audit: new PostgresAuditSink(),
+        session: {
+          async call(i) {
+            captured.push(i.body as Record<string, unknown>)
+            return { status: 200, output: { uri: `at://${SCHOOL}/freeschool.draft.moderationAction/x`, cid: 'bafyx' } }
+          },
+        },
+        pdsEndpoint: 'http://localhost:3000',
+      }),
+    )
+    const proposed = await propose()
+    const result = await acceptHandoff(proposed.token, ACCEPTOR)
+    expect(result.ok).toBe(true)
+
+    expect(captured.length).toBe(1)
+    const sent = captured[0] as { record: Record<string, unknown> }
+    expect('subjectDid' in sent.record).toBe(false)
+    expect('subjectRecord' in sent.record).toBe(false)
+    expect(JSON.stringify(sent.record)).not.toContain(ACCEPTOR)
+
+    // The subject is still recoverable app-side.
+    const row = await testDb().select().from(handoffTable).where(eq(handoffTable.id, proposed.id))
+    expect(row[0]?.toDid).toBe(ACCEPTOR)
+    const stewardRows = await testDb().select().from(steward).where(eq(steward.did, ACCEPTOR))
+    expect(stewardRows.length).toBe(1)
   })
 })
 
