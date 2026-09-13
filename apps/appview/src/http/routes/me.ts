@@ -37,7 +37,7 @@
 import { normalizeImage, type StoredImage } from '../../lib/images.js'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, eq } from 'drizzle-orm'
+import { and, desc, eq, inArray } from 'drizzle-orm'
 import type { AppEnv, SessionKind } from '../session.js'
 import { requireViewer } from '../session.js'
 import { evidenceFor, roleOf } from '../../lib/roles.js'
@@ -48,12 +48,13 @@ import { tid } from '../../lib/ids.js'
 import { getIndexer } from '../../index/indexer.js'
 import { getRecordByUri, listCollection } from '../../index/queries.js'
 import { getDb } from '../../db/index.js'
-import { appMeta, attendanceTally, memberPrefs, skillClaimIndex } from '../../db/schema.js'
+import { appMeta, attendanceTally, attestation, custodialAccount, memberPrefs, skillClaimIndex } from '../../db/schema.js'
 import { getThresholds } from '../../lib/policy.js'
 import { tierOf, type SkillTierValue } from '../../lib/skill-tiers.js'
 import { config } from '../../config.js'
 import { isPublicRoleOptIn, publishRoleClaim, setPublicRoleOptIn } from '../../lib/membership-claims.js'
 import { badgeSentences, type VouchCount } from '../../lib/badges.js'
+import { receivedWithAttesters, vouchCountsFor } from '../../lib/attestations.js'
 
 export const me = new Hono<AppEnv>()
 
@@ -69,7 +70,8 @@ export interface Profile {
   bio?: string
 }
 
-async function loadProfile(did: string): Promise<Profile> {
+/** Exported for `lib/attestations.ts`-adjacent enrichment below and for tests. */
+export async function loadProfile(did: string): Promise<Profile> {
   const rows = await getDb().select().from(appMeta).where(eq(appMeta.key, PROFILE_KEY(did))).limit(1)
   return (rows[0]?.value as Profile | undefined) ?? {}
 }
@@ -199,7 +201,11 @@ me.get('/public-role', async (c) => {
   return c.json({ publicRole: await isPublicRoleOptIn(c.var.viewer!.did) })
 })
 
-/** Positive skillAttestations received, grouped by skill with a resolved label. */
+/**
+ * Positive skillAttestations received, grouped by skill with a resolved label — PLUS
+ * app-side vouches (`fs_attestation`, this task's own vouching feature), merged into the
+ * same by-skill counts before labels are resolved.
+ */
 async function vouchesReceived(did: string): Promise<VouchCount[]> {
   const indexer = await getIndexer()
   const { records } = await listCollection<{ skill?: string; direction?: string }>(indexer, 'skillAttestation', {
@@ -213,6 +219,10 @@ async function vouchesReceived(did: string): Promise<VouchCount[]> {
     if (!skill) continue
     bySkill.set(skill, (bySkill.get(skill) ?? 0) + 1)
   }
+  const appSideCounts = await vouchCountsFor(did)
+  for (const [skillUri, count] of appSideCounts) {
+    bySkill.set(skillUri, (bySkill.get(skillUri) ?? 0) + count)
+  }
   const out: VouchCount[] = []
   for (const [skillUri, count] of bySkill) {
     const skill = await getRecordByUri<{ label?: string }>(indexer, 'skill', skillUri)
@@ -220,6 +230,114 @@ async function vouchesReceived(did: string): Promise<VouchCount[]> {
   }
   return out
 }
+
+/**
+ * Best-effort DID -> handle, scoped to a small set of attesters (same fallback order as
+ * `http/routes/events.ts`'s roster `handlesForDids`: our own custodial members first,
+ * then contrail's `identities` table for anyone else). Omitted entirely for a DID that
+ * resolves nowhere, rather than falling back to the DID itself — an attester handle is
+ * cosmetic, never load-bearing.
+ */
+async function handlesForAttesters(dids: string[]): Promise<Record<string, string>> {
+  if (dids.length === 0) return {}
+  const out: Record<string, string> = {}
+  const rows = await getDb()
+    .select({ did: custodialAccount.did, handle: custodialAccount.handle })
+    .from(custodialAccount)
+    .where(inArray(custodialAccount.did, dids))
+  for (const r of rows) out[r.did] = r.handle
+  const remaining = dids.filter((d) => !out[d])
+  if (remaining.length > 0) {
+    try {
+      const indexer = await getIndexer()
+      for (const did of remaining) {
+        const row = await indexer.db
+          .prepare('SELECT handle FROM identities WHERE did = ? LIMIT 1')
+          .bind(did)
+          .first<{ handle: string | null }>()
+        if (row?.handle) out[did] = row.handle
+      }
+    } catch {
+      /* index not ready; handles are cosmetic, so just omit them */
+    }
+  }
+  return out
+}
+
+/** Batched app-side `displayName` lookup, same shape as `events.ts`'s roster helper. */
+async function displayNamesForAttesters(dids: string[]): Promise<Record<string, string>> {
+  if (dids.length === 0) return {}
+  const rows = await getDb()
+    .select({ key: appMeta.key, value: appMeta.value })
+    .from(appMeta)
+    .where(inArray(appMeta.key, dids.map(PROFILE_KEY)))
+  const out: Record<string, string> = {}
+  for (const r of rows) {
+    const displayName = (r.value as Profile | undefined)?.displayName
+    if (displayName) out[r.key.slice('profile:'.length)] = displayName
+  }
+  return out
+}
+
+/** Batched skill-uri -> label lookup, for the received-vouches list. */
+async function labelsForSkills(skillUris: string[], indexer: Awaited<ReturnType<typeof getIndexer>>): Promise<Record<string, string>> {
+  const out: Record<string, string> = {}
+  await Promise.all(
+    skillUris.map(async (uri) => {
+      const skill = await getRecordByUri<{ label?: string }>(indexer, 'skill', uri)
+      out[uri] = skill?.value.label ?? 'a skill'
+    }),
+  )
+  return out
+}
+
+/**
+ * `GET /api/me/attestations` — the vouches I've given, and the ones I've received (with
+ * enough about each attester to show it: a handle and/or display name when we have one,
+ * never anything else about them). App-side only, per R9.
+ */
+me.get('/attestations', async (c) => {
+  const did = c.var.viewer!.did
+  const indexer = await getIndexer()
+
+  const givenRows = await getDb()
+    .select({
+      id: attestation.id,
+      subjectDid: attestation.subjectDid,
+      skillUri: attestation.skillUri,
+      createdAt: attestation.createdAt,
+    })
+    .from(attestation)
+    .where(eq(attestation.attesterDid, did))
+    .orderBy(desc(attestation.createdAt))
+
+  const received = await receivedWithAttesters(did)
+  const attesterDids = [...new Set(received.map((r) => r.attesterDid))]
+  const skillUris = [...new Set(received.map((r) => r.skillUri))]
+  const [handles, displayNames, labels] = await Promise.all([
+    handlesForAttesters(attesterDids),
+    displayNamesForAttesters(attesterDids),
+    labelsForSkills(skillUris, indexer),
+  ])
+
+  return c.json({
+    given: givenRows.map((r) => ({
+      id: r.id,
+      subjectDid: r.subjectDid,
+      skillUri: r.skillUri,
+      createdAt: r.createdAt.toISOString(),
+    })),
+    received: received.map((r) => ({
+      id: r.id,
+      attesterDid: r.attesterDid,
+      ...(handles[r.attesterDid] ? { attesterHandle: handles[r.attesterDid] } : {}),
+      ...(displayNames[r.attesterDid] ? { attesterDisplayName: displayNames[r.attesterDid] } : {}),
+      skillUri: r.skillUri,
+      skillLabel: labels[r.skillUri] ?? 'a skill',
+      createdAt: r.createdAt,
+    })),
+  })
+})
 
 const claimsBody = z.object({
   claims: z

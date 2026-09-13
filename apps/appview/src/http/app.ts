@@ -32,6 +32,7 @@ import { school } from './routes/school.js'
 import { newsletterRoutes } from './routes/newsletter.js'
 import { knowledge } from './routes/knowledge.js'
 import { handoffRoutes } from './routes/handoff.js'
+import { attestations } from './routes/attestations.js'
 
 export function createApp() {
   const app = new Hono<AppEnv>()
@@ -79,6 +80,7 @@ export function createApp() {
   app.route('/api', school)
   app.route('/api', newsletterRoutes)
   app.route('/api', handoffRoutes)
+  app.route('/api', attestations)
 
   app.notFound((c) => c.json({ error: 'NotFound' }, 404))
   app.onError((err, c) => {
