@@ -3,6 +3,7 @@
 # (account repos, blobs, the PDS's own sqlite). Keeps 14 days under /var/backups/freeskool.
 # Copies that leave the server must be encrypted first (docs/deployment.md §Backups).
 set -euo pipefail
+umask 077
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 OUT=/var/backups/freeskool
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)

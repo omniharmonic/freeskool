@@ -16,6 +16,7 @@ import { defineConfig, devices } from '@playwright/test';
  */
 export default defineConfig({
   testDir: './e2e',
+  testIgnore: 'live.spec.ts',
   // The whole story runs in about 20 seconds; the headroom is for the recurrence step,
   // which ends inside the materializer's peer backfill — minutes, on a local PDS that has
   // accumulated a few hundred repos.

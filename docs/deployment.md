@@ -16,7 +16,7 @@ the AppView (indexer + API + jobs), Postgres, and the school's own reference PDS
 | Host | Hetzner Cloud `freeskool-1`, CX33 (4 vCPU, 8 GB, 80 GB), Falkenstein (`fsn1`), Ubuntu 24.04 |
 | Firewall | Hetzner `freeskool-fw`: 22/tcp, 80/tcp, 443/tcp, 443/udp, ICMP |
 | SSH | `root@167.233.100.123`, key `frontrange-twin deploy` (the Bioregional Twin key) |
-| Checkout | `/opt/freeskool` (branch `deploy/hetzner`), env at `/opt/freeskool/infra/production/.env` |
+| Checkout | `/opt/freeskool` (branch `main`), env at `/opt/freeskool/infra/production/.env` |
 | Web + API | `https://freeskool.xyz` (`www.` redirects) |
 | PDS | `https://pds.freeskool.xyz`; handles `<name>.freeskool.xyz` |
 | Email | Resend over SMTP (`smtps://resend:<key>@smtp.resend.com:2465`) |
@@ -74,7 +74,7 @@ the dev file sink would write magic links to disk). The PDS uses the same transp
 ```sh
 # On the server, as root
 git clone https://github.com/omniharmonic/freeskool.git /opt/freeskool
-cd /opt/freeskool && git checkout deploy/hetzner
+cd /opt/freeskool && git checkout main
 cp infra/production/.env.example infra/production/.env && chmod 600 infra/production/.env
 $EDITOR infra/production/.env            # every blank; generators are in the comments
 
@@ -112,9 +112,12 @@ custodial credentials (wrapped, but still).
 ssh -i ~/.ssh/frontrange-twin root@167.233.100.123 /opt/freeskool/infra/production/release.sh
 ```
 
-`release.sh` = `git pull --ff-only` on the branch the server is on, `backup.sh`, rebuild `appview` +
-`web`, `up -d`, wait for `/api/health`. Postgres and the PDS are untouched. To move the server from
-`deploy/hetzner` to `main` once these files are merged: `git checkout main` first, then run it.
+`release.sh` refuses tracked local changes, pulls with `--ff-only`, runs `backup.sh`, retains the
+running application images as `freeschool-{appview,web}:rollback-<previous revision>`, rebuilds
+`appview` + `web`, and recreates only those two services with `--no-deps`. Postgres and the PDS keep
+running. It exits unsuccessfully if the final HTTPS health response is not healthy. Rollback
+images are deliberately retained, never pruned by the release script. The deployed branch is now
+`main`; the original `deploy/hetzner` history has been merged.
 
 Roll back with `git checkout <previous commit> && $C build && $C up -d`. A release that changes the
 schema also needs the pre-release dump to roll back to; never delete a volume.
@@ -135,3 +138,68 @@ rotation key is in `.env`; losing it means losing the ability to recover the sch
 4. `https://<handle>.freeskool.xyz/.well-known/atproto-did` returns the DID for a minted handle.
 5. `pnpm --filter @freeschool/appview privacy-audit` against `PDS_URL=https://pds.freeskool.xyz` ends
    in `PRIVACY AUDIT OK`.
+
+
+## Live frontend acceptance, September 13, 2026
+
+The polish and original Hetzner deployment were merged into `main` and released through the
+backup script. Live testing discovered and fixed an index query limit: Contrail clamps queries
+to 200 records, which hid taxonomy branches and could truncate busy calendars. Collection reads
+now follow cursors. Production has 525 indexed skills: 219 canonical skills appear in the public
+library and 306 proposed skills remain excluded by the existing publication policy.
+
+The empty Requests board now offers a direct sign-in action. The operational resend helper now
+passes TypeScript checks and reports failures without printing transport error details. No
+resend was performed during acceptance testing.
+
+Repeat the public live suite (read-only; no API interception, no emails or published records):
+
+```sh
+pnpm --filter @freeschool/web exec playwright install chromium webkit
+E2E_BASE_URL=https://freeskool.xyz pnpm --filter @freeschool/web exec playwright test --config playwright.live.config.ts
+```
+
+This covers direct loading and navigation for the calendar, skills, knowledge, requests,
+agreements, sign-in and OAuth explanation; month/week/day/list navigation and reloads; the
+complete canonical taxonomy and skill ancestry; personal, author and steward access gates;
+missing records and incomplete verification links; live Letter/A4 zine rendering; and installed
+service-worker calendar caching through offline navigation in Chromium. It checks viewport overflow,
+uncaught JavaScript errors, failed server responses and CSP/module-loading failures. Chromium
+runs at desktop, phone and tablet sizes; WebKit runs with an iPhone viewport. Chromium also
+produces PDFs and verifies page counts. Browser emulation is not a physical-device push test.
+
+Separate rendering checks run against the deployed JavaScript with synthetic browser-only data:
+
+```sh
+E2E_BASE_URL=https://freeskool.xyz pnpm --filter @freeschool/web exec playwright test design.spec.ts knowledge.spec.ts presentation.spec.ts
+```
+
+Those checks cover 80-class zine pagination, author note editing/removal, linked skills/licenses,
+public profile navigation, portrait/landscape/square/240-pixel artwork, broken/missing-image
+fallbacks, full-image zoom and public class decision details. Fixtures are not published to the
+production school and do not demonstrate authenticated production writes.
+
+Production had no listed classes at verification time. Completing the authenticated live
+signup/email → class creation → private RSVP → attendance/feedback journey requires a dedicated
+production test account. No member account was impersonated, no test account was minted and no
+email was sent during this pass. Local full-stack coverage remains separate evidence.
+
+A historical untracked resend helper from deployment is preserved outside the checkout at
+`/opt/freeskool-operator-notes/resend-verify.ts`. Use the committed helper under
+`apps/appview/scripts/` for future maintenance. Backups are owner-readable only; do not commit or
+copy their contents into test artifacts.
+
+### Verified results and remaining acceptance
+
+- 389 backend tests and 205 frontend tests passed; workspace TypeScript checks and production
+  web build passed. Test database isolation was maintained.
+- 27 live public browser scenarios passed (21 Chromium across three viewport sizes; six iPhone
+  WebKit online scenarios). One WebKit offline-navigation check is explicitly marked incomplete.
+  A minimal standalone service worker, unrelated to this application, reproduces the same
+  `WebKit encountered an internal error` under Playwright 1.63 / WebKit 2359. This isolates a
+  test-runtime limitation but does **not** prove physical iPhone offline behavior. Run with
+  `E2E_FORCE_WEBKIT_OFFLINE=1` to attempt that case again after a browser update.
+- Seven additional rendering scenarios passed against the deployed frontend with synthetic data.
+- HTTPS health, `www` redirect, school-handle DID resolution and OAuth client metadata passed.
+- Signed-in production writes, actual email delivery, external OAuth completion and physical
+  mobile push remain unverified in this pass. A dedicated production test account was requested.
