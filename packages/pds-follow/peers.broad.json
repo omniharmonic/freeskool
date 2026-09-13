@@ -1,0 +1,24 @@
+{
+  "peers": [
+    {
+      "name": "eurosky",
+      "host": "https://eurosky.social",
+      "enabled": true
+    },
+    {
+      "name": "northsky",
+      "host": "https://northsky.social",
+      "enabled": true
+    }
+  ],
+  "collections": [
+    "app.bsky.feed.post",
+    "app.bsky.actor.profile"
+  ],
+  "backfillDids": [],
+  "cursorFile": "./.cursors-broad.json",
+  "backfillMethod": "listRecords",
+  "plcUrl": "https://plc.directory",
+  "maxReconnectSeconds": 64,
+  "heartbeatIntervalMs": 10000
+}

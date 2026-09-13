@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en-US">
+  <head>
+    <meta charset="utf-8" />
+    <!-- viewport-fit=cover is required or env(safe-area-inset-*) resolves to 0 (R8) -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+
+    <title>Free School Boulder</title>
+    <meta name="description" content="Classes, skills and requests from your neighbours." />
+
+    <link rel="manifest" href="/manifest.webmanifest" />
+
+    <!-- Safari prefers apple-touch-icon over every manifest icon. Ship it. -->
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon-180.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon-180.png" />
+    <link rel="icon" type="image/svg+xml" href="/icons/icon.svg" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png" />
+
+    <!-- Pre-iOS-26 installability + the label under the Home Screen icon -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="Free School" />
+    <!-- Content sits under the status bar; paired with env() padding in CSS -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+
+    <!-- Safari 26 tints chrome by sampling CSS, not theme-color. Keep both. -->
+    <meta name="theme-color" content="#F7F4EC" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0E1018" media="(prefers-color-scheme: dark)" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,500;12..96,75..100,700;12..96,75..100,800&display=swap"
+    />
+
+    <script>
+      // Applied before first paint so the document background never flashes the
+      // wrong plate colour (Safari 26 samples html/body for chrome tinting).
+      try {
+        var s = JSON.parse(localStorage.getItem('fs.prefs.v1') || '{}');
+        var r = document.documentElement;
+        if (s.theme === 'dark' || s.theme === 'light') r.dataset.theme = s.theme;
+        if (s.reduceBlur) r.dataset.reduceBlur = 'true';
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

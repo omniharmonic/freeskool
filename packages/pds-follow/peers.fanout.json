@@ -1,0 +1,67 @@
+{
+  "peers": [
+    {
+      "name": "eurosky",
+      "host": "https://eurosky.social",
+      "enabled": true
+    },
+    {
+      "name": "northsky",
+      "host": "https://northsky.social",
+      "enabled": true
+    },
+    {
+      "name": "shiitake",
+      "host": "https://shiitake.us-east.host.bsky.network",
+      "enabled": true
+    },
+    {
+      "name": "cauda",
+      "host": "https://pds.cauda.cloud",
+      "enabled": false
+    },
+    {
+      "name": "local-dev",
+      "host": "http://localhost:3000",
+      "enabled": false,
+      "allowPrivateNetwork": true,
+      "unauthenticatedCommits": true
+    },
+    {
+      "name": "shimeji",
+      "host": "https://shimeji.us-east.host.bsky.network",
+      "enabled": true
+    },
+    {
+      "name": "morel",
+      "host": "https://morel.us-east.host.bsky.network",
+      "enabled": true
+    },
+    {
+      "name": "amanita",
+      "host": "https://amanita.us-east.host.bsky.network",
+      "enabled": true
+    },
+    {
+      "name": "lionsmane",
+      "host": "https://lionsmane.us-east.host.bsky.network",
+      "enabled": true
+    }
+  ],
+  "collections": [
+    "community.lexicon.calendar.event",
+    "community.lexicon.calendar.rsvp"
+  ],
+  "backfillDids": [
+    "did:plc:cbkjy5n7bk3ax2wplmtjofq2",
+    "did:plc:jck5nhbxwo5gnwgdfchdqzum",
+    "did:plc:ooensn4mr5mhznzypvxelfa3",
+    "did:plc:zi2k3ep3yzo34xjcwxcrkkzg",
+    "did:plc:t665tlaiems3tmaeily7czco"
+  ],
+  "cursorFile": "./.cursors.json",
+  "backfillMethod": "listRecords",
+  "plcUrl": "https://plc.directory",
+  "maxReconnectSeconds": 64,
+  "heartbeatIntervalMs": 10000
+}

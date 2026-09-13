@@ -1,0 +1,33 @@
+{
+  "name": "@freeschool/pds-follow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Follow a registry of PDS hosts directly via com.atproto.sync.subscribeRepos with getRepo/listRecords backfill (from research brief R4). Basis for the AppView PdsChangeSource.",
+  "author": "Benjamin Life (@omniharmonic)",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "follow": "tsx src/follow-pds.ts follow",
+    "backfill": "tsx src/follow-pds.ts backfill",
+    "resolve": "tsx src/follow-pds.ts resolve",
+    "discover": "tsx src/follow-pds.ts discover"
+  },
+  "dependencies": {
+    "@atproto/api": "0.20.44",
+    "@atproto/identity": "0.5.13",
+    "@atproto/repo": "0.10.14",
+    "@atproto/sync": "0.4.10",
+    "@atproto/syntax": "0.7.6",
+    "@atproto/xrpc": "0.8.13"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

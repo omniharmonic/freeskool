@@ -1,0 +1,19 @@
+{
+  "peers": [
+    {
+      "name": "shiitake",
+      "host": "https://shiitake.us-east.host.bsky.network",
+      "enabled": true
+    }
+  ],
+  "collections": [
+    "community.lexicon.calendar.event",
+    "community.lexicon.calendar.rsvp"
+  ],
+  "backfillDids": [],
+  "cursorFile": "./.cursors-replay.json",
+  "backfillMethod": "listRecords",
+  "plcUrl": "https://plc.directory",
+  "maxReconnectSeconds": 64,
+  "heartbeatIntervalMs": 10000
+}

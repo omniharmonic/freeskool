@@ -1,0 +1,18 @@
+{
+  "peers": [
+    {
+      "name": "local-dev",
+      "host": "http://localhost:3001",
+      "enabled": true,
+      "allowPrivateNetwork": true,
+      "unauthenticatedCommits": true
+    }
+  ],
+  "collections": ["community.lexicon.calendar.event", "community.lexicon.calendar.rsvp"],
+  "backfillDids": [],
+  "cursorFile": "./.cursors-local.json",
+  "backfillMethod": "listRecords",
+  "plcUrl": "https://plc.directory",
+  "maxReconnectSeconds": 8,
+  "heartbeatIntervalMs": 5000
+}

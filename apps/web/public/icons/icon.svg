@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Free School">
+  <rect width="512" height="512" fill="#E7E5DB"/>
+  <circle cx="268" cy="240" r="150" fill="#FF4D8D"/>
+  <rect x="96" y="96" width="300" height="40" fill="#15182B"/>
+  <rect x="96" y="188" width="220" height="40" fill="#15182B"/>
+  <rect x="96" y="280" width="260" height="40" fill="#15182B"/>
+  <rect x="96" y="372" width="170" height="40" fill="#0070C0"/>
+</svg>
