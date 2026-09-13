@@ -3,6 +3,12 @@ import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 import { VitePWA } from 'vite-plugin-pwa';
 
+// Where the dev proxy sends `/api` and the AppView's `/oauth/*` paths. Overridable so a
+// second stack can run beside a first (`APPVIEW_PROXY_TARGET=http://localhost:4100 pnpm
+// --filter @freeschool/web dev`), which is also how the e2e suite is run against a
+// throwaway school while another AppView holds :4000.
+const appview = process.env.APPVIEW_PROXY_TARGET ?? 'http://localhost:4000';
+
 // `root` is pinned so config resolution never walks up out of the workspace.
 export default defineConfig({
   root: import.meta.dirname,
@@ -53,7 +59,7 @@ export default defineConfig({
       // PWA and the API on the same origin in dev so the cookie round-trips
       // without `changeOrigin` rewriting the Host header the AppView's CORS
       // check and OAuth client metadata both key off of.
-      '/api': { target: 'http://localhost:4000', changeOrigin: false },
+      '/api': { target: appview, changeOrigin: false },
       // Exact AppView OAuth paths only (`apps/appview/src/http/routes/oauth.ts`):
       // `/oauth/client-metadata.json`, `/oauth/jwks.json`, `/oauth/callback`.
       // `/api/auth/oauth/start` already lives under the `/api` rule above.
@@ -62,9 +68,9 @@ export default defineConfig({
       // route answers it, so a hard refresh or a shared link 404s there
       // instead of rendering `OAuthConfirmScreen`) — list the real paths
       // individually instead of widening the prefix.
-      '/oauth/client-metadata.json': { target: 'http://localhost:4000', changeOrigin: false },
-      '/oauth/jwks.json': { target: 'http://localhost:4000', changeOrigin: false },
-      '/oauth/callback': { target: 'http://localhost:4000', changeOrigin: false },
+      '/oauth/client-metadata.json': { target: appview, changeOrigin: false },
+      '/oauth/jwks.json': { target: appview, changeOrigin: false },
+      '/oauth/callback': { target: appview, changeOrigin: false },
     },
   },
 });

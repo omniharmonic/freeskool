@@ -18,6 +18,8 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "create-school": "tsx scripts/create-school.ts",
+    "appoint-steward": "tsx scripts/appoint-steward.ts",
+    "privacy-audit": "tsx scripts/privacy-audit.ts",
     "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {

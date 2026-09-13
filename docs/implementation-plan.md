@@ -14,6 +14,38 @@ version: "0.1"
 
 Done this session: pnpm workspace; 17 validated `freeschool.draft.*` lexicons (CC0); `packages/shared` (role ladder, k-anonymity aggregator, 11 tests); `packages/spaces-shim` (Spaces-shaped store, in-memory impl, 4 tests); `packages/school-actor` (`SchoolActorPort` + `AppCustodyAdapter`, threshold + audit, 6 tests); `packages/pds-follow` (R4 follower, typechecks, ran against seven real hosts); `infra/` compose with the reference PDS (`:3000`, healthy) and Postgres 16 (`:5434`, healthy); stack proposal; Lucian packet and Lex questions drafted (not sent); brief v0.2; architecture; PRD. Also done: `apps/web` PWA shell (29 tests, builds) and `apps/appview` core (63 tests; contrail index + Hono API + pg-boss jobs + PostgresSpaceStore + server-side OAuth/custodial signup; `PdsChangeSource` stubbed with interface). End-to-end smoke test passes against the live local PDS + Postgres (school → custodial host → class in host repo + listing as the school → 3 app-side RSVPs → attendance → 3 feedbacks → k=3 summary with text withheld → redacted public calendar + `.ics`). 525-node skill taxonomy seeded under `taxonomy.test`. Workspace: 113 tests passing. Note for local dev: handles are `.test`; the reference PDS does not serve `listReposByCollection`, so contrail's discovery is seeded from `listRepos`.
 
+## 0b. MVP state (2026-09-13)
+
+The thirteen-task MVP plan in `.superpowers/sdd/mvp-plan/` is done and reviewed. The app runs end to end against the local stack: `pnpm --filter @freeschool/appview smoke` (11 steps) prints `SMOKE PASSED`, and `pnpm e2e` drives a browser through the whole member loop. Run sheet: the root `README.md`, "Run the MVP locally".
+
+What landed, per task:
+
+| Task | Landed |
+|---|---|
+| 1 | PWA shell: router, tab bar, iOS large-title screens, API client, mock-free types |
+| 2 | Classes end to end on the server: create/edit, config + skillLevel sidecars, tag-routed listings as the school, invite links with the member-admission gate, requests, zine payload |
+| 3 | Both doors: email signup that mints a custodial identity, magic-link verification, server-side OAuth (503 on `http://localhost`, by protocol), sessions |
+| 4 | Class detail: RSVP, location tiers, `.ics`, invite sharing, install nudge |
+| 5 | Class editor incl. recurrence (client preview + `freeschool.draft.series`), attendance screen |
+| 6 | Skills: taxonomy browse, skill claims with Tier A/B rules, needs board, Me |
+| 7 | Feedback: one anonymous ballot per attendee, three dials plus an explicit yes/no, k-anonymous summary |
+| 8 | Steward surface: policy editor, moderation queue with approvals and audit, peers, newsletter (8a: `write-policy` is single-steward) |
+| 9 | Notifications (outbox, reminders, push, email), newsletter job, retention, how-it-works, take-ownership, public-role opt-in |
+| 10 | Roster-driven attendance, waitlist, materials, steward hand-off, reveal page, how-it-works screen |
+| 11 | `PdsChangeSource`: live `subscribeRepos` from peer PDS hosts, cursors, repair after an outage |
+| 12 | Waitlist promotion, roster authz, skill tiers, take-ownership ordering, raw-visibility gate |
+| 13 | This: the Playwright e2e suite, `scripts/privacy-audit.ts`, the dev mail sink, smoke steps 9–11, these docs |
+
+Deliberately deferred (from the per-task ledger in `.superpowers/sdd/mvp-plan/progress.md`; none blocks v1, all are written down where the code is):
+
+- **Privacy, to decide before Boulder:** public `freeschool.draft.moderationAction` records carry `subjectDid` and `actors[]`, so the privacy audit flags the subject as a violation (plan §3 G says the public projection should show the enum only). An opt-in public RSVP also names its host through the event at-URI. Both are findings from the first real audit run, not regressions.
+- **Attestations:** nothing writes `freeschool.draft.skillAttestation` yet, so "vouched" is always 0 and the audit fails any attestation naming another DID — the double-opt-in table is the missing piece.
+- **Server:** `schoolRoutingTags` fails open and is uncached; N+1 reads on `GET /api/requests`, the calendar and the zine; the zine caps at 500 events with no truncation signal; `fs_member.door` keeps only the most recent door; retention's pending-delete list is bounded at 500/repo; `read()` ignores `options.collections`; repair cooldown is stamped at enqueue.
+- **RSVP/roster (Task 12 M1–M7):** waitlist position uses the first-RSVP `createdAt`; the raw-visibility gate loses to attendee ordering (fails closed); a public RSVP record says "going" while the app says "waitlisted"; roster 403-vs-404 is an existence oracle; waitlisted members count as `rsvp` for the address; `goingCount` filters in JS.
+- **Web:** `EventEditScreen` is ~800 lines and wants splitting; `flattenSkills` is duplicated in three screens; the host card shows presence counts only; the zine's Print button is under 44px; `MeScreen.test.tsx`'s reveal-URL fixture is stale; no test for the invite `alreadyMember` path.
+- **Venue-needed is derived, not a flag:** ticking "Venue needed" in the editor only clears the address — `isVenueNeeded` is "no address AND no neighbourhood", so a class with a neighbourhood is never marked venue-needed. Decide which the host means.
+- **Infra:** `infra/pds.env` should set `PDS_SERVICE_HANDLE_DOMAINS=.test` so `apps/appview/compose.override.yml` can go away, and the dev PDS should not publish to the production PLC directory.
+
 ## 1. Workstreams and owners
 
 | # | Workstream | Owner | Depends on |

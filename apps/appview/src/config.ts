@@ -4,6 +4,7 @@
  * Privacy note (R9): nothing in this file is ever logged. `redactedConfig()` is the
  * only thing allowed near a log line.
  */
+import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 
 const csv = (s: string) =>
@@ -101,6 +102,13 @@ const schema = z.object({
 
   SMTP_URL: z.string().default(''),
   MAIL_FROM: z.string().default('Free School <no-reply@localhost>'),
+  /**
+   * DEV ONLY. With `SMTP_URL` unset, every outgoing mail is appended as one JSON line to
+   * this file (`{to, subject, body, at}`) so a local run — and the Playwright e2e, which
+   * reads the magic link from it — can see a link that must never reach a log line.
+   * Defaults to `apps/appview/.dev-mail.log` (gitignored). Ignored once SMTP is configured.
+   */
+  DEV_MAIL_LOG: z.string().default(''),
 })
 
 export type Config = z.infer<typeof schema> & {
@@ -124,6 +132,8 @@ export type Config = z.infer<typeof schema> & {
   isProd: boolean
   /** WEB_PUBLIC_URL, or APPVIEW_PUBLIC_URL when the PWA is not given its own origin. */
   webPublicUrl: string
+  /** Resolved `DEV_MAIL_LOG`: where `lib/mail.ts` appends mail when SMTP is unset. */
+  devMailLog: string
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -141,6 +151,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     oauthClientId: `${publicUrl}/oauth/client-metadata.json`,
     isProd: parsed.NODE_ENV === 'production',
     webPublicUrl: (parsed.WEB_PUBLIC_URL ?? publicUrl).replace(/\/$/, ''),
+    // `src/config.ts` -> `apps/appview/.dev-mail.log`.
+    devMailLog: parsed.DEV_MAIL_LOG || fileURLToPath(new URL('../.dev-mail.log', import.meta.url)),
   }
 }
 

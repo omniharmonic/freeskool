@@ -20,6 +20,11 @@
  *   5. the host attests attendance for all three
  *   6. all three submit feedback; read the k-anonymous summary
  *   7. list the public calendar, and fetch the `.ics`
+ *   8. index from the peer registry (the safety net beneath PdsChangeSource)
+ *   9. invite links: the host mints one for the class, a fresh member redeems it, and the
+ *      host's own redemption is refused
+ *  10. the printable zine payload for the class's month, and the host's badges
+ *  11. the privacy audit (`scripts/privacy-audit.ts`) over every repo this run wrote
  */
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -53,6 +58,15 @@ const info = (msg: string) => console.log(`    --  ${msg}`)
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(`SMOKE FAILED: ${msg}`)
+}
+
+/**
+ * A payload as JSON with every `at://` URI collapsed, so "does this name a DID?" can be
+ * asked about everything EXCEPT the authority of a public record's own URI (a class's URI
+ * is its host's DID by construction — see `projectEvent`).
+ */
+function withoutAtUris(value: unknown): string {
+  return JSON.stringify(value).replace(/at:\/\/[^"\\]*/g, 'at://<uri>')
 }
 
 async function main() {
@@ -340,6 +354,57 @@ async function main() {
   assert(!JSON.stringify(feedbackNotifs).includes('did:'), 'feedback.received must carry no actor')
   ok('feedback.received notifications carry no actor')
 
+  /* 9. invite links */
+  step(9, 'invite links: mint as the host, redeem as a newcomer')
+  const minted = await postJson(req, '/api/invites', host.cookie, { eventUri, uses: 2, ttlDays: 7 })
+  const inviteToken = minted.token as string
+  assert(typeof inviteToken === 'string' && inviteToken.length > 20, 'no invite token came back')
+  assert(!(minted.url as string).includes('did:'), 'the invite URL must not carry the inviter’s DID')
+  ok(`minted an invite link for the class (${String(minted.url).replace(inviteToken, '<token>')})`)
+
+  const newcomer = await signUp(req, `newcomer-${suffix}@example.org`)
+  const redeemed = await postJson(req, `/api/invites/${encodeURIComponent(inviteToken)}/redeem`, newcomer.cookie, {})
+  assert(redeemed.ok === true, 'the newcomer could not redeem the invite link')
+  assert(redeemed.eventUri === eventUri, 'the redemption did not carry the class it was scoped to')
+  // Everything EXCEPT `eventUri` (whose authority is the host's own public class) must be
+  // DID-free: the inviter's DID stays in `fs_invite_link`, server-side, forever.
+  assert(
+    !JSON.stringify({ ...redeemed, eventUri: undefined }).includes('did:'),
+    'the redemption response must not name the inviter',
+  )
+  ok('the newcomer redeemed it and landed on the class; the response names nobody')
+
+  const selfRedeem = await req(`/api/invites/${encodeURIComponent(inviteToken)}/redeem`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: host.cookie },
+    body: '{}',
+  })
+  assert(selfRedeem.status === 409, `a self-redemption should be refused, got ${selfRedeem.status}`)
+  ok('the host redeeming their own link is refused (409 SelfRedeem)')
+
+  /* 10. the zine, and badges */
+  step(10, 'the printable zine payload, and the host’s badges')
+  const month = startsAt.slice(0, 7)
+  const zinePayload = await getJson(req, `/api/zine/${month}`)
+  const zineDays = (zinePayload.days as Array<{ date: string; events: Array<Record<string, unknown>> }>) ?? []
+  const zineEvents = zineDays.flatMap((d) => d.events)
+  const zineMine = zineEvents.find((e) => e.uri === eventUri)
+  assert(zineMine, `the class is not in the zine for ${month} (${zineEvents.length} event(s) listed)`)
+  assert(typeof (zinePayload.school as { name?: string })?.name === 'string', 'the zine carries no school name')
+  assert(typeof zinePayload.howToPost === 'string', 'the zine carries no "how to post" paragraph')
+  assert(!JSON.stringify(zinePayload).includes('Juniper'), 'the zine leaked the street address')
+  // A class's own AT-URI carries its host's DID — that is what a public event IS, and the
+  // zine needs it as a key. Everything else must be DID-free: no host identity, no roster.
+  assert(!withoutAtUris(zinePayload).includes('did:'), 'the zine names a DID outside a record URI')
+  ok(`zine ${month}: ${zineEvents.length} class(es) over ${zineDays.length} day(s), neighbourhood only, no DIDs`)
+
+  const badges = await getJson(req, '/api/me/badges', host.cookie)
+  const counts = badges.counts as { hosted: number; attended: number; vouched: number }
+  assert(counts.hosted >= 1, `expected the host to have hosted >= 1, got ${counts.hosted}`)
+  assert(Array.isArray(badges.badges) && (badges.badges as string[]).length > 0, 'no badge sentences came back')
+  assert(!JSON.stringify(badges).includes('did:'), 'badges must name no DIDs')
+  ok(`badges: hosted=${counts.hosted} attended=${counts.attended} vouched=${counts.vouched} — "${(badges.badges as string[])[0]}"`)
+
   /* audit trail */
   const { audit } = await import('../src/db/schema.js')
   const { eq } = await import('drizzle-orm')
@@ -348,6 +413,29 @@ async function main() {
   assert(
     auditRows.every((r) => r.reason.trim().length > 0),
     'an audit row has no reason',
+  )
+
+  /* 11. the privacy audit, over exactly the repos this run wrote */
+  step(11, 'privacy audit: no public record names a DID its holder did not write')
+  const { runPrivacyAudit, formatReport } = await import('./privacy-audit.js')
+  // Scoped to this run's repos on purpose. The local PDS accumulates a repo per member per
+  // past run (249 and counting), and the full-PDS audit — `pnpm --filter
+  // @freeschool/appview privacy-audit` — is the one that judges those. What the smoke gates
+  // is the writes THIS run just made.
+  const report = await runPrivacyAudit({
+    schoolDid: school.did,
+    repos: [school.did, host.did, newcomer.did, ...attendees.map((a) => a.did)],
+  })
+  console.log(
+    formatReport(report)
+      .split('\n')
+      .map((line) => `    ${line}`)
+      .join('\n'),
+  )
+  assert(report.violations.length === 0, `the privacy audit found ${report.violations.length} violation(s)`)
+  ok(
+    `privacy audit OK across ${report.repos} repo(s) this run created: ${report.records} record(s) in the ` +
+      'audited collections, 0 violations — 3 RSVPs, 3 attestations and 3 ballots wrote nothing public',
   )
 
   void steward

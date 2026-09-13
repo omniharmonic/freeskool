@@ -12,6 +12,7 @@
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck",
+    "e2e": "pnpm --filter @freeschool/web exec playwright test",
     "lexicons:validate": "pnpm --filter @freeschool/lexicons validate",
     "lexicons:gen": "pnpm --filter @freeschool/lexicons gen",
     "infra:up": "docker compose -f infra/compose.yml up -d",
