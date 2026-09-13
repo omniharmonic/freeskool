@@ -57,6 +57,21 @@ function scopedToAuthority<T>(records: Array<{ did: string } & T>): Array<{ did:
   return authorityDid ? records.filter((r) => r.did === authorityDid) : records
 }
 
+/**
+ * Every taxonomy record the routes may use. The authority scope is applied IN the
+ * query, not after it: `listCollection` caps at 1000 rows, and a dev index carrying a
+ * second, stale authority (2 × 525 rows) would otherwise truncate the real one to
+ * whatever fit under the cap. The post-filter stays as belt-and-braces.
+ */
+async function skillRecords(indexer: Awaited<ReturnType<typeof getIndexer>>) {
+  const authorityDid = config().AUTHORITY_DID
+  const { records } = await listCollection<SkillRecord>(indexer, 'skill', {
+    limit: 1000,
+    ...(authorityDid ? { did: authorityDid } : {}),
+  })
+  return scopedToAuthority(records)
+}
+
 skills.get('/skills', async (c) => {
   // Production was hiding 306 of 525 seeded skills because this defaulted to
   // excluding `proposed` nodes; now they show by default and `?includeProposed=0`
@@ -64,8 +79,7 @@ skills.get('/skills', async (c) => {
   const includeProposed = c.req.query('includeProposed') !== '0'
   const includeDeprecated = c.req.query('includeDeprecated') === '1'
   const indexer = await getIndexer()
-  const { records: allRecords } = await listCollection<SkillRecord>(indexer, 'skill', { limit: 1000 })
-  const records = scopedToAuthority(allRecords)
+  const records = await skillRecords(indexer)
   const nodes = records.filter((r) => {
     if (r.value.status === 'proposed') return includeProposed
     if (r.value.status === 'deprecated') return includeDeprecated
@@ -121,10 +135,9 @@ skills.get('/skills', async (c) => {
 skills.get('/skills/:id', withViewer, async (c) => {
   const uri = decodeURIComponent(c.req.param('id'))
   const indexer = await getIndexer()
-  const { records: allRecords } = await listCollection<SkillRecord>(indexer, 'skill', { limit: 1000 })
   // Deliberately no status filter here (unlike `/skills`): a deprecated node must
   // still resolve directly so an existing claim against it keeps working.
-  const records = scopedToAuthority(allRecords)
+  const records = await skillRecords(indexer)
   const byUri = new Map(records.map((r) => [r.uri, r]))
   const self = byUri.get(uri)
   if (!self) return c.json({ error: 'NotFound' }, 404)
