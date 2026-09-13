@@ -68,7 +68,8 @@ async function publicSummaries(dids: string[]) {
       .map((r) => [r.key.slice('profile:'.length), r.value]),
   )
 }
-async function resources(
+/** Exported for `lib/members.ts`'s member-profile "resources" list (author-owned, public-visible only). */
+export async function resources(
   options: { author?: string; owner?: string; id?: string } = {},
 ) {
   const indexer = await getIndexer()

@@ -121,6 +121,10 @@ const profileBody = z
     avatar: z.object({ data: z.string().max(11_200_000), alt: z.string().max(300) }).nullable().optional(),
     displayName: z.string().trim().max(120).optional(),
     bio: z.string().trim().max(2000).optional(),
+    // Members directory (R9-adjacent) opt-out — see `fs_member_prefs.directory_listing`'s
+    // doc comment in db/schema.ts. Not part of `Profile`/`fs_app_meta`: it lives in
+    // `fs_member_prefs`, the same row `publicRole`/`onboardedAt` already use.
+    directoryListing: z.boolean().optional(),
   })
   .strict()
 
@@ -141,7 +145,18 @@ me.put('/', async (c) => {
     .insert(appMeta)
     .values({ key: PROFILE_KEY(viewer.did), value: profile, updatedAt: new Date() })
     .onConflictDoUpdate({ target: appMeta.key, set: { value: profile, updatedAt: new Date() } })
-  return c.json({ did: viewer.did, profile: visibleProfile(profile) })
+  if (parsed.data.directoryListing !== undefined) {
+    const now = new Date()
+    await getDb()
+      .insert(memberPrefs)
+      .values({ did: viewer.did, directoryListing: parsed.data.directoryListing, updatedAt: now })
+      .onConflictDoUpdate({ target: memberPrefs.did, set: { directoryListing: parsed.data.directoryListing, updatedAt: now } })
+  }
+  return c.json({
+    did: viewer.did,
+    profile: visibleProfile(profile),
+    ...(parsed.data.directoryListing !== undefined ? { directoryListing: parsed.data.directoryListing } : {}),
+  })
 })
 
 function visibleProfile(profile: Profile) {
@@ -167,17 +182,25 @@ me.get('/visibility-defaults', async (c) => {
   })
 })
 
-me.get('/badges', async (c) => {
-  const did = c.var.viewer!.did
+/**
+ * Counts, role and badge sentences for one member — exactly what `GET /api/me/badges`
+ * returns. Exported so `lib/members.ts` can show the same thing on another member's
+ * profile without a second implementation.
+ */
+export async function badgesFor(did: string) {
   const [role, tallyRows, vouches] = await Promise.all([roleOf(did), getDb().select().from(attendanceTally).where(eq(attendanceTally.did, did)).limit(1), vouchesReceived(did)])
   const hosted = tallyRows[0]?.hostedEvents ?? 0
   const attended = tallyRows[0]?.attendedConfirmed ?? 0
   const vouched = vouches.reduce((sum, v) => sum + v.count, 0)
-  return c.json({
+  return {
     counts: { hosted, attended, vouched },
     role,
     badges: badgeSentences({ hosted, attended }, vouches),
-  })
+  }
+}
+
+me.get('/badges', async (c) => {
+  return c.json(await badgesFor(c.var.viewer!.did))
 })
 
 const publicRoleBody = z.object({ publicRole: z.boolean() }).strict()
@@ -232,13 +255,14 @@ async function vouchesReceived(did: string): Promise<VouchCount[]> {
 }
 
 /**
- * Best-effort DID -> handle, scoped to a small set of attesters (same fallback order as
- * `http/routes/events.ts`'s roster `handlesForDids`: our own custodial members first,
- * then contrail's `identities` table for anyone else). Omitted entirely for a DID that
- * resolves nowhere, rather than falling back to the DID itself — an attester handle is
- * cosmetic, never load-bearing.
+ * Best-effort DID -> handle, scoped to a small batch of DIDs (same fallback order as
+ * `http/routes/events.ts`'s roster helper: our own custodial members first, then
+ * contrail's `identities` table for anyone else). Omitted entirely for a DID that
+ * resolves nowhere, rather than falling back to the DID itself — a handle shown next to
+ * someone else's name is cosmetic, never load-bearing. Exported for `lib/members.ts`
+ * (the directory and member profile) so this is the one place the fallback order lives.
  */
-async function handlesForAttesters(dids: string[]): Promise<Record<string, string>> {
+export async function handlesForDids(dids: string[]): Promise<Record<string, string>> {
   if (dids.length === 0) return {}
   const out: Record<string, string> = {}
   const rows = await getDb()
@@ -261,26 +285,45 @@ async function handlesForAttesters(dids: string[]): Promise<Record<string, strin
       /* index not ready; handles are cosmetic, so just omit them */
     }
   }
+  const stillRemaining = dids.filter((d) => !out[d])
+  if (stillRemaining.length > 0) {
+    // Last resort: a previously-resolved handle cached app-side (see the members
+    // directory brief) — nothing writes this cache yet, so this is a no-op today, but
+    // reading it is free and keeps the fallback order this codebase documents intact.
+    const rows = await getDb()
+      .select({ key: appMeta.key, value: appMeta.value })
+      .from(appMeta)
+      .where(inArray(appMeta.key, stillRemaining.map((d) => `handle:${d}`)))
+    for (const r of rows) {
+      const handle = typeof r.value === 'string' ? r.value : undefined
+      if (handle) out[r.key.slice('handle:'.length)] = handle
+    }
+  }
+  return out
+}
+
+/** Batched did -> full app-side profile lookup (avatar/bio/displayName/publicListing). */
+export async function profilesFor(dids: string[]): Promise<Map<string, Profile>> {
+  if (dids.length === 0) return new Map()
+  const rows = await getDb()
+    .select({ key: appMeta.key, value: appMeta.value })
+    .from(appMeta)
+    .where(inArray(appMeta.key, dids.map(PROFILE_KEY)))
+  const out = new Map<string, Profile>()
+  for (const r of rows) out.set(r.key.slice('profile:'.length), (r.value as Profile | undefined) ?? {})
   return out
 }
 
 /** Batched app-side `displayName` lookup, same shape as `events.ts`'s roster helper. */
 async function displayNamesForAttesters(dids: string[]): Promise<Record<string, string>> {
-  if (dids.length === 0) return {}
-  const rows = await getDb()
-    .select({ key: appMeta.key, value: appMeta.value })
-    .from(appMeta)
-    .where(inArray(appMeta.key, dids.map(PROFILE_KEY)))
+  const profiles = await profilesFor(dids)
   const out: Record<string, string> = {}
-  for (const r of rows) {
-    const displayName = (r.value as Profile | undefined)?.displayName
-    if (displayName) out[r.key.slice('profile:'.length)] = displayName
-  }
+  for (const [did, p] of profiles) if (p.displayName) out[did] = p.displayName
   return out
 }
 
-/** Batched skill-uri -> label lookup, for the received-vouches list. */
-async function labelsForSkills(skillUris: string[], indexer: Awaited<ReturnType<typeof getIndexer>>): Promise<Record<string, string>> {
+/** Batched skill-uri -> label lookup, for the received-vouches list and the directory. */
+export async function labelsForSkills(skillUris: string[], indexer: Awaited<ReturnType<typeof getIndexer>>): Promise<Record<string, string>> {
   const out: Record<string, string> = {}
   await Promise.all(
     skillUris.map(async (uri) => {
@@ -315,7 +358,7 @@ me.get('/attestations', async (c) => {
   const attesterDids = [...new Set(received.map((r) => r.attesterDid))]
   const skillUris = [...new Set(received.map((r) => r.skillUri))]
   const [handles, displayNames, labels] = await Promise.all([
-    handlesForAttesters(attesterDids),
+    handlesForDids(attesterDids),
     displayNamesForAttesters(attesterDids),
     labelsForSkills(skillUris, indexer),
   ])

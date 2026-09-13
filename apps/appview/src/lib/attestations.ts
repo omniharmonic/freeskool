@@ -112,6 +112,18 @@ export async function vouchCountsForMany(subjectDids: string[]): Promise<Map<str
   return new Map(rows.map((r) => [r.subjectDid, r.n]))
 }
 
+/** Vouch counts for ONE skill, across a batch of subjects — the members directory's "people with this skill" list. */
+export async function vouchCountsForSkill(skillUri: string, subjectDids: string[]): Promise<Map<string, number>> {
+  const unique = [...new Set(subjectDids)]
+  if (unique.length === 0) return new Map()
+  const rows = await getDb()
+    .select({ subjectDid: attestation.subjectDid, n: sql<number>`count(*)::int` })
+    .from(attestation)
+    .where(and(eq(attestation.skillUri, skillUri), inArray(attestation.subjectDid, unique)))
+    .groupBy(attestation.subjectDid)
+  return new Map(rows.map((r) => [r.subjectDid, r.n]))
+}
+
 /** Which skills has THIS attester already vouched THIS subject for? For the "vouched" UI toggle. */
 export async function viewerVouches(attesterDid: string, subjectDid: string): Promise<Set<string>> {
   const rows = await getDb()

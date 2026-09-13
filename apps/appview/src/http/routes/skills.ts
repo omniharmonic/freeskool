@@ -14,10 +14,12 @@
  */
 import { Hono } from 'hono'
 import type { AppEnv } from '../session.js'
+import { withViewer } from '../session.js'
 import { config } from '../../config.js'
 import { getIndexer } from '../../index/indexer.js'
 import { listCollection, sidecarsForEvent } from '../../index/queries.js'
 import { tiersFor, type SkillTierValue } from '../../lib/skill-tiers.js'
+import { peopleForSkill } from '../../lib/members.js'
 
 export const skills = new Hono<AppEnv>()
 
@@ -112,7 +114,11 @@ skills.get('/skills', async (c) => {
   })
 })
 
-skills.get('/skills/:id', async (c) => {
+// `withViewer` never rejects (public readers keep working); it only populates
+// `c.var.viewer` when a session cookie is present, which is what gates `people` below.
+// The global `withViewer` in `http/app.ts` already covers this in production — repeated
+// here so the route behaves the same if this router is ever mounted/tested on its own.
+skills.get('/skills/:id', withViewer, async (c) => {
   const uri = decodeURIComponent(c.req.param('id'))
   const indexer = await getIndexer()
   const { records: allRecords } = await listCollection<SkillRecord>(indexer, 'skill', { limit: 1000 })
@@ -147,6 +153,10 @@ skills.get('/skills/:id', async (c) => {
   // One batched lookup for self + every ancestor + every child, never one query each.
   const tiers = await tiersFor([self.value.id, ...ancestors.map((a) => a.id), ...childRecords.map((r) => r.value.id)])
 
+  // Members directory (R9): who has this skill, ONLY for a signed-in viewer — an
+  // anonymous reader of this otherwise-public endpoint must never see the roster.
+  const people = c.var.viewer ? await peopleForSkill(uri, c.var.viewer.did) : undefined
+
   return c.json({
     uri: self.uri,
     id: self.value.id,
@@ -164,5 +174,6 @@ skills.get('/skills/:id', async (c) => {
       tier: tiers[r.value.id] ?? 'A',
     })),
     taughtIn: levels.map((l) => ({ event: l.value.event?.uri, level: l.value.level })),
+    ...(people ? { people } : {}),
   })
 })

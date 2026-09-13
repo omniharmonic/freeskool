@@ -71,3 +71,16 @@ export function deriveRole(e: Evidence, t: Thresholds): Role {
 
 export function canHost(role: Role): boolean { return role >= Role.Host }
 export function canModerate(role: Role): boolean { return role >= Role.Steward }
+
+const ROLE_LABELS: Record<Role, string> = {
+  [Role.Visitor]: 'Visitor',
+  [Role.Member]: 'Member',
+  [Role.Host]: 'Host',
+  [Role.Facilitator]: 'Facilitator',
+  [Role.Steward]: 'Steward',
+}
+
+/** Plain-language label for a derived role — for the members directory and profile UI. */
+export function roleLabel(role: Role): string {
+  return ROLE_LABELS[role] ?? 'Member'
+}
