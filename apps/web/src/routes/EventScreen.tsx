@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Navigate, useParams } from '@tanstack/react-router';
+import { Link, Navigate, useParams } from '@tanstack/react-router';
 import { Screen } from '../components/Screen';
 import { Sheet } from '../components/Sheet';
 import { Button, SkillChip, Toggle } from '../components/bits';
@@ -136,6 +136,30 @@ export function EventScreen() {
         <SessionGate prompt="Sign in to RSVP, invite a friend, or turn on reminders.">
           <EventActions event={event} />
         </SessionGate>
+
+        {/* Task 5: host-only management. `viewerRelation` already comes straight
+            from `GET /api/events/:id` (`projectEvent`), so there is nothing
+            further to gate on here. */}
+        {event.viewerRelation === 'host' ? (
+          <div className="mt-6 grid grid-cols-2 gap-3">
+            <Link
+              to="/events/$id/edit"
+              params={{ id: event.uri }}
+              className="plate plate-press plate-ink display inline-flex items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
+              style={{ background: 'var(--c-paper-2)', color: 'var(--c-ink)' }}
+            >
+              Edit this class
+            </Link>
+            <Link
+              to="/events/$id/attendance"
+              params={{ id: event.uri }}
+              className="plate plate-press plate-ink display inline-flex items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
+              style={{ background: 'var(--c-paper-2)', color: 'var(--c-ink)' }}
+            >
+              Check off attendance
+            </Link>
+          </div>
+        ) : null}
       </div>
     </Screen>
   );

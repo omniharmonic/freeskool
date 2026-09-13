@@ -4,6 +4,8 @@ import { OfflineBanner } from './components/OfflineBanner';
 import { InstallProvider } from './components/InstallNudge';
 import { CalendarScreen } from './routes/CalendarScreen';
 import { EventRedirect, EventScreen } from './routes/EventScreen';
+import { EventEditScreen } from './routes/EventEditScreen';
+import { AttendanceScreen } from './routes/AttendanceScreen';
 import { SkillsScreen } from './routes/SkillsScreen';
 import { SkillScreen } from './routes/SkillScreen';
 import { RequestsScreen } from './routes/RequestsScreen';
@@ -51,9 +53,9 @@ const routes = [
 
   // Registered here as placeholders; each is replaced by its real screen in
   // the task named in the plan (`.superpowers/sdd/mvp-plan/task-*-brief.md`).
-  createRoute({ getParentRoute: () => rootRoute, path: '/events/new', component: Placeholder }), // Task 5
-  createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/edit', component: Placeholder }), // Task 5
-  createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/attendance', component: Placeholder }), // Task 5
+  createRoute({ getParentRoute: () => rootRoute, path: '/events/new', component: EventEditScreen }), // Task 5
+  createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/edit', component: EventEditScreen }), // Task 5
+  createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/attendance', component: AttendanceScreen }), // Task 5
   createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/feedback', component: Placeholder }), // Task 7
   createRoute({
     getParentRoute: () => rootRoute,
