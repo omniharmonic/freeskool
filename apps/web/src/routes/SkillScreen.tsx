@@ -1,19 +1,16 @@
 import { Link, useParams } from '@tanstack/react-router';
 import { Screen } from '../components/Screen';
-import { Button, ThresholdRule } from '../components/bits';
+import { Button, SkillChip, ThresholdRule } from '../components/bits';
 import { useEvent, useRequests, useSkill } from '../lib/queries';
 import { formatTime, formatTimeRange } from '../lib/dates';
 
 /**
- * NOT SHOWN HERE: a Tier A/B "sensitive" marker. `GET /api/skills/:id`
- * (`apps/appview/src/http/routes/skills.ts`) does not expose a tier field —
- * it is looked up server-side only, from `PUT /api/me/skill-claims`
- * (`apps/appview/src/lib/skill-tiers.ts`). There is no way to show this
- * marker here without guessing at a skill's tier client-side, which the
- * brief is explicit about never doing. See the Task 6 report.
+ * TIER: `GET /api/skills/:id` now carries `tier` (Task 12) — a "Sensitive"
+ * chip renders under the title for a Tier B skill (`apps/appview/src/lib/
+ * skill-tiers.ts`).
  *
- * Also not shown: a "resources" section (zines, tool-library links) — there
- * is no backend route for skill resources; the mock-era section read from
+ * NOT SHOWN: a "resources" section (zines, tool-library links) — there is
+ * no backend route for skill resources; the mock-era section read from
  * `lib/mock.ts` data that nothing real replaces yet.
  */
 export function SkillScreen() {
@@ -51,6 +48,11 @@ export function SkillScreen() {
   return (
     <Screen title={skill.label} back>
       <div className="safe-x">
+        {skill.tier === 'B' ? (
+          <div className="mb-3">
+            <SkillChip ink="pink">Sensitive — kept off public listings by default</SkillChip>
+          </div>
+        ) : null}
         {skill.description ? <p className="max-w-[60ch] text-body">{skill.description}</p> : null}
 
         {skill.taughtIn.length === 0 ? (

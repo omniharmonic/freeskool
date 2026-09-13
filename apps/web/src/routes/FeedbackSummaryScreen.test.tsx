@@ -30,6 +30,7 @@ const hostEvent = {
   tags: [],
   listed: true,
   skills: [],
+  materials: [],
   rsvps: { going: 3, interested: 0 },
   viewerRelation: 'host' as const,
 };

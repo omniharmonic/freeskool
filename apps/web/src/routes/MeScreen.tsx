@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { applyPrefs, readPrefs, writePrefs, type ThemeChoice } from '../lib/prefs';
 import { Screen } from '../components/Screen';
-import { Button, Toggle } from '../components/bits';
+import { Button, SkillChip, Toggle } from '../components/bits';
 import { Sheet } from '../components/Sheet';
 import { useInstallFlow } from '../components/InstallNudge';
 import { api, ApiError } from '../lib/api';
@@ -13,10 +13,11 @@ import {
   useMyClaims,
   useSetSkillClaimsMutation,
   useSkillTree,
+  useTakeOwnershipMutation,
   useUpdateProfileMutation,
   useVisibilityDefaults,
 } from '../lib/queries';
-import type { SkillClaimInput, SkillClaimLevel, SkillClaimsResponse, SkillNode } from '../lib/types';
+import type { SkillClaimInput, SkillClaimLevel, SkillClaimsResponse, SkillNode, SkillTier } from '../lib/types';
 
 const CLAIM_LEVEL_LABEL: Record<SkillClaimLevel, string> = {
   learning: 'Learning',
@@ -57,11 +58,11 @@ function claimsFromServer(data: SkillClaimsResponse | undefined): EditableClaim[
   return [...fromPublic, ...fromSchool];
 }
 
-function flattenSkills(nodes: SkillNode[], trail: string[] = []): Array<{ uri: string; path: string }> {
-  const out: Array<{ uri: string; path: string }> = [];
+function flattenSkills(nodes: SkillNode[], trail: string[] = []): Array<{ uri: string; path: string; tier: SkillTier }> {
+  const out: Array<{ uri: string; path: string; tier: SkillTier }> = [];
   for (const node of nodes) {
     const path = [...trail, node.label];
-    out.push({ uri: node.uri, path: path.join(' › ') });
+    out.push({ uri: node.uri, path: path.join(' › '), tier: node.tier });
     out.push(...flattenSkills(node.children, path));
   }
   return out;
@@ -157,10 +158,12 @@ export function MeScreen() {
     setClaims((prev) => prev.map((c) => (c.skill === skill ? { ...c, visibility } : c)));
   };
 
-  // Tier B confirm flow: the client has no way to know a skill's tier up
-  // front (`GET /api/skills` doesn't expose it — see `SkillsScreen.tsx`'s
-  // doc comment), so this is always try-then-confirm, driven entirely by
-  // the server's 400 `TierBConfirmRequired`, never a client-side guess.
+  // Tier B confirm flow: `GET /api/skills` now exposes each node's `tier`
+  // (Task 12), so a new Tier B claim already defaults to school-only up
+  // front (see the skill-picker's `onClick` above) — but the server's 400
+  // `TierBConfirmRequired` is still the real gate (a stale tree, or a claim
+  // typed by URI, could disagree with what's shown), so this stays
+  // try-then-confirm rather than trusting the client's own tier read.
   const submitClaims = async (confirmTierB: boolean) => {
     setClaimsError(null);
     const body: { claims: SkillClaimInput[]; confirmTierB?: boolean } = {
@@ -268,7 +271,10 @@ export function MeScreen() {
               <li key={claim.skill} className="plate p-3.5">
                 <div className="flex items-start justify-between gap-3">
                   <div className="min-w-0 flex-1">
-                    <p className="text-body">{skillInfo?.path ?? claim.skill}</p>
+                    <p className="flex items-center gap-2 text-body">
+                      <span>{skillInfo?.path ?? claim.skill}</span>
+                      {skillInfo?.tier === 'B' ? <SkillChip ink="pink">Sensitive</SkillChip> : null}
+                    </p>
                     <p className="mt-1 text-caption text-ink-soft">{CLAIM_LEVEL_LABEL[claim.level]}</p>
                   </div>
                   <button type="button" className="shrink-0 text-caption text-ink-faint" onClick={() => removeClaim(claim.skill)}>
@@ -306,7 +312,12 @@ export function MeScreen() {
           <p className="text-caption text-ink-soft">Add a skill</p>
           {draftSkillUri ? (
             <div className="flex items-center justify-between gap-3 border-[1.5px] border-ink bg-sheet px-3 py-2">
-              <span className="text-body">{flatSkills.find((s) => s.uri === draftSkillUri)?.path ?? draftSkillUri}</span>
+              <span className="flex items-center gap-2 text-body">
+                <span>{flatSkills.find((s) => s.uri === draftSkillUri)?.path ?? draftSkillUri}</span>
+                {flatSkills.find((s) => s.uri === draftSkillUri)?.tier === 'B' ? (
+                  <SkillChip ink="pink">Sensitive</SkillChip>
+                ) : null}
+              </span>
               <button type="button" className="text-caption text-blue" onClick={() => setDraftSkillUri('')}>
                 Change
               </button>
@@ -330,6 +341,9 @@ export function MeScreen() {
                         onClick={() => {
                           setDraftSkillUri(s.uri);
                           setDraftSkillSearch('');
+                          // Tier B (sensitive) defaults to school-only; Tier A to public —
+                          // an oauth-door session still always defaults to school-only.
+                          setDraftVisibility(oauthLocked || s.tier === 'B' ? 'school' : 'public');
                         }}
                       >
                         {s.path}
@@ -483,7 +497,19 @@ export function MeScreen() {
               Open
             </a>
           </div>
+
+          <div className="flex items-center justify-between gap-4 p-3.5">
+            <span className="min-w-0">
+              <span className="block text-body">How this skool works</span>
+              <span className="block text-caption text-ink-soft">A plain-language explainer, good for printing.</span>
+            </span>
+            <a href="/how-it-works" className="shrink-0 text-caption font-bold text-blue">
+              Open
+            </a>
+          </div>
         </div>
+
+        {me?.isCustodial ? <TakeOwnershipSection /> : null}
 
         <div className="mt-6 mb-2">
           <Button
@@ -521,5 +547,86 @@ export function MeScreen() {
         </p>
       </Sheet>
     </Screen>
+  );
+}
+
+type OwnershipState =
+  | { kind: 'idle' }
+  | { kind: 'done'; revealUrl?: string }
+  | { kind: 'pending'; expiresAt?: string }
+  | { kind: 'error'; message: string };
+
+/**
+ * Visible only for a custodial account (`me.isCustodial`, `GET /api/auth/me`).
+ * `POST /api/auth/take-ownership` rotates the PDS password server-side and
+ * hands back either nothing (mail sent) or a `revealUrl` (mail unconfigured
+ * or the send failed) — see `apps/appview/src/lib/custody.ts#takeOwnership`'s
+ * doc comment. The password itself never passes through this screen; it
+ * lives only behind the one-time `/account/reveal/:token` link.
+ */
+function TakeOwnershipSection() {
+  const takeOwnershipMutation = useTakeOwnershipMutation();
+  const [state, setState] = useState<OwnershipState>({ kind: 'idle' });
+
+  const onTakeOwnership = async () => {
+    try {
+      const result = await takeOwnershipMutation.mutateAsync();
+      setState({ kind: 'done', revealUrl: result.revealUrl });
+    } catch (err) {
+      if (err instanceof ApiError && err.code === 'RevealPending') {
+        const body = err.body as { expiresAt?: string } | undefined;
+        setState({ kind: 'pending', expiresAt: body?.expiresAt });
+        return;
+      }
+      setState({
+        kind: 'error',
+        message: err instanceof ApiError ? err.message : 'Could not rotate your password. Try again.',
+      });
+    }
+  };
+
+  return (
+    <>
+      <h2 className="mt-8 mb-2.5 text-lede font-bold">Take ownership of this account</h2>
+      <div className="plate p-3.5">
+        <p className="text-body">
+          Right now this app holds the password to your account so it can publish on your behalf. Taking ownership
+          gives you that password directly — after that, the app can no longer act for you, and it never keeps a
+          copy.
+        </p>
+
+        {state.kind === 'done' ? (
+          <div className="mt-3">
+            <p className="text-body text-ink-soft">Check your email for a link to see your new password.</p>
+            {state.revealUrl ? (
+              <p className="mt-2 text-caption text-ink-soft">
+                No mail is set up on this server — use this link instead:{' '}
+                <a className="break-all text-blue underline" href={state.revealUrl}>
+                  {state.revealUrl}
+                </a>
+              </p>
+            ) : null}
+          </div>
+        ) : state.kind === 'pending' ? (
+          <p className="mt-3 text-body text-pink">
+            A take-ownership link is already pending
+            {state.expiresAt ? ` — it's good until ${new Date(state.expiresAt).toLocaleString()}` : ''}. Check your
+            email, or wait for it to expire before trying again.
+          </p>
+        ) : state.kind === 'error' ? (
+          <p className="mt-3 text-body text-pink">{state.message}</p>
+        ) : null}
+
+        <div className="mt-3">
+          <Button
+            ink="pink"
+            onClick={() => void onTakeOwnership()}
+            disabled={takeOwnershipMutation.isPending || state.kind === 'done'}
+          >
+            Take ownership
+          </Button>
+        </div>
+      </div>
+    </>
   );
 }

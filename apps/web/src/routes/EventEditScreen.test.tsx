@@ -51,6 +51,7 @@ const skillTree = {
       id: 'bread',
       label: 'Bread baking',
       status: 'canonical',
+      tier: 'A' as const,
       alsoUnder: [],
       children: [],
     },
@@ -144,12 +145,12 @@ describe('EventEditScreen', () => {
 
     await waitFor(() => expect(api.events.create).toHaveBeenCalled());
     const body = vi.mocked(api.events.create).mock.calls[0]![0];
-    // A 6pm start in this machine's zone (America/Denver, per the test
-    // environment) is already the next day in UTC, and `rrule`'s BYDAY
-    // matches `getUTCDay()` — so the wire-level code for the host's "Thu"
-    // click is its UTC-equivalent, "FR" (see recurrence.ts's `effectiveByDay`
-    // doc comment; this is the bug found verifying this task manually).
-    expect(body.series).toMatchObject({ freq: 'weekly', byDay: ['FR'] });
+    // Task 10: the wire payload now carries the host's literal local-day
+    // click verbatim — no UTC shift. The server expands BYDAY in the
+    // series' own timezone (`apps/appview/src/jobs/materialize-series.ts`),
+    // so "Thu" stays "TH" even though a 6pm Denver start is already the next
+    // calendar day in UTC.
+    expect(body.series).toMatchObject({ freq: 'weekly', byDay: ['TH'] });
     expect(body.series!.rrule).toContain('FREQ=WEEKLY');
   });
 
@@ -165,6 +166,7 @@ describe('EventEditScreen', () => {
       tags: [],
       listed: true,
       skills: [],
+      materials: [],
       rsvps: { going: 0, interested: 0 },
       viewerRelation: 'host' as const,
     });
@@ -201,6 +203,7 @@ describe('EventEditScreen', () => {
       tags: [],
       listed: true,
       skills: [],
+      materials: [],
       rsvps: { going: 0, interested: 0 },
       viewerRelation: 'host' as const,
     });
@@ -232,6 +235,7 @@ describe('EventEditScreen', () => {
       tags: [],
       listed: true,
       skills: [],
+      materials: [],
       rsvps: { going: 0, interested: 0 },
       viewerRelation: 'host' as const,
     });
@@ -262,6 +266,7 @@ describe('EventEditScreen', () => {
       tags: [],
       listed: true,
       skills: [{ skill: 'at://did:plc:school/freeschool.draft.skill/bread', level: 2 as const }],
+      materials: [],
       rsvps: { going: 0, interested: 0 },
       viewerRelation: 'host' as const,
     });
@@ -304,5 +309,75 @@ describe('EventEditScreen', () => {
     const titleInput = await screen.findByLabelText(/class title/i);
     await waitFor(() => expect(titleInput).toHaveValue('Someone teach me to sharpen things properly'));
     expect(await screen.findByText('Bread baking')).toBeInTheDocument();
+  });
+
+  it('sends real `materials`/`suppliesNote` fields on create, never composed into the description', async () => {
+    renderScreen();
+
+    fireEvent.change(await screen.findByLabelText(/class title/i), { target: { value: 'Sourdough basics' } });
+    fireEvent.change(screen.getByLabelText(/^starts$/i), { target: { value: '2026-10-01T18:00' } });
+    fireEvent.change(screen.getByLabelText(/description/i), { target: { value: 'Bring your own starter.' } });
+    fireEvent.click(screen.getByLabelText(/venue needed/i));
+
+    fireEvent.change(screen.getByPlaceholderText('A mixing bowl'), { target: { value: 'A mixing bowl' } });
+    fireEvent.click(screen.getAllByRole('button', { name: /^add$/i })[0]!);
+    fireEvent.change(screen.getByLabelText(/supplies note/i), { target: { value: 'Flour provided.' } });
+
+    fireEvent.click(screen.getByRole('button', { name: /post this class/i }));
+
+    await waitFor(() => expect(api.events.create).toHaveBeenCalled());
+    const body = vi.mocked(api.events.create).mock.calls[0]![0];
+    expect(body.materials).toEqual(['A mixing bowl']);
+    expect(body.suppliesNote).toBe('Flour provided.');
+    // Never composed into the description — that was the old workaround.
+    expect(body.description).toBe('Bring your own starter.');
+  });
+
+  it('edit: prefills materials, suppliesNote, and the raw visibility enum from the host view', async () => {
+    paramsReturn = { id: EVENT_URI };
+    vi.mocked(api.events.get).mockResolvedValue({
+      uri: EVENT_URI,
+      name: 'Sourdough basics',
+      startsAt: '2026-10-01T18:00:00-06:00',
+      locationRedacted: false,
+      hostDid: 'did:plc:host1',
+      venueNeeded: true,
+      tags: [],
+      listed: true,
+      skills: [],
+      materials: ['A mixing bowl', 'A scale'],
+      suppliesNote: 'Flour provided.',
+      visibility: 'unlisted',
+      rsvps: { going: 0, interested: 0 },
+      viewerRelation: 'host' as const,
+    });
+    vi.mocked(api.events.update).mockResolvedValue({
+      event: { uri: EVENT_URI, cid: 'cid9' },
+      config: { uri: 'at://did:plc:host1/coop.lexicon.event.config/cfg1', cid: 'cid2' },
+    });
+
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Edit class' });
+
+    expect(screen.getByText('A mixing bowl')).toBeInTheDocument();
+    expect(screen.getByText('A scale')).toBeInTheDocument();
+    expect(screen.getByLabelText(/supplies note/i)).toHaveValue('Flour provided.');
+
+    // Prefilled into STATE, but the touched-only submit rule means nothing
+    // is checked yet and saving without touching visibility sends no key.
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(api.events.update).toHaveBeenCalled());
+    const [, body] = vi.mocked(api.events.update).mock.calls[0]!;
+    expect('visibility' in body).toBe(false);
+    // Sent on edit even though they weren't changed — same "always send on
+    // edit" rule as tags/locations/skills.
+    expect(body.materials).toEqual(['A mixing bowl', 'A scale']);
+    expect(body.suppliesNote).toBe('Flour provided.');
+  });
+
+  it('shows an explanation that a waitlist forms once capacity fills', async () => {
+    renderScreen();
+    fireEvent.change(await screen.findByLabelText(/capacity \(optional\)/i), { target: { value: '10' } });
+    expect(await screen.findByText(/anyone else who rsvps joins a waitlist/i)).toBeInTheDocument();
   });
 });

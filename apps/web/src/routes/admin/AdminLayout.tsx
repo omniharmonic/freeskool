@@ -19,8 +19,6 @@ const TABS: ReadonlyArray<{ key: AdminTab; to: string; label: string }> = [
   { key: 'moderation', to: '/admin/moderation', label: 'Moderation' },
   { key: 'peers', to: '/admin/peers', label: 'Peers' },
   { key: 'newsletter', to: '/admin/newsletter', label: 'Newsletter' },
-  // Task 10 builds the real screen; the route itself still exists (`router.tsx`'s
-  // Placeholder), so this link already works — it just lands on "coming later."
   { key: 'handoff', to: '/admin/handoff', label: 'Hand-off' },
 ];
 

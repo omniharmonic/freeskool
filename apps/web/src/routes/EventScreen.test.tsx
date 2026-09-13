@@ -88,6 +88,7 @@ const baseEvent = {
   origin: 'ours' as const,
   listed: true,
   skills: [],
+  materials: [],
   rsvps: { going: 2, interested: 1 },
   viewerRelation: 'public' as const,
 };
@@ -301,5 +302,44 @@ describe('EventScreen', () => {
     expect(requestPermission).toHaveBeenCalled();
 
     if (originalNotification) (globalThis as { Notification?: unknown }).Notification = originalNotification;
+  });
+
+  it('shows materials and the supplies note when the host set them', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({
+      ...baseEvent,
+      materials: ['A mixing bowl', 'A scale'],
+      suppliesNote: 'Flour provided.',
+    });
+    renderScreen();
+    expect(await screen.findByText('What to bring')).toBeInTheDocument();
+    expect(screen.getByText('A mixing bowl')).toBeInTheDocument();
+    expect(screen.getByText('A scale')).toBeInTheDocument();
+    expect(screen.getByText('Flour provided.')).toBeInTheDocument();
+  });
+
+  it('omits the "What to bring" section when there are no materials and no supplies note', async () => {
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+    expect(screen.queryByText('What to bring')).not.toBeInTheDocument();
+  });
+
+  it('shows the waitlist position and an "on the waitlist" button state', async () => {
+    vi.mocked(api.rsvp.get).mockResolvedValue({
+      rsvp: { status: 'waitlisted', alsoPublicRecord: false, waitlistPosition: 3 },
+      counts: { going: 2, interested: 1 },
+    });
+    renderScreen();
+    expect(await screen.findByRole('button', { name: "You're on the waitlist" })).toBeInTheDocument();
+    expect(screen.getByText(/you're #3 on the waitlist/i)).toBeInTheDocument();
+  });
+
+  it('tapping the waitlisted button clears the RSVP (leaving the waitlist)', async () => {
+    vi.mocked(api.rsvp.get).mockResolvedValue({
+      rsvp: { status: 'waitlisted', alsoPublicRecord: false, waitlistPosition: 3 },
+      counts: { going: 2, interested: 1 },
+    });
+    renderScreen();
+    fireEvent.click(await screen.findByRole('button', { name: "You're on the waitlist" }));
+    await waitFor(() => expect(api.rsvp.clear).toHaveBeenCalledWith(EVENT_URI));
   });
 });

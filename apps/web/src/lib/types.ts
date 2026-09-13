@@ -40,6 +40,32 @@ export interface AuthMe {
   emailVerified: boolean;
 }
 
+/**
+ * `POST /api/auth/take-ownership` — mirrors the route's 200 body exactly
+ * (`apps/appview/src/http/routes/auth.ts:126-136`). `revealUrl` is present
+ * only when mail is unconfigured or the send itself failed — see
+ * `lib/custody.ts#takeOwnership`'s doc comment. A 409 `RevealPending` (an
+ * unused, unexpired link already exists) carries its own `expiresAt`
+ * alongside the error body, not on this success shape.
+ */
+export interface TakeOwnershipResult {
+  ok: true;
+  handle: string;
+  revealUrl?: string;
+}
+
+/**
+ * `GET /api/auth/take-ownership/:token` — deliberately unauthenticated and
+ * single-use (`apps/appview/src/http/routes/auth.ts:146-155`). 404 `NotFound`
+ * / 410 `AlreadyUsed` / 410 `Expired` come back as `ApiError`, not this shape.
+ */
+export interface OwnershipRevealResult {
+  ok: true;
+  handle: string;
+  password: string;
+  message: string;
+}
+
 // ── calendar / events ────────────────────────────────────────────────────
 
 export interface EventLocation {
@@ -106,6 +132,18 @@ export interface EventDetail extends CalendarEvent {
   skills: SkillLevelRef[];
   rsvps: RsvpCounts;
   viewerRelation: ViewerRelation;
+  /** ≤20 items, ≤120 chars each (`apps/appview/src/http/routes/events.ts`'s
+   * `createBody`). Always present — `[]` when the host listed none. */
+  materials: string[];
+  /** ≤300 chars. Present only when the host set one. */
+  suppliesNote?: string;
+  /**
+   * The raw `listed|unlisted|private` enum — present ONLY for the host or a
+   * steward (`canViewRoster` in `apps/appview/src/http/routes/events.ts`'s
+   * `GET /api/events/:id`). Absent for everyone else; never render this as a
+   * public fact.
+   */
+  visibility?: 'listed' | 'unlisted' | 'private';
 }
 
 export interface EventSeriesInput {
@@ -133,6 +171,10 @@ export interface CreateEventInput {
   visibility?: 'listed' | 'unlisted' | 'private';
   neighborhood?: string;
   rsvpRequired?: boolean;
+  /** ≤20 items, ≤120 chars each. */
+  materials?: string[];
+  /** ≤300 chars. */
+  suppliesNote?: string;
   tags?: string[];
   skills?: SkillLevelRef[];
   series?: EventSeriesInput;
@@ -178,6 +220,9 @@ export interface RsvpSetResult {
   ok: boolean;
   status: string;
   alsoPublicRecord: boolean;
+  /** Present only when `status` resolved to `'waitlisted'` — the capacity was
+   * already full when this RSVP landed. 1-indexed. */
+  waitlistPosition?: number;
   counts: RsvpCounts;
 }
 
@@ -199,8 +244,21 @@ export interface MyRsvp {
  * there.
  */
 export interface RsvpGetResult {
-  rsvp: { status: string; alsoPublicRecord: boolean } | null;
+  rsvp: { status: string; alsoPublicRecord: boolean; waitlistPosition?: number } | null;
   counts: RsvpCounts;
+}
+
+/**
+ * `GET /api/events/:id/rsvps` — the host's (or a steward's) own roster,
+ * never public (`canViewRoster` in `apps/appview/src/http/routes/events.ts`).
+ * The route returns the array directly, not wrapped in an object.
+ */
+export interface RosterEntry {
+  did: string;
+  handle: string;
+  displayName?: string;
+  status: 'going' | 'interested' | 'waitlisted';
+  createdAt: string;
 }
 
 // ── attendance ───────────────────────────────────────────────────────────
@@ -273,12 +331,16 @@ export interface RequestRsvpResult {
 
 // ── skills ───────────────────────────────────────────────────────────────
 
+/** 'A' (ordinary) | 'B' (sensitive/high-risk) — `apps/appview/src/lib/skill-tiers.ts`. */
+export type SkillTier = 'A' | 'B';
+
 export interface SkillNode {
   uri: string;
   id: string;
   label: string;
   description?: string;
   status: string;
+  tier: SkillTier;
   alsoUnder: string[];
   children: SkillNode[];
 }
@@ -293,10 +355,11 @@ export interface SkillDetail {
   label: string;
   description?: string;
   status: string;
+  tier: SkillTier;
   replacedBy?: string;
   prerequisites: string[];
-  ancestors: Array<{ uri: string; label: string }>;
-  children: Array<{ uri: string; label: string; status: string }>;
+  ancestors: Array<{ uri: string; label: string; tier: SkillTier }>;
+  children: Array<{ uri: string; label: string; status: string; tier: SkillTier }>;
   taughtIn: Array<{ event?: string; level: number }>;
 }
 
@@ -315,9 +378,12 @@ export interface SkillClaimInput {
  * `PUT /api/me/skill-claims`'s body (`apps/appview/src/http/routes/me.ts`'s
  * `claimsBody`). `confirmTierB` is required on a resend after the server
  * refuses a Tier B public claim with 400 `TierBConfirmRequired` — see
- * `checkPublicClaims` there. The client has no way to know a skill's tier up
- * front (`GET /api/skills` does not expose it), so this is always a
- * try-then-confirm flow, never a client-side guess.
+ * `checkPublicClaims` there. `GET /api/skills` now exposes each node's
+ * `tier` (Task 12), so the UI defaults a new Tier B claim's visibility to
+ * school-only up front — but the server's 400 is still the real gate (a
+ * stale client-side tree, or a claim typed by URI, could still disagree),
+ * so this stays a try-then-confirm flow rather than trusting the client's
+ * own read of the tier.
  */
 export interface SkillClaimsSetInput {
   claims: SkillClaimInput[];
@@ -645,19 +711,47 @@ export interface NewsletterDraft {
   [key: string]: unknown;
 }
 
-/** Stubs — Task 2/9 fix the real shape once `POST /api/admin/handoff*` exist. */
+/**
+ * `POST /api/admin/handoff` (steward) — see the module doc comment on
+ * `apps/appview/src/http/routes/handoff.ts`.
+ */
 export interface HandoffStartInput {
-  [key: string]: unknown;
+  /** A handle or a DID. Omitted: anyone who holds the link may accept. */
+  toHandleOrDid?: string;
 }
 
-export interface HandoffResult {
-  [key: string]: unknown;
+export interface HandoffStartResult {
+  id: string;
+  url: string;
+  token: string;
+  expiresAt: string;
+}
+
+/** `POST /api/handoff/:token/accept` — NOT under `/api/admin` (see the route's
+ * module doc comment for why). `warning: 'single-steward'` means the school
+ * still has only one active steward after this accept. */
+export interface HandoffAcceptResult {
+  ok: true;
+  uri: string;
+  auditId: string;
+  warning?: 'single-steward';
 }
 
 // ── school / zine (Task 2) ───────────────────────────────────────────────
 
+/** Mirrors `HowItWorksPayload` in `apps/appview/src/lib/how-it-works.ts`
+ * exactly — rendered live from the school record + current policy. */
+export interface HowItWorksSection {
+  heading: string;
+  body: string;
+}
+
 export interface HowItWorksResponse {
-  [key: string]: unknown;
+  title: string;
+  school: { name: string; region?: string; description?: string };
+  sections: HowItWorksSection[];
+  lastUpdated: string;
+  printable: true;
 }
 
 export interface ZineMonthResponse {

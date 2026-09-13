@@ -14,6 +14,7 @@ import type {
   CreateEventInput,
   CreateRequestInput,
   FeedbackInput,
+  HandoffStartInput,
   ModerationProposeInput,
   NotificationPref,
   PeersInput,
@@ -422,5 +423,61 @@ export function useSetAttendanceMutation() {
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: ['attendance', variables.eventId] });
     },
+  });
+}
+
+/** Host-or-steward-only roster (`GET /api/events/:id/rsvps`) — 403s for
+ * anyone else, so `retry: false` matches `useAttendance()`. */
+export function useEventRoster(eventId: string | undefined) {
+  return useQuery({
+    queryKey: ['roster', eventId],
+    queryFn: () => api.events.roster(eventId as string),
+    enabled: Boolean(eventId),
+    retry: false,
+  });
+}
+
+export function useHowItWorks() {
+  return useQuery({
+    queryKey: ['how-it-works'],
+    queryFn: () => api.school.howItWorks(),
+  });
+}
+
+export function useHandoffStartMutation() {
+  return useMutation({
+    mutationFn: (body: HandoffStartInput) => api.admin.handoff.start(body),
+    retry: false,
+  });
+}
+
+export function useHandoffAcceptMutation() {
+  return useMutation({
+    mutationFn: (token: string) => api.admin.handoff.accept(token),
+    retry: false,
+  });
+}
+
+/** The exit from custody. Never retries: a 409 `RevealPending` or 502
+ * `PdsRotationFailed` are real, expected responses to show, not transient
+ * failures. */
+export function useTakeOwnershipMutation() {
+  return useMutation({
+    mutationFn: () => api.auth.takeOwnership(),
+    retry: false,
+  });
+}
+
+/** `GET /api/auth/take-ownership/:token` — unauthenticated and single-use.
+ * `staleTime: Infinity` + `retry: false` keep a remount (or a dev
+ * double-effect) from spending the token a second time against the server;
+ * the query cache itself already dedupes genuinely concurrent requests for
+ * the same key. */
+export function useOwnershipReveal(token: string) {
+  return useQuery({
+    queryKey: ['ownership-reveal', token],
+    queryFn: () => api.auth.revealOwnership(token),
+    retry: false,
+    staleTime: Infinity,
   });
 }

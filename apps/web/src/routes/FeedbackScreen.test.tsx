@@ -44,6 +44,7 @@ const attendedEvent = {
   tags: [],
   listed: true,
   skills: [],
+  materials: [],
   rsvps: { going: 3, interested: 0 },
   viewerRelation: 'attendee' as const,
 };

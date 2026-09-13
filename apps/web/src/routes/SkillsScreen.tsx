@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Screen } from '../components/Screen';
+import { SkillChip } from '../components/bits';
 import { useSkillTree } from '../lib/queries';
 import type { SkillNode } from '../lib/types';
 
@@ -11,12 +12,10 @@ import type { SkillNode } from '../lib/types';
  * Real skill nodes nest directly (`children`), so roots are rendered as the
  * expandable sections and their children as the flat list beneath.
  *
- * TIER: `GET /api/skills` does not expose a Tier A/B marker at all (the tier
- * table — `apps/appview/src/lib/skill-tiers.ts` — is looked up server-side
- * only, from `PUT /api/me/skill-claims`). There is therefore no sensitive/
- * "kept off the public taxonomy" badge to show here without guessing at a
- * skill's tier client-side, which the brief is explicit about never doing.
- * See the Task 6 report for this gap.
+ * TIER: `GET /api/skills` now carries each node's `tier` (Task 12) — a "B"
+ * marks a sensitive/high-risk skill, looked up server-side from
+ * `apps/appview/src/lib/skill-tiers.ts`. `SkillLink` below shows a
+ * "Sensitive" chip next to any Tier B skill's label.
  */
 export function SkillsScreen() {
   const { data, isPending } = useSkillTree();
@@ -120,6 +119,7 @@ function SkillLink({ skill }: { skill: SkillNode }) {
       <span className="text-body underline decoration-[1.5px] decoration-pink underline-offset-[5px]">
         {skill.label}
       </span>
+      {skill.tier === 'B' ? <SkillChip ink="pink">Sensitive</SkillChip> : null}
     </Link>
   );
 }

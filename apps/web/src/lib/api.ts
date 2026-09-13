@@ -33,8 +33,9 @@ import type {
   EventDetail,
   FeedbackInput,
   FeedbackSummary,
-  HandoffResult,
+  HandoffAcceptResult,
   HandoffStartInput,
+  HandoffStartResult,
   HowItWorksResponse,
   InviteMintInput,
   InviteMintResult,
@@ -51,6 +52,7 @@ import type {
   NotificationPref,
   NotificationPrefsResponse,
   NotificationsResponse,
+  OwnershipRevealResult,
   PeersInput,
   PeersResponse,
   PublicRoleResponse,
@@ -60,6 +62,7 @@ import type {
   RequestMutationResult,
   RequestRsvpResult,
   RequestsResponse,
+  RosterEntry,
   RsvpClearResult,
   RsvpGetResult,
   RsvpSetInput,
@@ -72,6 +75,7 @@ import type {
   SkillClaimsSetResult,
   SkillDetail,
   SkillTreeResponse,
+  TakeOwnershipResult,
   UpdateEventResult,
   UpdateProfileInput,
   UpdateProfileResult,
@@ -84,12 +88,16 @@ import type {
 export class ApiError extends Error {
   status: number;
   code?: string;
+  /** The full parsed response body, for the rare caller that needs a field
+   * beyond `error`/`message` (e.g. `take-ownership`'s `expiresAt` on a 409). */
+  body?: unknown;
 
-  constructor(status: number, code: string | undefined, message: string) {
+  constructor(status: number, code: string | undefined, message: string, body?: unknown) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.code = code;
+    this.body = body;
   }
 }
 
@@ -134,7 +142,7 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
 
   if (!res.ok) {
     const errBody = (data ?? {}) as { error?: string; message?: string };
-    throw new ApiError(res.status, errBody.error, errBody.message ?? `Request failed with status ${res.status}`);
+    throw new ApiError(res.status, errBody.error, errBody.message ?? `Request failed with status ${res.status}`, data);
   }
   return data as T;
 }
@@ -159,6 +167,11 @@ export const api = {
      */
     oauthStartUrl: (confirm: boolean, handle: string): string =>
       buildUrl('/api/auth/oauth/start', { confirm: confirm ? '1' : '0', handle }),
+    /** The exit from custody — see `MeScreen`'s "Take ownership" section. */
+    takeOwnership: () => post<TakeOwnershipResult>('/api/auth/take-ownership'),
+    /** Deliberately unauthenticated and single-use — see `RevealScreen`. */
+    revealOwnership: (token: string) =>
+      get<OwnershipRevealResult>(`/api/auth/take-ownership/${encodeURIComponent(token)}`),
   },
 
   calendar: {
@@ -174,6 +187,9 @@ export const api = {
     update: (id: string, body: Omit<Partial<CreateEventInput>, 'series'>) =>
       put<UpdateEventResult>(`/api/events/${encodeURIComponent(id)}`, body),
     icsHref: (id: string): string => `/api/events/${encodeURIComponent(id)}.ics`,
+    /** Host-or-steward-only roster (`GET /api/events/:id/rsvps`) — 403s for
+     * anyone else. The route returns the array directly, not wrapped. */
+    roster: (id: string) => get<RosterEntry[]>(`/api/events/${encodeURIComponent(id)}/rsvps`),
   },
 
   rsvp: {
@@ -262,10 +278,10 @@ export const api = {
       send: (id: string) => post<{ ok: boolean; recipientCount: number }>(`/api/admin/newsletter/${encodeURIComponent(id)}/send`),
     },
     handoff: {
-      start: (b: HandoffStartInput) => post<HandoffResult>('/api/admin/handoff', b),
+      start: (b: HandoffStartInput) => post<HandoffStartResult>('/api/admin/handoff', b),
       // NOT under /api/admin: that prefix is steward-gated, and accepting is open to
       // any Member — see apps/appview/src/http/routes/handoff.ts.
-      accept: (token: string) => post<HandoffResult>(`/api/handoff/${encodeURIComponent(token)}/accept`),
+      accept: (token: string) => post<HandoffAcceptResult>(`/api/handoff/${encodeURIComponent(token)}/accept`),
     },
   },
 

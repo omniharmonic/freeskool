@@ -33,16 +33,18 @@ vi.mock('../lib/api', () => {
   class ApiError extends Error {
     status: number;
     code?: string;
-    constructor(status: number, code: string | undefined, message: string) {
+    body?: unknown;
+    constructor(status: number, code: string | undefined, message: string, body?: unknown) {
       super(message);
       this.name = 'ApiError';
       this.status = status;
       this.code = code;
+      this.body = body;
     }
   }
   return {
     api: {
-      auth: { me: vi.fn(), logout: vi.fn() },
+      auth: { me: vi.fn(), logout: vi.fn(), takeOwnership: vi.fn() },
       me: {
         profile: vi.fn(),
         updateProfile: vi.fn(),
@@ -69,6 +71,7 @@ const skillTree = {
       id: 'de-escalation',
       label: 'De-escalation',
       status: 'canonical',
+      tier: 'B' as const,
       alsoUnder: [],
       children: [],
     },
@@ -113,6 +116,7 @@ describe('MeScreen', () => {
     vi.mocked(api.me.setSkillClaims).mockReset();
     vi.mocked(api.me.updateProfile).mockReset();
     vi.mocked(api.skills.tree).mockReset().mockResolvedValue(skillTree);
+    vi.mocked(api.auth.takeOwnership).mockReset();
   });
 
   async function addDeEscalationClaim() {
@@ -196,5 +200,87 @@ describe('MeScreen', () => {
 
     const publicToggles = await screen.findAllByRole('button', { name: 'Public' });
     for (const toggle of publicToggles) expect(toggle).toBeDisabled();
+  });
+
+  it('selecting a Tier B skill defaults the draft visibility to school-only, and shows a "Sensitive" marker once added', async () => {
+    vi.mocked(api.me.setSkillClaims).mockResolvedValue({
+      published: [],
+      keptAppSide: 1,
+    });
+    renderScreen();
+
+    fireEvent.change(await screen.findByLabelText(/search the skill taxonomy/i), { target: { value: 'de-esc' } });
+    fireEvent.click(await screen.findByRole('button', { name: 'De-escalation' }));
+
+    // Tier B default: "School only" is the active toggle without being clicked.
+    expect(screen.getByRole('button', { name: 'School only' })).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Add to the list below' }));
+
+    expect(await screen.findByText('Sensitive')).toBeInTheDocument();
+  });
+
+  describe('"Take ownership of this account"', () => {
+    it('is shown for a custodial account, and hidden otherwise', async () => {
+      renderScreen();
+      expect(await screen.findByText('Take ownership of this account')).toBeInTheDocument();
+    });
+
+    it('is hidden when the account is not custodial', async () => {
+      vi.mocked(api.auth.me).mockResolvedValue({
+        did: 'did:plc:wren',
+        kind: 'oauth',
+        role: 20,
+        handle: 'wren.fs.boulder',
+        isCustodial: false,
+        emailVerified: true,
+      });
+      renderScreen();
+      await screen.findByRole('heading', { name: 'Me' });
+      expect(screen.queryByText('Take ownership of this account')).not.toBeInTheDocument();
+    });
+
+    it('shows the revealUrl fallback when mail is unconfigured', async () => {
+      vi.mocked(api.auth.takeOwnership).mockResolvedValue({
+        ok: true,
+        handle: 'wren.fs.boulder',
+        revealUrl: 'https://appview.example/api/auth/take-ownership/tok123',
+      });
+      renderScreen();
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Take ownership' }));
+
+      expect(await screen.findByText(/check your email/i)).toBeInTheDocument();
+      expect(screen.getByRole('link', { name: /take-ownership\/tok123/ })).toHaveAttribute(
+        'href',
+        'https://appview.example/api/auth/take-ownership/tok123',
+      );
+    });
+
+    it('shows the pending-link message on a 409 RevealPending', async () => {
+      vi.mocked(api.auth.takeOwnership).mockRejectedValue(
+        new ApiError(409, 'RevealPending', 'a take-ownership link is already pending for this account', {
+          error: 'RevealPending',
+          message: 'a take-ownership link is already pending for this account',
+          expiresAt: '2026-09-14T00:00:00Z',
+        }),
+      );
+      renderScreen();
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Take ownership' }));
+
+      expect(await screen.findByText(/already pending/i)).toBeInTheDocument();
+    });
+
+    it('shows the server message on a 502 PdsRotationFailed', async () => {
+      vi.mocked(api.auth.takeOwnership).mockRejectedValue(
+        new ApiError(502, 'PdsRotationFailed', 'could not rotate the PDS password — nothing changed; please try again'),
+      );
+      renderScreen();
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Take ownership' }));
+
+      expect(await screen.findByText(/could not rotate the pds password/i)).toBeInTheDocument();
+    });
   });
 });

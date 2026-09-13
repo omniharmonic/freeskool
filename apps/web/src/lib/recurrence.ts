@@ -65,7 +65,6 @@ const RRULE_WEEKDAY: Record<WeekdayCode, Weekday> = {
   SU: RRule.SU,
 };
 
-const WEEKDAY_INDEX: Record<WeekdayCode, number> = { MO: 0, TU: 1, WE: 2, TH: 3, FR: 4, SA: 5, SU: 6 };
 const SHORT_WEEKDAY_TO_CODE: Record<string, WeekdayCode> = {
   Mon: 'MO',
   Tue: 'TU',
@@ -115,42 +114,81 @@ function localWeekdayCode(iso: string, timezone: string): WeekdayCode {
   }
 }
 
-function shiftWeekday(code: WeekdayCode, shift: number): WeekdayCode {
-  const idx = (((WEEKDAY_INDEX[code] + shift) % 7) + 7) % 7;
-  return WEEKDAY_CODES[idx]!;
-}
-
-/** Every day of the week shifts by the SAME amount between "local calendar
- * day" and "the UTC day rrule sees" for a given instant (it is a fixed
- * offset, not a per-day fact) — always -1, 0, or +1 for any real timezone. */
-function weekdayShift(startsAt: string, timezone: string): number {
-  return WEEKDAY_INDEX[utcWeekdayCode(startsAt)] - WEEKDAY_INDEX[localWeekdayCode(startsAt, timezone)];
-}
-
 /**
  * The editor's weekday picker shows LOCAL days (the host types "Thursdays");
- * this translates that choice — or the inferred default, the start date's
- * own local day — into the UTC-equivalent codes `rrule` needs to actually
- * include `dtstart` as the series' first occurrence. See `utcWeekdayCode`'s
- * doc comment for why the translation exists at all.
+ * this resolves that choice — or the inferred default, the start date's own
+ * local day — into the codes actually sent over the wire.
  *
- * TEMPORARY, per the controller's Task 5 review ruling: this client-side
- * shift is a workaround, not the real fix. The real fix is expanding BYDAY
- * in the series' OWN timezone server-side (assigned to Task 12, on
- * `apps/appview/src/jobs/materialize-series.ts`); once that lands, Task 10
- * removes this shift entirely and sends the host's literal local-day choice
- * unmodified. Do not build further client-side timezone logic on top of this
- * — it is scaffolding for a backend gap, not a design to extend.
+ * Per the controller's Task 10 ruling: this used to translate the picker's
+ * local-day choice into a UTC-equivalent code before it reached `rrule` or
+ * the wire (`effectiveByDay`, removed here, plus its `weekdayShift`/
+ * `shiftWeekday` helpers) — a workaround for `rrule`'s own UTC-naive `BYDAY`
+ * matching. Task 12 moved the real fix server-side
+ * (`apps/appview/src/jobs/materialize-series.ts#plannedOccurrences` now
+ * expands `BYDAY` in the series' OWN timezone), so the wire payload now
+ * carries the host's literal local-day choice unmodified — no translation
+ * here at all.
  */
-function effectiveByDay(
+function resolveByDay(
   state: Pick<RecurrenceState, 'freq' | 'byDay'>,
   startsAt: string,
   timezone: string,
 ): WeekdayCode[] | undefined {
   if (state.freq === 'monthly' || state.freq === 'none') return undefined;
-  const local = state.byDay.length > 0 ? state.byDay : [localWeekdayCode(startsAt, timezone)];
-  const shift = weekdayShift(startsAt, timezone);
-  return shift === 0 ? local : local.map((code) => shiftWeekday(code, shift));
+  return state.byDay.length > 0 ? state.byDay : [localWeekdayCode(startsAt, timezone)];
+}
+
+/**
+ * A real instant -> a "floating" Date whose UTC getters equal its wall-clock
+ * fields in `zone`. Mirrors `toFloatingLocal` in
+ * `apps/appview/src/jobs/materialize-series.ts` (which uses `luxon`; this
+ * module carries no date library beyond `rrule`, so `Intl.DateTimeFormat`
+ * does the same job). Used ONLY by `previewOccurrences` below — the wire
+ * payload (`buildRecurrence`) never needs this, since the server now does
+ * its own timezone-correct expansion from the literal `BYDAY` it receives.
+ * Falls back to the instant unchanged for an unrecognized IANA zone name,
+ * same as `localWeekdayCode`'s fallback.
+ */
+function toFloatingLocal(instant: Date, zone: string): Date {
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: zone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    }).formatToParts(instant);
+    const get = (type: string) => Number(parts.find((p) => p.type === type)?.value ?? '0');
+    const hour = get('hour') % 24; // hour12:false reports midnight as "24"
+    return new Date(Date.UTC(get('year'), get('month') - 1, get('day'), hour, get('minute'), get('second')));
+  } catch {
+    return instant;
+  }
+}
+
+/**
+ * The inverse of `toFloatingLocal`: a floating Date's UTC fields, re-localized
+ * to `zone` — the real instant whose wall-clock reading in `zone` matches
+ * `floating`'s UTC fields. `Intl` exposes no direct "local wall-clock ->
+ * instant" conversion (that's what `luxon`'s `DateTime.fromObject` buys the
+ * server), so this solves for it by fixed-point iteration: guess the
+ * instant, see what `zone`'s offset at that guess implies, correct, repeat.
+ * Converges in one pass whenever the UTC offset does not change across the
+ * correction (true for every case except a guess landing exactly on a DST
+ * transition) — acceptable here since this only feeds a non-authoritative
+ * "next few classes" preview; the server's own `fromFloatingLocal` is what
+ * actually schedules anything.
+ */
+function fromFloatingLocal(floating: Date, zone: string): Date {
+  let instant = floating.getTime();
+  for (let i = 0; i < 2; i++) {
+    const asFloating = toFloatingLocal(new Date(instant), zone);
+    instant += floating.getTime() - asFloating.getTime();
+  }
+  return new Date(instant);
 }
 
 /** `2026-12-31T23:59:59.000Z` → `20261231T235959Z` (RFC 5545 UTC DATE-TIME). */
@@ -185,7 +223,7 @@ export function buildRecurrence(
   if (state.freq === 'none') return undefined;
   validateEnd(state.count, state.until);
 
-  const byDay = effectiveByDay(state, startsAt, timezone);
+  const byDay = resolveByDay(state, startsAt, timezone);
   const interval = state.freq === 'biweekly' ? 2 : 1;
   const freq: EventSeriesInput['freq'] = state.freq === 'monthly' ? 'monthly' : 'weekly';
 
@@ -206,25 +244,34 @@ export function buildRecurrence(
   };
 }
 
-/** A client-side preview of the next `n` occurrences (inclusive of the start
+/**
+ * A client-side preview of the next `n` occurrences (inclusive of the start
  * date), for the editor's "next 4 classes" line. Builds the rule directly
  * rather than round-tripping `buildRecurrence`'s string, since this only
  * ever runs in the browser. `timezone` must be the same zone `buildRecurrence`
  * will be called with, or the preview can disagree with what actually gets
- * posted. */
+ * posted.
+ *
+ * Expands in the FLOATING-local frame (`toFloatingLocal`/`fromFloatingLocal`
+ * above) rather than feeding `rrule` the real instant directly — `rrule` is
+ * UTC-naive, so a real instant's `BYDAY` would match against the UTC
+ * weekday, not `timezone`'s, exactly the bug `buildRecurrence` used to work
+ * around with a shift (see `resolveByDay`'s doc comment). This keeps the
+ * preview honest without reintroducing that shift into the wire payload.
+ */
 export function previewOccurrences(state: RecurrenceState, startsAt: string, timezone: string, n = 4): Date[] {
   if (state.freq === 'none' || !startsAt) return [];
   validateEnd(state.count, state.until);
   const dtstart = new Date(startsAt);
   if (Number.isNaN(dtstart.getTime())) return [];
 
-  const byDay = effectiveByDay(state, startsAt, timezone);
+  const byDay = resolveByDay(state, startsAt, timezone);
   const interval = state.freq === 'biweekly' ? 2 : 1;
   const rule = new RRule({
     freq: state.freq === 'monthly' ? RRule.MONTHLY : RRule.WEEKLY,
     interval,
     ...(byDay ? { byweekday: byDay.map((code) => RRULE_WEEKDAY[code]) } : {}),
-    dtstart,
+    dtstart: toFloatingLocal(dtstart, timezone),
   });
-  return rule.all((_date, i) => i < n);
+  return rule.all((_date, i) => i < n).map((d) => fromFloatingLocal(d, timezone));
 }

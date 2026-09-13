@@ -154,11 +154,18 @@ function EventEditForm() {
     if (!existing) return;
     setName(existing.name ?? '');
     setDescription(existing.description ?? '');
+    setMaterials(existing.materials ?? []);
+    setSuppliesNote(existing.suppliesNote ?? '');
     setStartLocal(isoToLocal(existing.startsAt));
     setEndLocal(isoToLocal(existing.endsAt));
     setVenueNeeded(Boolean(existing.venueNeeded));
     setNeighborhood(existing.neighborhood ?? '');
     setTags(existing.tags ?? []);
+    // The raw enum (Task 12) — present only for the host/a steward, which an
+    // edit-screen viewer always is. Sets the STATE so a later touch starts
+    // from the real current value; `visibilityTouched` stays false, so the
+    // touched-only submit rule (below) is unaffected.
+    if (existing.visibility) setVisibility(existing.visibility);
     const loc = existing.locations?.[0];
     if (loc) {
       setLocationName(typeof loc.name === 'string' ? loc.name : '');
@@ -201,9 +208,12 @@ function EventEditForm() {
     }
   };
 
+  // ≤20 items, ≤120 chars each — `createBody.materials` on the server
+  // (`apps/appview/src/http/routes/events.ts`); the input's own `maxLength`
+  // enforces the per-item limit, this enforces the list-length one.
   const addMaterial = () => {
     const item = materialDraft.trim();
-    if (!item) return;
+    if (!item || materials.length >= 20) return;
     setMaterials((prev) => [...prev, item]);
     setMaterialDraft('');
   };
@@ -255,29 +265,20 @@ function EventEditForm() {
           return Object.keys(loc).length > 0 ? [loc] : undefined;
         })();
 
-    // There is no dedicated backend field for a materials list or a supplies
-    // note (`createBody` in `apps/appview/src/http/routes/events.ts` has
-    // neither) — they are composed into `description` instead, rather than
-    // built as controls that would silently go nowhere on submit.
-    const descriptionParts = [description.trim()];
-    if (materials.length > 0) descriptionParts.push(`Materials:\n${materials.map((m) => `- ${m}`).join('\n')}`);
-    if (suppliesNote.trim()) descriptionParts.push(`Supplies note: ${suppliesNote.trim()}`);
-    const fullDescription = descriptionParts.filter(Boolean).join('\n\n');
-
     const capacityNum = capacity.trim() ? Number(capacity) : undefined;
 
     // `updateEventAsHost` (`apps/appview/src/lib/events.ts`) treats an ABSENT
     // key as "leave unchanged" but an EXPLICIT empty value as "clear it" —
-    // so on edit, `description`/`neighborhood`/`tags`/`skills`/`locations`
-    // must always be sent (even empty), or a host can never remove a
-    // description, neighbourhood, tag, skill, or flip a class to
-    // venue-needed. On create there is nothing to clear, so the condition
-    // below reduces to exactly the old "only send it if it has content"
-    // behaviour. `visibility` is the one exception — see `visibilityTouched`
-    // above.
+    // so on edit, `description`/`neighborhood`/`tags`/`skills`/`locations`/
+    // `materials`/`suppliesNote` must always be sent (even empty), or a host
+    // can never remove a description, neighbourhood, tag, skill, material, or
+    // flip a class to venue-needed. On create there is nothing to clear, so
+    // the condition below reduces to exactly the old "only send it if it has
+    // content" behaviour. `visibility` is the one exception — see
+    // `visibilityTouched` above.
     const body: CreateEventInput = {
       name: name.trim(),
-      ...(isEdit || fullDescription ? { description: fullDescription } : {}),
+      ...(isEdit || description.trim() ? { description: description.trim() } : {}),
       startsAt,
       ...(endsAt ? { endsAt } : {}),
       timezone,
@@ -287,6 +288,8 @@ function EventEditForm() {
       ...(isEdit || tags.length > 0 ? { tags } : {}),
       ...(isEdit || skillUri ? { skills: skillUri ? [{ skill: skillUri, level }] : [] } : {}),
       ...(isEdit || locations ? { locations: locations ?? [] } : {}),
+      ...(isEdit || materials.length > 0 ? { materials } : {}),
+      ...(isEdit || suppliesNote.trim() ? { suppliesNote: suppliesNote.trim() } : {}),
     };
 
     setSubmitting(true);
@@ -558,6 +561,12 @@ function EventEditForm() {
                 onChange={(e) => setCapacity(e.target.value)}
               />
             </label>
+            {capacity.trim() ? (
+              <p className="mt-1.5 max-w-[48ch] text-caption text-ink-faint">
+                Once {capacity.trim()} {Number(capacity.trim()) === 1 ? 'person is' : 'people are'} going, anyone
+                else who RSVPs joins a waitlist and moves up automatically as spots open.
+              </p>
+            ) : null}
           </div>
         </div>
 
@@ -572,8 +581,15 @@ function EventEditForm() {
                   value={materialDraft}
                   onChange={(e) => setMaterialDraft(e.target.value)}
                   placeholder="A mixing bowl"
+                  maxLength={120}
                 />
-                <Button type="button" variant="quiet" ink="ink" onClick={addMaterial}>
+                <Button
+                  type="button"
+                  variant="quiet"
+                  ink="ink"
+                  onClick={addMaterial}
+                  disabled={materials.length >= 20}
+                >
                   Add
                 </Button>
               </div>
@@ -600,6 +616,7 @@ function EventEditForm() {
                 className={`${field} min-h-[64px] resize-none`}
                 value={suppliesNote}
                 onChange={(e) => setSuppliesNote(e.target.value)}
+                maxLength={300}
               />
             </label>
           </div>

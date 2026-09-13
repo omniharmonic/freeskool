@@ -92,42 +92,42 @@ describe('previewOccurrences', () => {
 });
 
 /**
- * Found manually while verifying this task against the live AppView +
+ * Found manually while verifying Task 5 against the live AppView +
  * materializer: a Thursday 6:30pm Denver class is Friday 00:30 UTC
- * (`new Date('2026-09-17T18:30:00-06:00').getUTCDay() === 5`). `rrule` (both
- * here and in `apps/appview/src/jobs/materialize-series.ts`) matches `BYDAY`
- * against `getUTCDay()`, so sending the host's own literal `BYDAY=TH` made
- * the real materializer search forward to the NEXT UTC-Thursday — a full
- * week late — and write 8 occurrences that were all one week later than the
- * class the host actually posted. `effectiveByDay` now translates the
- * picker's local-day choice into the UTC-equivalent code before it reaches
- * `rrule` or the wire; these pin that translation.
+ * (`new Date('2026-09-17T18:30:00-06:00').getUTCDay() === 5`). `rrule` is
+ * UTC-naive and matches `BYDAY` against `getUTCDay()`, so sending the host's
+ * own literal `BYDAY=TH` used to make the materializer search forward to the
+ * NEXT UTC-Thursday — a full week late. Task 12 fixed this server-side
+ * (`apps/appview/src/jobs/materialize-series.ts#plannedOccurrences` now
+ * expands `BYDAY` in the series' OWN timezone, not naive UTC), so Task 10
+ * removes the client-side shift that used to work around it
+ * (`resolveByDay`'s doc comment) — the wire payload now carries the host's
+ * literal local-day choice verbatim, as these pin.
  */
 describe('BYDAY crosses the UTC day boundary (evening classes west of UTC)', () => {
   // Same calendar Thursday as THURSDAY_START, but at 6:30pm Denver time —
   // 2026-09-18T00:30:00Z, a Friday in UTC.
   const DENVER_EVENING_START = '2026-09-17T18:30:00-06:00';
 
-  it('sends the UTC-equivalent BYDAY, not the host\'s literal local-day pick', () => {
+  it("sends the host's literal local-day BYDAY verbatim, with no UTC shift", () => {
     const state: RecurrenceState = { freq: 'weekly', byDay: ['TH'], count: 8 };
     const series = buildRecurrence(state, DENVER_EVENING_START, 'America/Denver');
-    expect(series?.byDay).toEqual(['FR']);
-    expect(series?.rrule).toBe('FREQ=WEEKLY;BYDAY=FR;COUNT=8');
+    expect(series?.byDay).toEqual(['TH']);
+    expect(series?.rrule).toBe('FREQ=WEEKLY;BYDAY=TH;COUNT=8');
   });
 
-  it('the default (no day picked) is likewise the UTC-equivalent of the start date', () => {
+  it('the default (no day picked) is likewise the start date\'s own LOCAL weekday, unshifted', () => {
     const state: RecurrenceState = { freq: 'weekly', byDay: [], count: 8 };
     const series = buildRecurrence(state, DENVER_EVENING_START, 'America/Denver');
-    expect(series?.byDay).toEqual(['FR']);
+    expect(series?.byDay).toEqual(['TH']);
   });
 
-  it('previewOccurrences includes the host\'s own start instant as occurrence #1', () => {
+  it('previewOccurrences still includes the host\'s own start instant as occurrence #1 (the floating-local expansion keeps this correct without a wire-level shift)', () => {
     const state: RecurrenceState = { freq: 'weekly', byDay: ['TH'], count: 8 };
     const dates = previewOccurrences(state, DENVER_EVENING_START, 'America/Denver', 4);
     expect(dates[0]!.getTime()).toBe(new Date(DENVER_EVENING_START).getTime());
     // Every later occurrence is exactly N weeks after the first, so the
-    // series stays on "Thursday evening, Denver time" throughout, whatever
-    // the wire-level BYDAY code is called.
+    // series stays on "Thursday evening, Denver time" throughout.
     for (let i = 1; i < dates.length; i++) {
       const gapDays = (dates[i]!.getTime() - dates[0]!.getTime()) / 86_400_000;
       expect(gapDays).toBe(7 * i);

@@ -127,6 +127,20 @@ export function EventScreen() {
           </div>
         </dl>
 
+        {event.materials.length > 0 || event.suppliesNote ? (
+          <div className="mt-5">
+            <h2 className="mb-2 text-lede font-bold">What to bring</h2>
+            {event.materials.length > 0 ? (
+              <ul className="list-disc space-y-1 pl-5 text-body">
+                {event.materials.map((m, i) => (
+                  <li key={`${m}-${i}`}>{m}</li>
+                ))}
+              </ul>
+            ) : null}
+            {event.suppliesNote ? <p className="mt-2 text-body text-ink-soft">{event.suppliesNote}</p> : null}
+          </div>
+        ) : null}
+
         <h2 className="mt-7 mb-2.5 text-lede font-bold">Who's coming</h2>
         <div className="plate plate-green p-3.5">
           <p className="text-body">
@@ -226,7 +240,10 @@ function EventActions({ event }: { event: EventDetail }) {
   };
 
   const onTapStatus = (status: 'going' | 'interested') => {
-    if (currentStatus === status) {
+    // Tapping "I'll be there" again while already waitlisted leaves the
+    // waitlist — `currentStatus` is 'waitlisted', not 'going', but it is
+    // still the same request the button represents.
+    if (currentStatus === status || (status === 'going' && currentStatus === 'waitlisted')) {
       clearMutation.mutate(event.uri);
       return;
     }
@@ -284,8 +301,16 @@ function EventActions({ event }: { event: EventDetail }) {
   return (
     <div className="mt-8 space-y-3">
       <div className="grid grid-cols-2 gap-3">
-        <Button wide onClick={() => onTapStatus('going')} ink={currentStatus === 'going' ? 'green' : 'pink'}>
-          {currentStatus === 'going' ? "You're going" : "I'll be there"}
+        <Button
+          wide
+          onClick={() => onTapStatus('going')}
+          ink={currentStatus === 'going' ? 'green' : currentStatus === 'waitlisted' ? 'amber' : 'pink'}
+        >
+          {currentStatus === 'going'
+            ? "You're going"
+            : currentStatus === 'waitlisted'
+              ? "You're on the waitlist"
+              : "I'll be there"}
         </Button>
         <Button
           wide
@@ -296,6 +321,11 @@ function EventActions({ event }: { event: EventDetail }) {
           {currentStatus === 'interested' ? "You're interested" : 'Interested'}
         </Button>
       </div>
+      {currentStatus === 'waitlisted' && myRsvpData?.rsvp?.waitlistPosition ? (
+        <p className="text-caption text-ink-soft">
+          You're #{myRsvpData.rsvp.waitlistPosition} on the waitlist — you'll be notified if a spot opens.
+        </p>
+      ) : null}
 
       <div className="plate p-3.5">
         <div className="flex items-center justify-between gap-3">
