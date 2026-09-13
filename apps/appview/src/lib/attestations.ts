@@ -66,25 +66,18 @@ export async function createAttestation(input: {
     throw new AttestationError('the subject does not hold this skill', 404, 'SubjectNotHolding')
   }
 
-  const existing = await getDb()
-    .select({ id: attestation.id })
-    .from(attestation)
-    .where(
-      and(
-        eq(attestation.attesterDid, attesterDid),
-        eq(attestation.subjectDid, subjectDid),
-        eq(attestation.skillUri, skillUri),
-      ),
-    )
-    .limit(1)
-  if (existing.length > 0) {
-    throw new AttestationError('already vouched for this skill', 409, 'AlreadyVouched')
-  }
-
+  // One statement, not check-then-insert: two concurrent vouches for the same
+  // (attester, subject, skill) must yield one row and one 409, never a raw unique
+  // violation surfacing as a 500. The unique index is the arbiter.
   const id = rowId()
-  await getDb()
+  const inserted = await getDb()
     .insert(attestation)
     .values({ id, attesterDid, subjectDid, skillUri, contextEventUri: contextEventUri ?? null })
+    .onConflictDoNothing({ target: [attestation.attesterDid, attestation.subjectDid, attestation.skillUri] })
+    .returning({ id: attestation.id })
+  if (inserted.length === 0) {
+    throw new AttestationError('already vouched for this skill', 409, 'AlreadyVouched')
+  }
   return { id }
 }
 

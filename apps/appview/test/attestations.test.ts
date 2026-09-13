@@ -114,7 +114,7 @@ import { createApp } from '../src/http/app.js'
 import { createSession } from '../src/http/session.js'
 import { signSessionId } from '../src/lib/crypto.js'
 import { config } from '../src/config.js'
-import { custodialAccount, skillClaimIndex } from '../src/db/schema.js'
+import { attestation, custodialAccount, skillClaimIndex } from '../src/db/schema.js'
 
 let available = false
 
@@ -187,6 +187,20 @@ describe('createAttestation', () => {
     const { id } = await createAttestation({ attesterDid: ATTESTER, subjectDid: SUBJECT, skillUri: SKILL_A })
     expect(id).toBeTruthy()
     expect(await viewerVouches(ATTESTER, SUBJECT)).toEqual(new Set([SKILL_A]))
+  })
+
+  it('concurrent vouches for the same triple yield exactly one row and one 409, never a 500', async () => {
+    if (!available) return
+    await claimSkill(SUBJECT, SKILL_A)
+    const input = { attesterDid: ATTESTER, subjectDid: SUBJECT, skillUri: SKILL_A }
+    const results = await Promise.allSettled([createAttestation(input), createAttestation(input)])
+    const ok = results.filter((r) => r.status === 'fulfilled')
+    const failed = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+    expect(ok).toHaveLength(1)
+    expect(failed).toHaveLength(1)
+    expect(failed[0]!.reason).toMatchObject({ status: 409, code: 'AlreadyVouched' })
+    const rows = await testDb().select().from(attestation)
+    expect(rows).toHaveLength(1)
   })
 
   it('409 AlreadyVouched on a repeat vouch for the same (attester, subject, skill)', async () => {
