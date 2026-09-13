@@ -99,6 +99,39 @@ describe('RevealScreen', () => {
     expect(await screen.findByText(/doesn't exist/i)).toBeInTheDocument();
   });
 
+  it('shows the generic "don\'t refresh" fallback (with a Retry button) for anything other than the three known refusals', async () => {
+    vi.mocked(api.auth.revealOwnership).mockReset().mockRejectedValue(new ApiError(502, 'BadGateway', 'upstream error'));
+    renderScreen();
+
+    expect(await screen.findByText(/don't refresh/i)).toBeInTheDocument();
+    expect(screen.getByText(/it has not been used/i)).toBeInTheDocument();
+    // Never one of the three known-refusal messages.
+    expect(screen.queryByText(/this link has expired/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/already been used/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/doesn't exist/i)).not.toBeInTheDocument();
+
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+  });
+
+  it('the fallback also covers a plain network failure (no ApiError code at all)', async () => {
+    vi.mocked(api.auth.revealOwnership).mockReset().mockRejectedValue(new Error('network error'));
+    renderScreen();
+    expect(await screen.findByText(/don't refresh/i)).toBeInTheDocument();
+  });
+
+  it('Retry re-fetches the token', async () => {
+    vi.mocked(api.auth.revealOwnership)
+      .mockReset()
+      .mockRejectedValueOnce(new ApiError(502, 'BadGateway', 'upstream error'))
+      .mockResolvedValueOnce({ ok: true, handle: 'wren.fs.boulder', password: 'pw', message: 'shown once' });
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByText('wren.fs.boulder')).toBeInTheDocument();
+    expect(api.auth.revealOwnership).toHaveBeenCalledTimes(2);
+  });
+
   it('copies the password to the clipboard on tap', async () => {
     vi.mocked(api.auth.revealOwnership).mockReset().mockResolvedValue({
       ok: true,

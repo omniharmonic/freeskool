@@ -469,15 +469,19 @@ export function useTakeOwnershipMutation() {
 }
 
 /** `GET /api/auth/take-ownership/:token` — unauthenticated and single-use.
- * `staleTime: Infinity` + `retry: false` keep a remount (or a dev
- * double-effect) from spending the token a second time against the server;
- * the query cache itself already dedupes genuinely concurrent requests for
- * the same key. */
+ * `staleTime: Infinity` + `gcTime: Infinity` + `retry: false` keep a remount
+ * (or a dev double-effect, or the query simply falling out of the cache and
+ * refetching later) from spending the token a second time against the
+ * server; the query cache itself already dedupes genuinely concurrent
+ * requests for the same key. A real failure (network, 5xx) is still visible
+ * via `isError`/`error` — this only stops re-fetching a result already
+ * proven correct, or re-trying automatically past a refusal. */
 export function useOwnershipReveal(token: string) {
   return useQuery({
     queryKey: ['ownership-reveal', token],
     queryFn: () => api.auth.revealOwnership(token),
     retry: false,
     staleTime: Infinity,
+    gcTime: Infinity,
   });
 }

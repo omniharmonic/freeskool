@@ -5,7 +5,7 @@ import { Button } from '../components/bits';
 import { useAttendance, useEvent, useEventRoster, useSetAttendanceMutation } from '../lib/queries';
 import type { AttendanceRow, RosterEntry } from '../lib/types';
 
-const STATUS_LABEL: Record<RosterEntry['status'], string> = {
+const STATUS_LABEL: Record<Exclude<RosterEntry['status'], 'notgoing'>, string> = {
   going: 'going',
   interested: 'interested',
   waitlisted: 'waitlisted',
@@ -22,6 +22,12 @@ const STATUS_LABEL: Record<RosterEntry['status'], string> = {
  * `interested`/`waitlisted` default unchecked but stay tickable, since
  * someone who merely expressed interest may still have shown up.
  *
+ * The roster route returns EVERY row for the event, including `'notgoing'`
+ * (`apps/appview/src/lib/rsvp.ts:189-196`'s `rsvpRoster` has no status
+ * filter) — a member who explicitly declined has no business being
+ * pre-listed for attendance, so those rows are filtered out entirely below,
+ * never rendered as an unchecked checkbox.
+ *
  * "Add someone who came without RSVPing" still takes a DID, not a handle:
  * `POST .../attendance`'s body (`attendanceBody` in
  * `apps/appview/src/http/routes/events.ts`) validates `did: z.string().
@@ -33,7 +39,7 @@ export function AttendanceScreen() {
   const { id } = useParams({ strict: false }) as { id: string };
   const { data: event, isPending } = useEvent(id);
   const { data: summary } = useAttendance(id);
-  const { data: roster, isPending: rosterPending } = useEventRoster(id);
+  const { data: roster, isPending: rosterPending, isError: rosterError } = useEventRoster(id);
   const setAttendance = useSetAttendanceMutation();
 
   // did -> whether the host has ticked "participated" for that roster row.
@@ -45,14 +51,26 @@ export function AttendanceScreen() {
   const [didError, setDidError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
+  // Never pre-list a 'notgoing' row at all — filtered out before anything
+  // else touches the roster (the pre-populate effect below, the checklist,
+  // and `onSave`'s submitted rows all read from this, never `roster` itself).
+  // The type predicate narrows `status` so `STATUS_LABEL[r.status]` below
+  // type-checks without `'notgoing'` needing an (unreachable) entry there.
+  const rosterRows = (roster ?? []).filter(
+    (r): r is RosterEntry & { status: Exclude<RosterEntry['status'], 'notgoing'> } => r.status !== 'notgoing',
+  );
+
   // Pre-populate once, from the real roster: checked for 'going', unchecked
   // (but still tickable) for 'interested'/'waitlisted'.
   useEffect(() => {
     if (initialized || !roster) return;
     const next: Record<string, boolean> = {};
-    for (const r of roster) next[r.did] = r.status === 'going';
+    for (const r of rosterRows) next[r.did] = r.status === 'going';
     setChecked(next);
     setInitialized(true);
+    // `rosterRows` is derived fresh from `roster` every render, so depending
+    // on `roster` alone (not `rosterRows`) is enough to re-run exactly when
+    // the underlying data actually changes.
   }, [roster, initialized]);
 
   if (isPending || rosterPending) {
@@ -72,8 +90,6 @@ export function AttendanceScreen() {
       </Screen>
     );
   }
-
-  const rosterRows = roster ?? [];
 
   const addExtra = () => {
     const did = didDraft.trim();
@@ -139,6 +155,8 @@ export function AttendanceScreen() {
                   </li>
                 ))}
               </ul>
+            ) : rosterError ? (
+              <p className="text-caption text-ink-faint">Couldn't load the RSVP list.</p>
             ) : (
               <p className="text-caption text-ink-faint">Nobody RSVP'd to this class.</p>
             )}

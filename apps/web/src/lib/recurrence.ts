@@ -75,23 +75,41 @@ const SHORT_WEEKDAY_TO_CODE: Record<string, WeekdayCode> = {
   Sun: 'SU',
 };
 
-/** The weekday `rrule` itself will see. `RRule` (both here and in the
- * materializer, `apps/appview/src/jobs/materialize-series.ts`) is UTC-naive:
- * `BYDAY` matches a candidate's `getUTCDay()`, not the host's local calendar
- * day. An evening class in any zone west of UTC (Denver 6:30pm is already
- * Friday 00:30 UTC) lands on a DIFFERENT weekday in UTC than the one the host
- * typed — send `BYDAY=TH` for that and the server's RRule engine searches
- * forward for the next UTC-Thursday AT OR AFTER `dtstart`, which is up to 6
- * days later: the host's own first class silently falls outside its own
- * series, and every later occurrence is materialized a week later than
- * intended. Confirmed against the live AppView + materializer while
- * verifying this task: a `-06:00` Thursday evening start with `BYDAY=TH`
- * produced 8 "TH" occurrences that were all actually a week late, because
- * `getUTCDay()` of that instant is Friday. */
-function utcWeekdayCode(iso: string): WeekdayCode {
+/**
+ * HISTORY (why this file used to shift `BYDAY`, and why it no longer does):
+ * `rrule` — both the copy imported here and the one the AppView's
+ * materializer used before Task 12 — is UTC-naive: it matches `BYDAY`
+ * against a candidate's `getUTCDay()`, not the host's local calendar day. An
+ * evening class in any zone west of UTC (Denver 6:30pm is already Friday
+ * 00:30 UTC) lands on a DIFFERENT weekday in UTC than the one the host
+ * typed, so sending that literal `BYDAY=TH` against a UTC-naive `rrule` used
+ * to make it search forward for the next UTC-Thursday and materialize every
+ * occurrence a week late.
+ *
+ * Task 12 fixed this SERVER-SIDE: `apps/appview/src/jobs/
+ * materialize-series.ts#plannedOccurrences` now expands `BYDAY` in the
+ * series' OWN timezone (a floating-local frame), so `BYDAY` is matched
+ * against the host's actual local weekday, never UTC. `buildRecurrence`
+ * below therefore sends the host's literal `BYDAY` pick verbatim — no
+ * shift, no translation, anywhere in this module (see `resolveByDay`'s doc
+ * comment). `previewOccurrences` does its own floating-local expansion
+ * purely to keep the CLIENT'S preview accurate; nothing here shifts what
+ * goes over the wire.
+ *
+ * `hostLocalWeekdayCode` right below is unrelated to that history — it is
+ * only `localWeekdayCode`'s last-resort fallback for an IANA zone name it
+ * cannot resolve at all.
+ */
+function hostLocalWeekdayCode(iso: string): WeekdayCode {
   const instant = new Date(iso);
   if (Number.isNaN(instant.getTime())) return 'MO';
-  return WEEKDAY_CODES[(instant.getUTCDay() + 6) % 7]!;
+  // The JS runtime's OWN local day (`Date#getDay`, never `getUTCDay`) — the
+  // closest thing to "the host's literal calendar day" available without a
+  // working IANA zone. `timezone` is always the browser's own zone in
+  // practice (`Intl.DateTimeFormat().resolvedOptions().timeZone`, from
+  // `EventEditScreen.tsx`), so this and the real answer coincide whenever
+  // this fallback is ever actually reached.
+  return WEEKDAY_CODES[(instant.getDay() + 6) % 7]!;
 }
 
 /**
@@ -108,9 +126,9 @@ function localWeekdayCode(iso: string, timezone: string): WeekdayCode {
   if (Number.isNaN(instant.getTime())) return 'MO';
   try {
     const short = new Intl.DateTimeFormat('en-US', { timeZone: timezone, weekday: 'short' }).format(instant);
-    return SHORT_WEEKDAY_TO_CODE[short] ?? utcWeekdayCode(iso);
+    return SHORT_WEEKDAY_TO_CODE[short] ?? hostLocalWeekdayCode(iso);
   } catch {
-    return utcWeekdayCode(iso); // an unrecognized IANA zone name: fall back to UTC (shift 0)
+    return hostLocalWeekdayCode(iso); // an unrecognized IANA zone name: fall back to the host's own local day, never UTC
   }
 }
 

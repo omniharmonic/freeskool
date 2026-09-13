@@ -221,8 +221,10 @@ export interface RsvpSetResult {
   status: string;
   alsoPublicRecord: boolean;
   /** Present only when `status` resolved to `'waitlisted'` — the capacity was
-   * already full when this RSVP landed. 1-indexed. */
-  waitlistPosition?: number;
+   * already full when this RSVP landed. 1-indexed. The server's own
+   * `waitlistPosition()` (`apps/appview/src/lib/rsvp.ts`) returns `null`
+   * rather than omitting the field, so this is nullable, not just optional. */
+  waitlistPosition?: number | null;
   counts: RsvpCounts;
 }
 
@@ -244,7 +246,7 @@ export interface MyRsvp {
  * there.
  */
 export interface RsvpGetResult {
-  rsvp: { status: string; alsoPublicRecord: boolean; waitlistPosition?: number } | null;
+  rsvp: { status: string; alsoPublicRecord: boolean; waitlistPosition?: number | null } | null;
   counts: RsvpCounts;
 }
 
@@ -252,12 +254,17 @@ export interface RsvpGetResult {
  * `GET /api/events/:id/rsvps` — the host's (or a steward's) own roster,
  * never public (`canViewRoster` in `apps/appview/src/http/routes/events.ts`).
  * The route returns the array directly, not wrapped in an object.
+ *
+ * `rsvpRoster()` (`apps/appview/src/lib/rsvp.ts:189-196`) returns EVERY row
+ * for the event, including `'notgoing'` — a member who explicitly declined.
+ * `AttendanceScreen.tsx` filters those out of the checklist itself; this
+ * type stays honest about what the route actually sends.
  */
 export interface RosterEntry {
   did: string;
   handle: string;
   displayName?: string;
-  status: 'going' | 'interested' | 'waitlisted';
+  status: 'going' | 'interested' | 'waitlisted' | 'notgoing';
   createdAt: string;
 }
 

@@ -241,19 +241,21 @@ describe('MeScreen', () => {
     });
 
     it('shows the revealUrl fallback when mail is unconfigured', async () => {
+      // The web app's own page, not the raw API endpoint — the server emits
+      // this shape (`WEB_PUBLIC_URL` + `/account/reveal/:token`).
       vi.mocked(api.auth.takeOwnership).mockResolvedValue({
         ok: true,
         handle: 'wren.fs.boulder',
-        revealUrl: 'https://appview.example/api/auth/take-ownership/tok123',
+        revealUrl: 'https://app.example/account/reveal/tok123',
       });
       renderScreen();
 
       fireEvent.click(await screen.findByRole('button', { name: 'Take ownership' }));
 
       expect(await screen.findByText(/check your email/i)).toBeInTheDocument();
-      expect(screen.getByRole('link', { name: /take-ownership\/tok123/ })).toHaveAttribute(
+      expect(screen.getByRole('link', { name: /account\/reveal\/tok123/ })).toHaveAttribute(
         'href',
-        'https://appview.example/api/auth/take-ownership/tok123',
+        'https://app.example/account/reveal/tok123',
       );
     });
 

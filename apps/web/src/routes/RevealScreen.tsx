@@ -15,7 +15,7 @@ import { useOwnershipReveal } from '../lib/queries';
  */
 export function RevealScreen() {
   const { token } = useParams({ from: '/account/reveal/$token' });
-  const { data, isPending, error } = useOwnershipReveal(token);
+  const { data, isPending, isError, error, refetch } = useOwnershipReveal(token);
   const [copied, setCopied] = useState(false);
 
   const onCopy = () => {
@@ -27,6 +27,7 @@ export function RevealScreen() {
   };
 
   const code = error instanceof ApiError ? error.code : undefined;
+  const knownError = code === 'Expired' || code === 'AlreadyUsed' || code === 'NotFound';
 
   return (
     <Screen title="Your new password" back>
@@ -45,6 +46,26 @@ export function RevealScreen() {
         ) : null}
         {code === 'NotFound' ? (
           <p className="text-body text-ink-soft">This link doesn't exist. Double-check you copied the whole thing.</p>
+        ) : null}
+
+        {/* Anything else that isn't one of the three real refusals above — a
+            5xx, a non-JSON response, being offline — is NOT the same as the
+            link being dead. Since the token is single-use, telling someone to
+            "try again" by reloading risks nothing here (a failed request
+            never consumed it), but a REFRESH of a page that later succeeds
+            would; the copy is explicit that the link itself is still good. */}
+        {isError && !knownError ? (
+          <>
+            <p className="text-body text-ink-soft">
+              We couldn't load your password right now. Don't refresh — come back to this exact link once you're
+              online; it has not been used.
+            </p>
+            <div className="mt-3">
+              <Button ink="blue" onClick={() => void refetch()}>
+                Retry
+              </Button>
+            </div>
+          </>
         ) : null}
 
         {data ? (

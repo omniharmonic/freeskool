@@ -143,4 +143,35 @@ describe('AttendanceScreen', () => {
     expect(screen.getByText("Nobody RSVP'd to this class.")).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /save attendance/i })).toBeDisabled();
   });
+
+  it('never pre-lists a "notgoing" row: only the other roster rows render, and only they are saved', async () => {
+    const DECLINED_DID = 'did:plc:declined1';
+    vi.mocked(api.events.roster).mockResolvedValue([
+      ...roster,
+      { did: DECLINED_DID, handle: 'declined.fs.boulder', status: 'notgoing' as const, createdAt: '2026-09-03T00:00:00Z' },
+    ]);
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+
+    expect(screen.getByText('Goer')).toBeInTheDocument();
+    expect(screen.getByText('curious.fs.boulder')).toBeInTheDocument();
+    expect(screen.queryByText('declined.fs.boulder')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /save attendance/i }));
+
+    await waitFor(() =>
+      expect(api.attendance.set).toHaveBeenCalledWith(EVENT_URI, [
+        { did: GOING_DID, participated: true, role: 'attendee' },
+        { did: INTERESTED_DID, participated: false, role: 'attendee' },
+      ]),
+    );
+  });
+
+  it('shows a distinct message when the roster fetch itself fails', async () => {
+    vi.mocked(api.events.roster).mockRejectedValue(new Error('network error'));
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+    expect(await screen.findByText("Couldn't load the RSVP list.")).toBeInTheDocument();
+    expect(screen.queryByText("Nobody RSVP'd to this class.")).not.toBeInTheDocument();
+  });
 });
