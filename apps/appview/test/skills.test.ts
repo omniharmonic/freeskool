@@ -24,6 +24,8 @@ process.env.SESSION_SECRET ??= 'skills-test-session-secret'
 process.env.CUSTODY_KEYS ??= `v1:${Buffer.alloc(32, 5).toString('base64')}`
 process.env.FEEDBACK_BALLOT_PEPPER ??= 'skills-test-pepper'
 process.env.APPVIEW_PUBLIC_URL ??= 'http://localhost:4000'
+// A developer shell that exported the repo .env carries AUTHORITY_DID; these tests own it.
+delete process.env.AUTHORITY_DID
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { config, resetConfig } from '../src/config.js'

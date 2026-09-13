@@ -106,4 +106,17 @@ describe('backfillSkillClaims', () => {
     expect(bySkill.get(SKILL_B)).toBe('public')
     expect(bySkill.get(SKILL_A)).toBe('school')
   })
+
+  it('skips malformed blobs and entries, and reports only the rows it wrote', async () => {
+    await testDb().insert(appMeta).values({ key: `skill-claims:${DID_A}`, value: { not: 'an array' } })
+    await testDb().insert(appMeta).values({
+      key: `skill-claims:${DID_B}`,
+      value: [{ skill: SKILL_A, level: 'teaching' }, { level: 'learning' }, 'junk', null, { skill: 42, level: 'x' }],
+    })
+    const { members, rows } = await backfillSkillClaims()
+    expect(members).toBe(2)
+    expect(rows).toBe(1)
+    const indexed = await testDb().select().from(skillClaimIndex)
+    expect(indexed.map((r) => [r.did, r.skillUri])).toEqual([[DID_B, SKILL_A]])
+  })
 })

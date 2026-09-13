@@ -39,22 +39,23 @@ export async function backfillSkillClaims(): Promise<{ members: number; rows: nu
   for (const row of rows) {
     const did = row.key.slice(KEY_PREFIX.length)
     if (!did) continue
-    const claims = Array.isArray(row.value) ? (row.value as AppSideClaim[]) : []
+    const claims = (Array.isArray(row.value) ? (row.value as unknown[]) : []).filter(
+      (c): c is AppSideClaim =>
+        typeof c === 'object' && c !== null && typeof (c as AppSideClaim).skill === 'string' && typeof (c as AppSideClaim).level === 'string',
+    )
     const now = new Date()
 
     await db.transaction(async (tx) => {
       await tx.delete(skillClaimIndex).where(and(eq(skillClaimIndex.did, did), eq(skillClaimIndex.visibility, 'school')))
       if (claims.length > 0) {
         await tx.insert(skillClaimIndex).values(
-          claims
-            .filter((c): c is AppSideClaim => typeof c?.skill === 'string' && typeof c?.level === 'string')
-            .map((claim) => ({
+          claims.map((claim) => ({
               did,
               skillUri: claim.skill,
               level: claim.level,
               visibility: 'school',
-              updatedAt: now,
-            })),
+            updatedAt: now,
+          })),
         )
       }
     })
