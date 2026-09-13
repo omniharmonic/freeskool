@@ -9,8 +9,6 @@
   "scripts": {
     "validate": "node scripts/validate.mjs",
     "gen": "lex gen-api ./src/generated ./lexicons/**/*.json && echo generated",
-    "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
     "seed:skills": "node scripts/seed-skills.mjs"
   },
   "dependencies": {

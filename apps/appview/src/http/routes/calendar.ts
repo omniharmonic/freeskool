@@ -14,7 +14,6 @@ import { z } from 'zod'
 import type { AppEnv } from '../session.js'
 import { getIndexer } from '../../index/indexer.js'
 import { eventsInWindow, sidecarsForEvent } from '../../index/queries.js'
-import { NSID } from '../../lexicons/nsids.js'
 import type { EventConfig, EventListing } from '../../lexicons/coop.js'
 import { isListed, projectEvent, type CalendarEvent, type ViewerRelation } from '../visibility.js'
 import { viewerRelation } from '../relation.js'
@@ -79,5 +78,3 @@ export function toCalendarEvent(uri: string, hostDid: string, value: Record<stri
 function str(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined
 }
-
-export { NSID }

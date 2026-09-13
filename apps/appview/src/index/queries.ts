@@ -86,9 +86,12 @@ export async function sidecarsForEvent<T = Record<string, unknown>>(
   eventUri: string,
   field = 'event.uri',
 ): Promise<IndexedRecord<T>[]> {
+  // contrail's per-collection tables carry no `collection` column — the table IS the
+  // collection — so it is supplied as a literal to keep `RecordRow` whole.
+  const nsid = nsidFor(short)
   const rows = await indexer.db
     .prepare(
-      `SELECT uri, did, collection, rkey, cid, record, time_us, indexed_at
+      `SELECT uri, did, '${nsid}' AS collection, rkey, cid, record, time_us, indexed_at
          FROM records_${safeShort(short)}
         WHERE ${jsonPath(field)} = ?
         ORDER BY time_us DESC LIMIT 200`,
@@ -99,6 +102,12 @@ export async function sidecarsForEvent<T = Record<string, unknown>>(
 }
 
 /** `a.b` → `record->'a'->>'b'`; `a` → `record->>'a'`. */
+function nsidFor(short: string): string {
+  const nsid = (NSID as Record<string, string | undefined>)[short]
+  if (!nsid) throw new Error(`no NSID registered for collection short name ${short}`)
+  return nsid
+}
+
 function jsonPath(field: string): string {
   const parts = field.split('.')
   const last = parts.pop()!
@@ -121,5 +130,3 @@ export function parseAtUri(uri: string): { did: string; collection: string; rkey
   if (!m || !m[1] || !m[2] || !m[3]) return null
   return { did: m[1], collection: m[2], rkey: m[3] }
 }
-
-export { NSID }

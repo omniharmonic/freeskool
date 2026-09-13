@@ -13,7 +13,7 @@ import { eq } from 'drizzle-orm'
 import type { AppEnv } from '../session.js'
 import { createSession, destroySession, requireViewer } from '../session.js'
 import { signup, verifyEmailToken, getCustodialAccount, SignupError } from '../../lib/custody.js'
-import { oauthClient } from '../oauth.js'
+import { oauthClient, OAuthUnavailableError } from '../oauth.js'
 import { config } from '../../config.js'
 import { roleOf } from '../../lib/roles.js'
 import { getDb } from '../../db/index.js'
@@ -82,6 +82,7 @@ auth.get('/oauth/start', async (c) => {
     const url = await client.authorize(handle, { scope: 'atproto transition:generic' })
     return c.redirect(url.toString())
   } catch (err) {
+    if (err instanceof OAuthUnavailableError) return c.json({ error: err.code, message: err.message }, 503)
     log.warn('oauth start failed', { detail: String(err) })
     return c.json({ error: 'OAuthStartFailed', message: 'could not start authorization' }, 502)
   }

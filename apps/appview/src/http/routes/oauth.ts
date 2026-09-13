@@ -3,16 +3,31 @@
  */
 import { Hono } from 'hono'
 import type { AppEnv } from '../session.js'
-import { clientMetadata, jwks, oauthClient } from '../oauth.js'
+import { assertOauthUsable, clientMetadata, jwks, oauthClient, OAuthUnavailableError } from '../oauth.js'
 import { createSession } from '../session.js'
 import { config } from '../../config.js'
 import { log } from '../../lib/logging.js'
 
 export const oauthRoutes = new Hono<AppEnv>()
 
-oauthRoutes.get('/oauth/client-metadata.json', (c) => c.json(clientMetadata()))
+oauthRoutes.get('/oauth/client-metadata.json', (c) => {
+  try {
+    assertOauthUsable()
+  } catch (err) {
+    if (err instanceof OAuthUnavailableError) return c.json({ error: err.code, message: err.message }, 503)
+    throw err
+  }
+  return c.json(clientMetadata())
+})
 
-oauthRoutes.get('/oauth/jwks.json', async (c) => c.json((await jwks()) as object))
+oauthRoutes.get('/oauth/jwks.json', async (c) => {
+  try {
+    return c.json((await jwks()) as object)
+  } catch (err) {
+    if (err instanceof OAuthUnavailableError) return c.json({ error: err.code, message: err.message }, 503)
+    throw err
+  }
+})
 
 oauthRoutes.get('/oauth/callback', async (c) => {
   const params = new URL(c.req.url).searchParams

@@ -30,7 +30,6 @@ import { attendance, attendanceRollup } from '../../db/schema.js'
 import { rowId } from '../../lib/ids.js'
 import { bumpTally } from '../../lib/roles.js'
 import { rsvpCounts } from '../../lib/rsvp.js'
-import { enqueueNotification } from '../../notifications/dispatch.js'
 
 export const events = new Hono<AppEnv>()
 
@@ -253,5 +252,3 @@ export async function loadEvent(uri: string): Promise<LoadedEvent | null> {
     ...(seriesRows[0] ? { series: seriesRows[0].value } : {}),
   }
 }
-
-export { enqueueNotification }

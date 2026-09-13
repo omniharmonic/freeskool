@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import { closeDb, getDb } from './index.js'
 import { createIndexer } from '../index/indexer.js'
+import { isMain } from '../lib/is-main.js'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 export const MIGRATIONS_FOLDER = path.resolve(here, '../../drizzle')
@@ -17,7 +18,7 @@ export async function runMigrations(): Promise<void> {
   await indexer.init()
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMain(import.meta.url)) {
   await runMigrations()
   console.log('migrations applied (fs_* via drizzle, contrail schema via contrail.init())')
   await closeDb()

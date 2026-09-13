@@ -23,6 +23,9 @@ importers:
       '@atproto/jwk-jose':
         specifier: ^0.2.4
         version: 0.2.4
+      '@atproto/oauth-client':
+        specifier: ^0.8.7
+        version: 0.8.7
       '@atproto/oauth-client-node':
         specifier: ^0.5.7
         version: 0.5.7

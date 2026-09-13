@@ -96,6 +96,20 @@ const schema = z.object({
 export type Config = z.infer<typeof schema> & {
   /** `<word><word><3 digits>.<handleDomain>` */
   handleDomain: string
+  /**
+   * Whether the SECONDARY door (sign in with an existing account) can work at all on this
+   * origin. A CONFIDENTIAL ATProto OAuth client — which a BFF must be, since it holds a
+   * private signing key — requires a `client_id` over `https:` with a real hostname:
+   * `@atproto/oauth-types` rejects `http:` ("URL must use the https: protocol"), rejects an
+   * IP literal ("ClientID hostname must not be an IP address"), and RFC 8252 rejects the
+   * `localhost` hostname. The `http://localhost?redirect_uri=...` development form is a
+   * PUBLIC client and cannot carry a keyset.
+   *
+   * So on `http://localhost:4000` the OAuth routes answer 503 with that explanation rather
+   * than a validation dump. The primary door (a new Free School identity) is unaffected and
+   * is what local development uses.
+   */
+  oauthUsable: boolean
   oauthClientId: string
   isProd: boolean
 }
@@ -110,9 +124,21 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...parsed,
     APPVIEW_PUBLIC_URL: publicUrl,
     handleDomain: parsed.PDS_HANDLE_DOMAIN.replace(/^\./, ''),
+    oauthUsable: isConfidentialClientOrigin(publicUrl),
     // A confidential client's client_id IS the metadata URL.
     oauthClientId: `${publicUrl}/oauth/client-metadata.json`,
     isProd: parsed.NODE_ENV === 'production',
+  }
+}
+
+const IP_LITERAL = /^(\d{1,3}\.){3}\d{1,3}$|^\[/
+
+function isConfidentialClientOrigin(url: string): boolean {
+  try {
+    const u = new URL(url)
+    return u.protocol === 'https:' && u.hostname !== 'localhost' && !IP_LITERAL.test(u.hostname)
+  } catch {
+    return false
   }
 }
 
@@ -122,6 +148,7 @@ export function redactedConfig(c: Config) {
     env: c.NODE_ENV,
     port: c.APPVIEW_PORT,
     publicUrl: c.APPVIEW_PUBLIC_URL,
+    oauthUsable: c.oauthUsable,
     pds: c.PDS_URL,
     handleDomain: c.handleDomain,
     peers: c.PEER_PDS_HOSTS.length,
@@ -136,4 +163,13 @@ export function redactedConfig(c: Config) {
 let cached: Config | undefined
 export function config(): Config {
   return (cached ??= loadConfig())
+}
+
+/**
+ * Drop the memoized config. Only scripts that mint the school call this: `SCHOOL_DID` and
+ * `SCHOOL_APP_PASSWORD` do not exist until the school account has been created, so the
+ * bootstrap path has to re-read the environment once mid-process.
+ */
+export function resetConfig(): void {
+  cached = undefined
 }

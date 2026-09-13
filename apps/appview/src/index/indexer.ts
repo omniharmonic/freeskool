@@ -18,6 +18,7 @@ import { config } from '../config.js'
 import { buildContrailConfig } from '../contrail.config.js'
 import { getPool } from '../db/index.js'
 import { activePeerHosts, seedPeersFromEnv } from './peers.js'
+import { seedBackfillsFromListRepos } from './discovery-fallback.js'
 import { quietLogger } from '../lib/logging.js'
 
 export interface Indexer {
@@ -26,7 +27,12 @@ export interface Indexer {
   /** Create contrail's schema. Idempotent. */
   init(): Promise<void>
   /** Discover repos from the peer registry, then backfill them. */
-  backfillFromPeers(options?: { concurrency?: number }): Promise<{ discovered: number; backfilled: number }>
+  backfillFromPeers(options?: { concurrency?: number }): Promise<{
+    discovered: number
+    backfilled: number
+    seededByFallback: number
+    identitiesPinned: number
+  }>
   /** Pull one record from its PDS right now (post-write read-your-writes). */
   notify(uris: string | string[]): Promise<void>
   /** Rebuild the instance against the current peer set (peers changed). */
@@ -65,8 +71,17 @@ export async function createIndexer(options?: { peers?: string[] }): Promise<Ind
       })
     },
     async backfillFromPeers(opts) {
+      // Peers that do not serve `listReposByCollection` get their repo list from
+      // `listRepos` instead; see ./discovery-fallback.ts. This is a no-op for peers that
+      // do serve it.
+      const fallback = await seedBackfillsFromListRepos(db, contrail.config, peers.length ? peers : c.PEER_PDS_HOSTS)
       const res = await contrail.backfillAll({ concurrency: opts?.concurrency ?? 25 }, db)
-      return { discovered: res.discovered, backfilled: res.backfilled }
+      return {
+        discovered: res.discovered,
+        backfilled: res.backfilled,
+        seededByFallback: fallback.seeded,
+        identitiesPinned: fallback.identitiesPinned,
+      }
     },
     async notify(uris) {
       await contrail.notify(uris, db)

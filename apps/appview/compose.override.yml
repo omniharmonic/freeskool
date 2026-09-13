@@ -1,0 +1,18 @@
+# Local-dev override for the reference PDS, passed as an EXTRA `-f` so nothing under
+# `infra/` changes:
+#
+#   docker compose -f infra/compose.yml -f apps/appview/compose.override.yml up -d
+#
+# Why it exists: `infra/pds.env` sets `PDS_SERVICE_HANDLE_DOMAINS=.localhost`, but
+# `.localhost` is a RESERVED TLD in `@atproto/syntax` (`isValidTld` rejects
+# `.local .arpa .invalid .localhost .internal .example .alt .onion`). The PDS validates the
+# TLD before it checks its own service domains, so `com.atproto.server.createAccount` fails
+# with `InvalidHandle: Handle TLD is invalid or disallowed` for EVERY handle — the primary
+# door cannot mint an account at all.
+#
+# `.test` is reserved by RFC 6761 for exactly this purpose and is NOT in atproto's
+# disallowed list, so it works. Set `PDS_HANDLE_DOMAIN=test` for the AppView to match.
+services:
+  pds:
+    environment:
+      PDS_SERVICE_HANDLE_DOMAINS: ".test,.localhost"

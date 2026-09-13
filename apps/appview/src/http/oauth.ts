@@ -20,6 +20,7 @@
  * someone else's email).
  */
 import { JoseKey } from '@atproto/jwk-jose'
+import { requestLocalLock } from '@atproto/oauth-client'
 import {
   NodeOAuthClient,
   type NodeSavedSession,
@@ -77,6 +78,25 @@ async function loadOrCreateKey(): Promise<JoseKey> {
   return key
 }
 
+export class OAuthUnavailableError extends Error {
+  readonly status = 503
+  readonly code = 'OAuthNotConfigured'
+  constructor(publicUrl: string) {
+    super(
+      `Signing in with an existing account needs this AppView to be served over https on a ` +
+        `real hostname: a confidential ATProto OAuth client cannot have an http, IP-literal, ` +
+        `or localhost client_id. APPVIEW_PUBLIC_URL is ${publicUrl}. The primary door ` +
+        `(POST /api/auth/signup) works regardless.`,
+    )
+    this.name = 'OAuthUnavailableError'
+  }
+}
+
+export function assertOauthUsable(): void {
+  const c = config()
+  if (!c.oauthUsable) throw new OAuthUnavailableError(c.APPVIEW_PUBLIC_URL)
+}
+
 export function clientMetadata(): Record<string, unknown> {
   const base = config().APPVIEW_PUBLIC_URL
   return {
@@ -101,12 +121,17 @@ let client: NodeOAuthClient | undefined
 
 export async function oauthClient(): Promise<NodeOAuthClient> {
   if (client) return client
+  assertOauthUsable()
   const key = await loadOrCreateKey()
   client = new NodeOAuthClient({
     clientMetadata: clientMetadata() as never,
     keyset: [key],
     stateStore: new PostgresStateStore(),
     sessionStore: new PostgresSessionStore(),
+    // Single-process deployment: an in-process lock is the correct one, and passing it
+    // explicitly is also how the library stops warning "credentials might get revoked".
+    // A multi-instance deployment must swap this for a Postgres advisory-lock implementation.
+    requestLock: requestLocalLock,
   })
   return client
 }
