@@ -19,7 +19,7 @@ the AppView (indexer + API + jobs), Postgres, and the school's own reference PDS
 | Checkout | `/opt/freeskool` (branch `deploy/hetzner`), env at `/opt/freeskool/infra/production/.env` |
 | Web + API | `https://freeskool.xyz` (`www.` redirects) |
 | PDS | `https://pds.freeskool.xyz`; handles `<name>.freeskool.xyz` |
-| Email | Resend over SMTP (`smtps://resend:<key>@smtp.resend.com:465`) |
+| Email | Resend over SMTP (`smtps://resend:<key>@smtp.resend.com:2465`) |
 | Registrar / DNS | Namecheap, `freeskool.xyz` |
 
 Why Falkenstein and not a US location: Hetzner's CX line (CX33 €9.99/month, 20 TB traffic) is EU-only;
@@ -51,9 +51,14 @@ verified Resend domain, mail goes out from the already-verified `omniharmonic.co
 1. Resend → Domains → add `freeskool.xyz` (region `us-east-1`). Put the DNS records it prints into
    Namecheap. Verify.
 2. Resend → API keys → new key, **sending access**, restricted to that domain.
-3. In `.env`: `SMTP_URL=smtps://resend:<key>@smtp.resend.com:465`,
+3. In `.env`: `SMTP_URL=smtps://resend:<key>@smtp.resend.com:2465`,
    `MAIL_FROM=Free School <hello@freeskool.xyz>`, `PDS_EMAIL_FROM=hello@freeskool.xyz`.
 4. `docker compose … up -d appview pds` to pick the new values up.
+
+Port 2465, not 465: Hetzner Cloud blocks outbound 25 and 465 on new accounts (587 and Resend's
+alternates 2465/2587 are open). The server's resolver is pinned to 1.1.1.1/9.9.9.9 in
+`/etc/systemd/resolved.conf.d/freeskool.conf` because Hetzner's resolvers negatively cached the zone
+for an hour during the first deploy.
 
 The AppView refuses to boot in production without `SMTP_URL` (the magic-link door cannot work, and
 the dev file sink would write magic links to disk). The PDS uses the same transport for its own mail.
