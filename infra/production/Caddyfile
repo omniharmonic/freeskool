@@ -1,12 +1,16 @@
 # One Caddy for the whole stack. Three kinds of names:
 #   {$WEB_HOST}                          the PWA + the AppView API (same origin: cookies, OAuth)
-#   www.{$WEB_HOST}                      redirect to the apex
+#   www.{$WEB_HOST}                      redirect to the apex (served from the wildcard block, see below)
 #   {$PDS_HOST}, *.{$PDS_HANDLE_DOMAIN}  the PDS, and every generated handle it answers for
+#
+# Why www lives inside the wildcard block: when a site lists both `*.example` and `www.example`,
+# Caddy assumes the wildcard certificate will cover www and never issues one for it — but the
+# wildcard here is on-demand (no DNS challenge), so www would never get a certificate at all.
+# Instead www is issued on demand like a handle, through a local `ask` endpoint that says yes
+# for www itself and defers to the PDS's /tls-check for everything else.
 {
 	on_demand_tls {
-		# The PDS says yes for its own hostname and for every handle it has issued,
-		# so a certificate is only ever minted for a name that exists.
-		ask http://pds:3000/tls-check
+		ask http://127.0.0.1:9000/tls-check
 	}
 }
 
@@ -34,18 +38,19 @@
 	}
 }
 
-www.{$WEB_HOST} {
-	# An explicit policy, so the wildcard's on-demand policy below does not claim this
-	# name (the PDS's tls-check would refuse it and no certificate would ever be issued).
-	tls {
-		issuer acme
-	}
-	redir https://{$WEB_HOST}{uri} permanent
-}
-
 {$PDS_HOST}, *.{$PDS_HANDLE_DOMAIN} {
 	tls {
 		on_demand
 	}
+	@www host www.{$WEB_HOST}
+	redir @www https://{$WEB_HOST}{uri} permanent
+	reverse_proxy pds:3000
+}
+
+# The on-demand "ask" gate (container-local only). The PDS vouches for its own hostname and for
+# every handle it has issued; www is the one extra name this stack answers for.
+http://127.0.0.1:9000 {
+	@www query domain=www.{$WEB_HOST}
+	respond @www 200
 	reverse_proxy pds:3000
 }
