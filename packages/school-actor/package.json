@@ -1,5 +1,5 @@
 {
-  "name": "@freeschool/shared",
+  "name": "@freeschool/school-actor",
   "version": "0.0.1",
   "license": "AGPL-3.0-or-later",
   "type": "module",
@@ -16,5 +16,8 @@
   "devDependencies": {
     "typescript": "^5.9.2",
     "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@freeschool/shared": "workspace:*"
   }
 }
