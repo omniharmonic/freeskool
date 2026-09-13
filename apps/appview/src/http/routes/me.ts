@@ -25,11 +25,12 @@
  *
  * TWO FORCED-OFF RULES on a public claim, both enforced by `checkPublicClaims` below
  * before anything is written:
- *   - an OAuth-door session can NEVER set `visibility: 'public'` in v1. There is no
- *     unlock endpoint — bringing an existing identity through the secondary door does
- *     not currently carry enough confirmation of intent to broadcast a public claim
- *     under it, and the session already has no path to get one (see `config().oauthUsable`
- *     and the README's secondary-door notes). 403 `PublicTogglesLocked`.
+ *   - an OAuth-door session needs `confirmPublicLinkage: true` on the request body before
+ *     it can set `visibility: 'public'` at all (Task 7). There is no unlock endpoint;
+ *     bringing an existing identity through the secondary door did not used to carry
+ *     enough confirmation of intent to broadcast a public claim under it (the old hard
+ *     403 `PublicTogglesLocked`), and now instead asks for it explicitly, once, on the
+ *     request that needs it. 400 `PublicLinkageConfirmRequired`.
  *   - a Tier B (sensitive/high-risk) skill needs `confirmTierB: true` on the request
  *     body before a public claim for it is written, for any session. 400
  *     `TierBConfirmRequired`.
@@ -55,6 +56,7 @@ import { config } from '../../config.js'
 import { isPublicRoleOptIn, publishRoleClaim, setPublicRoleOptIn } from '../../lib/membership-claims.js'
 import { badgeSentences, type VouchCount } from '../../lib/badges.js'
 import { receivedWithAttesters, vouchCountsFor } from '../../lib/attestations.js'
+import { importBlueskyProfile } from '../../lib/bsky-profile.js'
 
 export const me = new Hono<AppEnv>()
 
@@ -125,6 +127,9 @@ const profileBody = z
     // doc comment in db/schema.ts. Not part of `Profile`/`fs_app_meta`: it lives in
     // `fs_member_prefs`, the same row `publicRole`/`onboardedAt` already use.
     directoryListing: z.boolean().optional(),
+    // Task 7: required alongside `publicListing: true` for an OAuth-door viewer — see the
+    // file-header comment and `checkPublicClaims` below for the sibling rule on claims.
+    confirmPublicLinkage: z.boolean().optional(),
   })
   .strict()
 
@@ -132,7 +137,15 @@ me.put('/', async (c) => {
   const parsed = profileBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400)
   const viewer = c.var.viewer!
-  if (parsed.data.publicListing && viewer.kind === 'oauth') return c.json({error:'PublicTogglesLocked',message:'Public profile publishing is not enabled for this sign-in method yet.'},403)
+  if (parsed.data.publicListing && viewer.kind === 'oauth' && !parsed.data.confirmPublicLinkage) {
+    return c.json(
+      {
+        error: 'PublicLinkageConfirmRequired',
+        message: 'publishing from an existing account links it to this school permanently; resend with confirmPublicLinkage: true',
+      },
+      400,
+    )
+  }
   const existing = await loadProfile(viewer.did)
   const profile: Profile = {
     ...existing,
@@ -163,6 +176,17 @@ function visibleProfile(profile: Profile) {
   const { avatar, ...fields } = profile
   return { ...fields, ...(avatar ? { avatarUrl: `/api/me/avatar?v=${avatar.revision}` } : {}) }
 }
+
+/**
+ * On-demand re-import (Task 7). Unlike the fire-and-forget call on `/oauth/callback`
+ * (`overwrite: false` — never clobbers a profile a member already touched), a member
+ * asking for this explicitly means it: `overwrite: true` always re-pulls whatever
+ * Bluesky currently has.
+ */
+me.post('/import-bsky-profile', async (c) => {
+  const result = await importBlueskyProfile(c.var.viewer!.did, { overwrite: true })
+  return c.json(result)
+})
 
 me.get('/avatar', async c => {
   const avatar = (await loadProfile(c.var.viewer!.did)).avatar
@@ -288,14 +312,16 @@ export async function handlesForDids(dids: string[]): Promise<Record<string, str
   const stillRemaining = dids.filter((d) => !out[d])
   if (stillRemaining.length > 0) {
     // Last resort: a previously-resolved handle cached app-side (see the members
-    // directory brief) — nothing writes this cache yet, so this is a no-op today, but
-    // reading it is free and keeps the fallback order this codebase documents intact.
+    // directory brief). Task 7's `lib/bsky-profile.ts#importBlueskyProfile` is the first
+    // writer of this key, on every successful import (`{ handle, resolvedAt }`) — keep
+    // this reader accepting that shape.
     const rows = await getDb()
       .select({ key: appMeta.key, value: appMeta.value })
       .from(appMeta)
       .where(inArray(appMeta.key, stillRemaining.map((d) => `handle:${d}`)))
     for (const r of rows) {
-      const handle = typeof r.value === 'string' ? r.value : undefined
+      const cached = r.value as { handle?: string } | string | undefined
+      const handle = typeof cached === 'string' ? cached : cached?.handle
       if (handle) out[r.key.slice('handle:'.length)] = handle
     }
   }
@@ -395,6 +421,8 @@ const claimsBody = z.object({
     .max(200),
   /** Required to publish a Tier B (sensitive/high-risk) skill claim publicly. */
   confirmTierB: z.boolean().optional(),
+  /** Required for an OAuth-door session to publish ANY public claim — see `checkPublicClaims`. */
+  confirmPublicLinkage: z.boolean().optional(),
 })
 
 const APP_SIDE_CLAIMS_KEY = (did: string) => `skill-claims:${did}`
@@ -408,14 +436,15 @@ export function checkPublicClaims(
   sessionKind: SessionKind,
   claimTiers: SkillTierValue[],
   confirmTierB: boolean,
-): { ok: true } | { ok: false; status: 403 | 400; error: string; message: string } {
+  confirmPublicLinkage = false,
+): { ok: true } | { ok: false; status: 400; error: string; message: string } {
   if (claimTiers.length === 0) return { ok: true }
-  if (sessionKind === 'oauth') {
+  if (sessionKind === 'oauth' && !confirmPublicLinkage) {
     return {
       ok: false,
-      status: 403,
-      error: 'PublicTogglesLocked',
-      message: 'sign-in-with-an-existing-account sessions cannot make a skill claim public in v1',
+      status: 400,
+      error: 'PublicLinkageConfirmRequired',
+      message: 'publishing from an existing account links it to this school permanently; resend with confirmPublicLinkage: true',
     }
   }
   if (claimTiers.includes('B') && !confirmTierB) {
@@ -501,7 +530,7 @@ me.put('/skill-claims', async (c) => {
   const toPublish = parsed.data.claims.filter((x) => x.visibility === 'public')
   if (toPublish.length > 0) {
     const tiers = await Promise.all(toPublish.map((claim) => tierOfSkillUri(claim.skill)))
-    const check = checkPublicClaims(viewer.kind, tiers, parsed.data.confirmTierB ?? false)
+    const check = checkPublicClaims(viewer.kind, tiers, parsed.data.confirmTierB ?? false, parsed.data.confirmPublicLinkage ?? false)
     if (!check.ok) return c.json({ error: check.error, message: check.message }, check.status)
   }
 
