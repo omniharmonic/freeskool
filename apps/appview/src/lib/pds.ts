@@ -68,6 +68,39 @@ export async function updateAccountPassword(did: string, password: string): Prom
   await xrpc<{ success: boolean }>('com.atproto.admin.updateAccountPassword', { did, password }, { admin: true })
 }
 
+export interface AdminAccountSummary {
+  did: string
+  handle: string
+}
+
+/**
+ * `custody.ts#signup`'s orphan self-heal: `createAccount` failed because the PDS says
+ * the email is already taken, but we hold no `fs_custodial_account` row for it — a prior
+ * signup got as far as minting the PDS account and then lost the mail send (or crashed)
+ * before we ever recorded it. This is how we find that stranded account back by email,
+ * admin-side, so it can be adopted rather than leaving every future attempt 502ing
+ * forever against an account nobody can reach.
+ */
+export async function searchAccountByEmail(email: string): Promise<AdminAccountSummary | null> {
+  const base = config().PDS_URL.replace(/\/$/, '')
+  const url = new URL('/xrpc/com.atproto.admin.searchAccounts', base)
+  url.searchParams.set('email', email)
+  const res = await fetch(url, { headers: { authorization: adminAuth() } })
+  const text = await res.text()
+  const json = text ? (JSON.parse(text) as Record<string, unknown>) : {}
+  if (!res.ok) {
+    throw new PdsError(
+      typeof json.message === 'string' ? json.message : 'PDS com.atproto.admin.searchAccounts failed',
+      res.status,
+      typeof json.error === 'string' ? json.error : undefined,
+    )
+  }
+  const accounts = Array.isArray(json.accounts) ? (json.accounts as Array<{ did?: string; handle?: string }>) : []
+  const first = accounts[0]
+  if (!first?.did || !first.handle) return null
+  return { did: first.did, handle: first.handle }
+}
+
 export interface CreatedAccount {
   did: string
   handle: string

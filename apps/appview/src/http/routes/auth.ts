@@ -2,12 +2,16 @@
  * `/api/auth/*`
  *
  *   POST /signup            primary door: mint a Free School identity from an email
+ *   POST /signin             same door, same handler — "Continue with email" on the
+ *                            PWA works whether the person is new or returning
+ *                            (`lib/custody.ts#signup` already resends the link for a
+ *                            known email, and now self-heals an orphaned PDS account)
  *   GET  /verify?token=     consume the magic link, open a session
  *   GET  /oauth/start       SECONDARY door. Requires ?confirm=1 — see ../oauth.ts
  *   POST /logout
  *   GET  /me
  */
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { z } from 'zod'
 import { eq } from 'drizzle-orm'
 import type { AppEnv } from '../session.js'
@@ -38,7 +42,12 @@ const signupBody = z.object({
   newsletter: z.boolean().optional(),
 })
 
-auth.post('/signup', async (c) => {
+/**
+ * Shared by `/signup` and `/signin` — one door, "Continue with email", for both a new
+ * member and one coming back (`lib/custody.ts#signup` already tells the two apart by
+ * whether an `fs_custodial_account` row exists for the email). Response shape unchanged.
+ */
+async function signupHandler(c: Context<AppEnv>) {
   const parsed = signupBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest', message: 'email is required' }, 400)
   try {
@@ -60,7 +69,10 @@ auth.post('/signup', async (c) => {
     log.error('signup failed', { detail: describeError(err) })
     return c.json({ error: 'SignupFailed', message: 'could not create the account' }, 502)
   }
-})
+}
+
+auth.post('/signup', signupHandler)
+auth.post('/signin', signupHandler)
 
 auth.get('/verify', async (c) => {
   const token = c.req.query('token')

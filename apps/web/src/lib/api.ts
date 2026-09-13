@@ -169,6 +169,13 @@ export const api = {
   },
   auth: {
     signup: (body: { email: string; inviterDid?: string }) => post<SignupResult>('/api/auth/signup', body),
+    /**
+     * "Continue with email" — the one door for a new AND a returning member
+     * (`SignInScreen`). Same handler as `signup` on the AppView
+     * (`apps/appview/src/http/routes/auth.ts`), same response shape; kept as its own
+     * named call here so the screen's copy and its API call agree on what this is.
+     */
+    signin: (body: { email: string; inviterDid?: string }) => post<SignupResult>('/api/auth/signin', body),
     verify: (token: string) =>
       get<VerifyResult>('/api/auth/verify', { token }, { accept: 'application/json' }),
     me: () => get<AuthMe>('/api/auth/me'),

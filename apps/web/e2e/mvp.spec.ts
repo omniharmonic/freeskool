@@ -86,7 +86,7 @@ async function signUp(browser: Browser, who: string): Promise<Member> {
   const address = addressFor(who);
   await page.goto('/signin');
   await page.getByLabel('Your email').fill(address);
-  await page.getByRole('button', { name: /Create a new Free School identity/ }).click();
+  await page.getByRole('button', { name: /Continue with email/ }).click();
   await expect(page.getByText('Check your email')).toBeVisible();
 
   const verifyUrl = await magicLinkUrl(address);
@@ -178,7 +178,7 @@ test('the MVP loop: sign up, ask, post, RSVP, attest, feedback, zine, policy', a
     await host.page.getByRole('button', { name: 'Sign out', exact: true }).click();
     await host.page.goto('/signin');
     await host.page.getByLabel('Your email').fill(host.address);
-    await host.page.getByRole('button', { name: /Create a new Free School identity/ }).click();
+    await host.page.getByRole('button', { name: /Continue with email/ }).click();
     await expect(host.page.getByText('Check your email')).toBeVisible();
     await host.page.goto(await magicLinkUrl(host.address));
     await expect(host.page.getByRole('heading', { name: 'Requests', level: 1 })).toBeVisible();

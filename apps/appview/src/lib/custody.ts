@@ -17,13 +17,16 @@ import { custodialAccount, emailVerification, invite, ownershipReveal } from '..
 import { config } from '../config.js'
 import { generateHandle } from './handles.js'
 import { hashToken, newToken, randomPassword, unwrapSecret, wrapSecret } from './crypto.js'
-import { createAccount, createInviteCode, PdsError, updateAccountPassword } from './pds.js'
+import { createAccount, createInviteCode, PdsError, searchAccountByEmail, updateAccountPassword } from './pds.js'
 import { sendMail } from './mail.js'
 import { registerEmailTarget } from '../notifications/dispatch.js'
 import { subscribe } from './newsletter-subscriptions.js'
 import { log } from './logging.js'
 
 export const VERIFY_TTL_MS = 24 * 3_600_000
+
+/** The PDS's various phrasings of "this email already belongs to an account". */
+const EMAIL_TAKEN_RE = /email.*(taken|already)/i
 
 export class SignupError extends Error {
   constructor(
@@ -68,6 +71,7 @@ export async function signup(input: { email: string; inviterDid?: string; newsle
   // The PDS rejects a handle that is taken or that trips its slur filter; both are
   // cheap to retry past, and the handle space is ~360k so collisions are rare.
   let account: { did: string; handle: string } | undefined
+  let adopted = false
   let lastError: unknown
   for (let attempt = 0; attempt < 5 && !account; attempt++) {
     const handle = generateHandle(c.handleDomain)
@@ -77,6 +81,14 @@ export async function signup(input: { email: string; inviterDid?: string; newsle
       lastError = err
       if (err instanceof PdsError && err.code === 'HandleNotAvailable') continue
       if (err instanceof PdsError && err.code === 'InvalidHandle') continue
+      // Orphan self-heal: the PDS already has an account under this email — almost
+      // certainly one whose earlier signup minted it and then lost the mail send (or
+      // crashed) before we ever recorded a row. Adopt it rather than fail forever.
+      if (err instanceof PdsError && EMAIL_TAKEN_RE.test(err.message)) {
+        account = await adoptOrphanedAccount(email, password)
+        adopted = true
+        break
+      }
       throw err
     }
   }
@@ -97,23 +109,52 @@ export async function signup(input: { email: string; inviterDid?: string; newsle
     keyVersion: wrapped.keyVersion,
     wrappedPassword: wrapped.blob,
   })
-  await getDb().insert(invite).values({
-    code,
-    inviterDid: input.inviterDid ?? null,
-    usedByDid: account.did,
-    usedAt: new Date(),
-  })
+  // The invite code was never actually consumed by the PDS for an adopted account
+  // (`createAccount` failed before that could happen) — nothing to record as used.
+  if (!adopted) {
+    await getDb().insert(invite).values({
+      code,
+      inviterDid: input.inviterDid ?? null,
+      usedByDid: account.did,
+      usedAt: new Date(),
+    })
+  }
   await registerEmailTarget(account.did, email)
   // Default false: only the signup form's own checkbox, ticked, subscribes.
   if (input.newsletter === true) await subscribe(account.did, email)
 
   const { url } = await sendVerificationEmail(account.did, email)
-  log.info('custodial account minted', { handleDomain: c.handleDomain })
+  if (adopted) {
+    log.info('custodial account adopted')
+  } else {
+    log.info('custodial account minted', { handleDomain: c.handleDomain })
+  }
   return {
     did: account.did,
     handle: account.handle,
     ...(config().SMTP_URL ? {} : { verifyUrl: url }),
   }
+}
+
+/**
+ * Looks up a stranded PDS account by email (admin-side) and re-homes it: a fresh random
+ * password (we never learn or reuse the one from this signup attempt's failed
+ * `createAccount` call — it was never accepted by the PDS), rotated admin-side exactly
+ * like `takeOwnership`'s step 2. Throws (502, surfaced the same way as any other PDS
+ * rejection) if the PDS reports the email taken but no matching account can be found —
+ * an inconsistency worth failing loudly on rather than silently retrying forever.
+ */
+async function adoptOrphanedAccount(email: string, password: string): Promise<{ did: string; handle: string }> {
+  const found = await searchAccountByEmail(email)
+  if (!found) {
+    throw new SignupError(
+      'could not mint an account on the PDS: email already taken, but no matching account was found',
+      502,
+      'PdsRejected',
+    )
+  }
+  await updateAccountPassword(found.did, password)
+  return found
 }
 
 export async function sendVerificationEmail(did: string, email: string): Promise<{ url: string }> {
