@@ -169,6 +169,17 @@ export interface MyRsvp {
   alsoPublicRecord: boolean;
 }
 
+/**
+ * `GET /api/rsvp?eventUri=` (`apps/appview/src/http/routes/rsvp.ts`) — the
+ * viewer's own RSVP for one event, or `null` if they have none. Added for
+ * Task 4 (`api.ts` had no binding for this route yet); see the file header
+ * there.
+ */
+export interface RsvpGetResult {
+  rsvp: { status: string; alsoPublicRecord: boolean } | null;
+  counts: RsvpCounts;
+}
+
 // ── attendance ───────────────────────────────────────────────────────────
 
 export interface AttendanceRow {

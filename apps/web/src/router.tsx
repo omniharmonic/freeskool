@@ -3,7 +3,7 @@ import { TabBar } from './components/TabBar';
 import { OfflineBanner } from './components/OfflineBanner';
 import { InstallProvider } from './components/InstallNudge';
 import { CalendarScreen } from './routes/CalendarScreen';
-import { EventScreen } from './routes/EventScreen';
+import { EventRedirect, EventScreen } from './routes/EventScreen';
 import { SkillsScreen } from './routes/SkillsScreen';
 import { SkillScreen } from './routes/SkillScreen';
 import { RequestsScreen } from './routes/RequestsScreen';
@@ -12,6 +12,7 @@ import { SignInScreen } from './routes/SignInScreen';
 import { VerifyScreen } from './routes/VerifyScreen';
 import { OAuthConfirmScreen } from './routes/OAuthConfirmScreen';
 import { ZineScreen } from './routes/ZineScreen';
+import { InviteScreen } from './routes/InviteScreen';
 import { Placeholder } from './routes/Placeholder';
 
 /** The zine and the sign-in flow (both doors plus the verify landing) are the
@@ -34,7 +35,10 @@ const rootRoute = createRootRoute({ component: Shell });
 
 const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/', component: CalendarScreen }),
-  createRoute({ getParentRoute: () => rootRoute, path: '/event/$eventId', component: EventScreen }),
+  // Pre-Task-4 path, kept working: it forwards to `/events/$id` (see
+  // `EventRedirect`'s doc comment in `EventScreen.tsx`).
+  createRoute({ getParentRoute: () => rootRoute, path: '/event/$eventId', component: EventRedirect }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/events/$id', component: EventScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/skills', component: SkillsScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/skills/$skillId', component: SkillScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/requests', component: RequestsScreen }),
@@ -56,7 +60,7 @@ const routes = [
     path: '/events/$id/feedback-summary',
     component: Placeholder,
   }), // Task 7
-  createRoute({ getParentRoute: () => rootRoute, path: '/invite/$token', component: Placeholder }), // Task 4
+  createRoute({ getParentRoute: () => rootRoute, path: '/invite/$token', component: InviteScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/me/settings', component: Placeholder }), // Task 6
   createRoute({ getParentRoute: () => rootRoute, path: '/admin', component: Placeholder }), // Task 8
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/policy', component: Placeholder }), // Task 8

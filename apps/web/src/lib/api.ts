@@ -7,8 +7,11 @@
  * in development. Non-2xx responses throw `ApiError`, carrying the server's
  * `error` code through rather than swallowing it.
  *
- * Paths mostly match an existing route exactly. Four do not yet exist on the
- * AppView and are documented here rather than silently guessed at:
+ * Paths mostly match an existing route exactly. One binding was simply
+ * missing rather than pointed at the wrong place — `rsvp.get`, for
+ * `GET /api/rsvp?eventUri=` (Task 4 added it; the route itself is Task 2's).
+ * Four others do not yet exist on the AppView and are documented here rather
+ * than silently guessed at:
  *   - `events.update`     → `PUT /api/events/:id` (no edit route yet; the
  *     natural counterpart to `GET /api/events/:id`)
  *   - `requests.rsvp`     → `POST /api/requests/:id/rsvp` (joining a request's
@@ -57,6 +60,7 @@ import type {
   RequestMutationResult,
   RequestsResponse,
   RsvpClearResult,
+  RsvpGetResult,
   RsvpSetInput,
   RsvpSetResult,
   SignupResult,
@@ -168,6 +172,8 @@ export const api = {
     set: (eventId: string, input: RsvpSetInput) =>
       post<RsvpSetResult>('/api/rsvp', { eventUri: eventId, ...input }),
     clear: (eventId: string) => del<RsvpClearResult>('/api/rsvp', { eventUri: eventId }),
+    /** The viewer's own RSVP for one event — `null` if they have none. */
+    get: (eventId: string) => get<RsvpGetResult>('/api/rsvp', { eventUri: eventId }),
     mine: async (): Promise<MyRsvp[]> => (await get<MeResponse>('/api/me')).rsvps,
   },
 
