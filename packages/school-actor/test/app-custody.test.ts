@@ -43,6 +43,13 @@ describe('AppCustodyAdapter', () => {
     if (!r.ok) expect(r.error).toBe('ErrThresholdNotMet')
     expect(calls).toHaveLength(0)
   })
+  it('write-policy is single-steward: one steward alone succeeds, no approvals needed', async () => {
+    const { adapter, audit, calls } = make(roles)
+    const r = await adapter.putRecordAsSchool({ schoolDid: school, callerDid: steward1, scope: 'freeschool.draft.policy', action: 'write-policy', collection: 'freeschool.draft.policy', rkey: 'self', record: { title: 'policy' }, audit: { reason: 'lower the threshold' } })
+    expect(r.uri).toBe('at://did:plc:school/x/y')
+    expect(calls).toHaveLength(1)
+    expect(audit[0]).toMatchObject({ decision: 'allow', action: 'write-policy', callerDid: steward1 })
+  })
   it('destructive action succeeds with a second steward approval', async () => {
     const { adapter, audit } = make(roles)
     const r = await adapter.deleteRecordAsSchool({ schoolDid: school, callerDid: steward1, scope: 's', action: 'remove-listing', collection: 'coop.lexicon.event.listing', rkey: '3k', audit: { reason: 'duplicate listing', approvals: [{ stewardDid: steward2, at: '2026-09-12T00:00:00Z' }] } })
@@ -57,5 +64,26 @@ describe('AppCustodyAdapter', () => {
     const { adapter } = make(roles)
     await expect(adapter.actAs({ schoolDid: school, callerDid: steward1, scope: 's', action: 'publish-event', method: 'POST', nsid: 'n', audit: { reason: '   ' } })).rejects.toThrow(/reason/)
     await expect(adapter.actAs({ schoolDid: school, callerDid: steward1, scope: '', action: 'publish-event', method: 'POST', nsid: 'n', audit: { reason: 'ok' } })).rejects.toThrow(/scope/)
+  })
+  it('putRecordAsSchool omits swapRecord entirely when the caller passes none — an ordinary upsert, not an existence assertion', async () => {
+    const { adapter, calls } = make(roles)
+    await adapter.putRecordAsSchool({ schoolDid: school, callerDid: host, scope: 's', action: 'publish-event', collection: 'c', rkey: 'r', record: { x: 1 }, audit: { reason: 'ok' } })
+    const body = (calls[0] as { body: Record<string, unknown> }).body
+    // NOT `swapRecord: null` (which would assert "must not already exist" and break
+    // every update-in-place, e.g. a re-derived coop.lexicon.membership claim).
+    expect('swapRecord' in body).toBe(false)
+  })
+  it('putRecordAsSchool passes swapRecord through untouched when the caller does provide one', async () => {
+    const { adapter, calls } = make(roles)
+    await adapter.putRecordAsSchool({ schoolDid: school, callerDid: host, scope: 's', action: 'publish-event', collection: 'c', rkey: 'r', record: { x: 1 }, swapRecord: 'bafycid123', audit: { reason: 'ok' } })
+    const body = (calls[0] as { body: Record<string, unknown> }).body
+    expect(body.swapRecord).toBe('bafycid123')
+  })
+  it('putRecordAsSchool sends an explicit null swapRecord when the caller passes null (an intentional "must not exist yet" assertion)', async () => {
+    const { adapter, calls } = make(roles)
+    await adapter.putRecordAsSchool({ schoolDid: school, callerDid: host, scope: 's', action: 'publish-event', collection: 'c', rkey: 'r', record: { x: 1 }, swapRecord: null, audit: { reason: 'ok' } })
+    const body = (calls[0] as { body: Record<string, unknown> }).body
+    expect('swapRecord' in body).toBe(true)
+    expect(body.swapRecord).toBeNull()
   })
 })

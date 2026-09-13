@@ -1,10 +1,32 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { areas, domains, skills } from '../lib/mock';
 import { Screen } from '../components/Screen';
+import { SkillChip } from '../components/bits';
+import { useSkillTree } from '../lib/queries';
+import type { SkillNode } from '../lib/types';
 
+/**
+ * The taxonomy is a tree here (one root level, each expandable), but
+ * `GET /api/skills` has no notion of "domain"/"area" groupings the way the
+ * mock data did — those were presentational buckets invented for the shell.
+ * Real skill nodes nest directly (`children`), so roots are rendered as the
+ * expandable sections and their children as the flat list beneath.
+ *
+ * TIER: `GET /api/skills` now carries each node's `tier` (Task 12) — a "B"
+ * marks a sensitive/high-risk skill, looked up server-side from
+ * `apps/appview/src/lib/skill-tiers.ts`. `SkillLink` below shows a
+ * "Sensitive" chip next to any Tier B skill's label.
+ */
 export function SkillsScreen() {
-  const [open, setOpen] = useState<string | null>(domains[0].id);
+  const { data, isPending } = useSkillTree();
+  const roots = data?.skills ?? [];
+  const [open, setOpen] = useState<string | null>(null);
+
+  // Open the first domain once the tree loads, rather than landing on an
+  // all-collapsed screen — only while nothing has been explicitly chosen yet.
+  useEffect(() => {
+    if (open === null && roots.length > 0) setOpen(roots[0]!.uri);
+  }, [open, roots]);
 
   return (
     <Screen
@@ -12,19 +34,25 @@ export function SkillsScreen() {
       standfirst="Everything anyone here has offered to teach, filed the way people actually talk about it."
     >
       <div className="safe-x mt-4 space-y-4">
-        {domains.map((domain) => {
-          const expanded = open === domain.id;
+        {!isPending && roots.length === 0 ? (
+          <p className="text-body text-ink-soft">Nothing is filed in the taxonomy yet.</p>
+        ) : null}
+
+        {roots.map((domain) => {
+          const expanded = open === domain.uri;
           return (
-            <section key={domain.id} className="plate plate-blue overflow-hidden">
+            <section key={domain.uri} className="plate plate-blue overflow-hidden">
               <button
                 type="button"
                 className="flex w-full items-start gap-3 px-4 py-3.5 text-left"
                 aria-expanded={expanded}
-                onClick={() => setOpen(expanded ? null : domain.id)}
+                onClick={() => setOpen(expanded ? '' : domain.uri)}
               >
                 <span className="min-w-0 flex-1">
                   <span className="display block text-lede font-bold">{domain.label}</span>
-                  <span className="mt-0.5 block text-caption text-ink-soft">{domain.blurb}</span>
+                  {domain.description ? (
+                    <span className="mt-0.5 block text-caption text-ink-soft">{domain.description}</span>
+                  ) : null}
                 </span>
                 <svg
                   width="13"
@@ -40,45 +68,58 @@ export function SkillsScreen() {
 
               {expanded ? (
                 <div className="border-t-[1.5px] border-rule">
-                  {domain.areas.map((areaId) => {
-                    const area = areas[areaId];
-                    if (!area) return null;
-                    return (
-                      <div key={areaId} className="border-b-[1.5px] border-rule px-4 py-3 last:border-b-0">
-                        <p className="stamp text-[13px] text-ink-soft">{area.label}</p>
-                        <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
-                          {[...new Set(area.skills)].map((skillId) => {
-                            const skill = skills.find((candidate) => candidate.id === skillId);
-                            if (!skill) return null;
-                            return (
-                              <li key={skillId}>
-                                <Link
-                                  to="/skills/$skillId"
-                                  params={{ skillId }}
-                                  className="inline-flex items-baseline gap-1.5"
-                                >
-                                  <span className="text-body underline decoration-[1.5px] decoration-pink underline-offset-[5px]">
-                                    {skill.label}
-                                  </span>
-                                  <span className="text-caption text-ink-faint">{skill.practitionerCount}</span>
-                                </Link>
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      </div>
-                    );
-                  })}
+                  <SkillChildren node={domain} />
                 </div>
               ) : null}
             </section>
           );
         })}
-        <p className="pt-2 text-caption text-ink-soft">
-          The number beside a skill is how many people here say they practise it. Some skills are kept off the
-          public taxonomy until the people who asked for them say otherwise.
-        </p>
       </div>
     </Screen>
+  );
+}
+
+/** One level of a skill's `children`, grouped by that child's own children
+ * (so a two-deep taxonomy reads as "area, then skills" the way the mock did). */
+function SkillChildren({ node }: { node: SkillNode }) {
+  if (node.children.length === 0) {
+    return (
+      <div className="px-4 py-3">
+        <SkillLink skill={node} />
+      </div>
+    );
+  }
+  return (
+    <>
+      {node.children.map((area) => (
+        <div key={area.uri} className="border-b-[1.5px] border-rule px-4 py-3 last:border-b-0">
+          <p className="stamp text-[13px] text-ink-soft">{area.label}</p>
+          {area.children.length > 0 ? (
+            <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
+              {area.children.map((skill) => (
+                <li key={skill.uri}>
+                  <SkillLink skill={skill} />
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <div className="mt-2">
+              <SkillLink skill={area} />
+            </div>
+          )}
+        </div>
+      ))}
+    </>
+  );
+}
+
+function SkillLink({ skill }: { skill: SkillNode }) {
+  return (
+    <Link to="/skills/$skillId" params={{ skillId: skill.uri }} className="inline-flex items-baseline gap-1.5">
+      <span className="text-body underline decoration-[1.5px] decoration-pink underline-offset-[5px]">
+        {skill.label}
+      </span>
+      {skill.tier === 'B' ? <SkillChip ink="pink">Sensitive</SkillChip> : null}
+    </Link>
   );
 }

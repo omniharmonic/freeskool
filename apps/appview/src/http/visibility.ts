@@ -4,10 +4,11 @@
  *
  * Two independent decisions:
  *
- *   1. DOES THIS EVENT APPEAR AT ALL?  Only if it is `listed`: either the school wrote a
- *      `coop.lexicon.event.listing` with status != 'removed', or the host's own
- *      `coop.lexicon.event.config` says `visibility: 'listed'`. A removal by the school
- *      WINS over the host's own config — that is what moderation means.
+ *   1. DOES THIS EVENT APPEAR AT ALL?  Only if it is `listed`: either the school's NEWEST
+ *      `coop.lexicon.event.listing` says so, or — with no listing at all — the host's own
+ *      `coop.lexicon.event.config` says `visibility: 'listed'`. A school listing of either
+ *      status WINS over the host's own config: that is what moderation means, and it is
+ *      also what makes `restore-listing` work at all.
  *
  *   2. HOW MUCH OF IT?  Everyone sees title / time / neighborhood. The full location —
  *      street address, venue name, coordinates, join URL — is only ever sent to a viewer
@@ -43,11 +44,84 @@ export interface ListingInputs {
   configs: EventConfig[]
 }
 
+/**
+ * THE NEWEST LISTING WINS, by `createdAt`.
+ *
+ * Listings are append-only — the school never edits or deletes one, it writes another (see
+ * `http/routes/admin.ts`'s `remove-listing` / `restore-listing`) — so "is it listed" is a
+ * question about the LATEST record, not about whether a `removed` one exists anywhere in
+ * the history. The old "any removal wins, forever" rule made `restore-listing`
+ * structurally impossible: the removal it was undoing was still sitting there.
+ *
+ * Ties, including the all-missing-`createdAt` case, resolve to REMOVED. Two listings
+ * stamped the same instant is not a state a steward can intend, and between "hidden when we
+ * are unsure" and "visible when we are unsure" the privacy-respecting answer is hidden.
+ * (Every listing this codebase writes carries a `createdAt`; the tie rule is for records
+ * from elsewhere.)
+ */
 export function isListed({ listings, configs }: ListingInputs): boolean {
-  // A school removal is final, regardless of what the host's config claims.
-  if (listings.some((l) => l.status === 'removed')) return false
-  if (listings.some((l) => l.status === undefined || l.status === 'listed')) return true
+  let newest = -Infinity
+  let removed = false
+  let listed = false
+  for (const l of listings) {
+    const at = listingTime(l.createdAt)
+    if (at > newest) {
+      newest = at
+      removed = false
+      listed = false
+    }
+    if (at < newest) continue
+    if (l.status === 'removed') removed = true
+    else listed = true // 'listed', or absent (the lexicon's default reading)
+  }
+  if (removed) return false
+  if (listed) return true
+  // No school listing at all: the host's own config is the only voice.
   return configs.some((c) => c.visibility === 'listed')
+}
+
+/** An unparseable or absent `createdAt` sorts oldest, so a stamped record always beats it. */
+function listingTime(createdAt?: string): number {
+  const t = createdAt ? Date.parse(createdAt) : Number.NaN
+  return Number.isNaN(t) ? -Infinity : t
+}
+
+export interface CalendarInclusion {
+  show: boolean
+  origin: 'ours' | 'listed'
+}
+
+/**
+ * Does this event belong on OUR calendar (and zine), and under what origin? The
+ * inclusion rule is AUTHORSHIP, not the listing: an event whose host belongs to this
+ * school (`isOwnHost`, from `lib/roles.ts#isOwnMember`) is `'ours'` and is shown or
+ * hidden by the ordinary `isListed` rule (moderation removal and the host's own
+ * visibility choice both still apply, exactly as before). An event hosted elsewhere is
+ * shown ONLY if our own school has a live curation listing for it — `'listed'`, the
+ * peer-routing case. `coop.lexicon.event.listing` is for routing content TO PEERS; it is
+ * never required for OUR OWN content to appear on OUR OWN calendar.
+ */
+export function calendarInclusion(isOwnHost: boolean, inputs: ListingInputs): CalendarInclusion {
+  if (isOwnHost) {
+    return { show: isListed(inputs), origin: 'ours' }
+  }
+  // Ignore the config fallback for a host that is not ours — a foreign host's own
+  // `visibility: 'listed'` flag grants nothing on OUR calendar; only OUR curation does.
+  return { show: isListed({ listings: inputs.listings, configs: [] }), origin: 'listed' }
+}
+
+/** Union of every config sidecar's declared tags, deduped, lowercase. Never the event's author. */
+export function tagsOf({ configs, listings }: ListingInputs): string[] {
+  const out = new Set<string>()
+  for (const c of configs) for (const t of c.tags ?? []) out.add(t.toLowerCase())
+  for (const l of listings) for (const t of l.tags ?? []) out.add(t.toLowerCase())
+  return [...out]
+}
+
+/** True when nobody has offered a place for this class to happen yet. */
+export function isVenueNeeded(event: CalendarEvent, inputs: ListingInputs): boolean {
+  const hasLocations = Array.isArray(event.locations) && event.locations.length > 0
+  return !hasLocations && !neighborhoodOf(inputs, event)
 }
 
 export function neighborhoodOf({ configs }: ListingInputs, event: CalendarEvent): string | undefined {
@@ -74,6 +148,10 @@ export interface PublicCalendarEntry {
   neighborhood?: string
   /** True when the viewer is being shown a coarsened location. */
   locationRedacted: boolean
+  /** True when the host has no address and no neighborhood at all — nobody has a room yet. */
+  venueNeeded: boolean
+  /** Lowercase kebab tags this class carries. Never includes who added them. */
+  tags: string[]
 }
 
 export interface FullCalendarEntry extends PublicCalendarEntry {
@@ -100,6 +178,8 @@ export function projectEvent(
       return n ? { neighborhood: n } : {}
     })(),
     locationRedacted: !seesFullLocation(relation),
+    venueNeeded: isVenueNeeded(event, inputs),
+    tags: tagsOf(inputs),
   }
   if (!seesFullLocation(relation)) return base
   return {

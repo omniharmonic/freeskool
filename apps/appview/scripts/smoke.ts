@@ -12,11 +12,19 @@
  *   1. create the school (account + `freeschool.draft.school` + default policy)
  *   2. create a custodial member and verify their email (the primary door)
  *   3. publish an event as that host (event + config + skillLevel in the HOST's repo,
- *      listing in the SCHOOL's repo via SchoolActorPort)
+ *      listing in the SCHOOL's repo via SchoolActorPort); confirm tag routing — an
+ *      untagged or unrouted-tag event gets NO listing but still appears on our own
+ *      calendar by authorship; update the class (replace its skills, and confirm a
+ *      recurrence edit is rejected)
  *   4. three more custodial members RSVP app-side
  *   5. the host attests attendance for all three
  *   6. all three submit feedback; read the k-anonymous summary
  *   7. list the public calendar, and fetch the `.ics`
+ *   8. index from the peer registry (the safety net beneath PdsChangeSource)
+ *   9. invite links: the host mints one for the class, a fresh member redeems it, and the
+ *      host's own redemption is refused
+ *  10. the printable zine payload for the class's month, and the host's badges
+ *  11. the privacy audit (`scripts/privacy-audit.ts`) over every repo this run wrote
  */
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -50,6 +58,15 @@ const info = (msg: string) => console.log(`    --  ${msg}`)
 
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(`SMOKE FAILED: ${msg}`)
+}
+
+/**
+ * A payload as JSON with every `at://` URI collapsed, so "does this name a DID?" can be
+ * asked about everything EXCEPT the authority of a public record's own URI (a class's URI
+ * is its host's DID by construction — see `projectEvent`).
+ */
+function withoutAtUris(value: unknown): string {
+  return JSON.stringify(value).replace(/at:\/\/[^"\\]*/g, 'at://<uri>')
 }
 
 async function main() {
@@ -119,6 +136,7 @@ async function main() {
   step(3, 'publish a class as the host')
   const startsAt = new Date(Date.now() - 2 * 3_600_000).toISOString()
   const endsAt = new Date(Date.now() - 1 * 3_600_000).toISOString()
+  const sourdoughSkill = 'at://did:plc:taxonomy/freeschool.draft.skill/sourdough-starter'
   const created = await postJson(req, '/api/events', host.cookie, {
     name: `Sourdough for beginners (${suffix})`,
     description: 'Bring a jar. We will talk about flour.',
@@ -128,6 +146,8 @@ async function main() {
     visibility: 'listed',
     neighborhood: 'North Boulder',
     rsvpRequired: true,
+    tags: ['skillshare'],
+    skills: [{ skill: sourdoughSkill, level: 1 }],
     locations: [
       {
         $type: 'community.lexicon.location.address',
@@ -146,6 +166,56 @@ async function main() {
   ok(`event    ${eventUri}`)
   ok(`config   ${(created.config as { uri: string }).uri}`)
   ok(`listing  ${(created.listing as { uri: string }).uri}  (written as the school via SchoolActorPort)`)
+
+  /* 3a. tag routing: an untagged / unrouted-tag event gets NO listing, still ours */
+  const untagged = await postJson(req, '/api/events', host.cookie, {
+    name: `Untagged mending circle (${suffix})`,
+    startsAt,
+    endsAt,
+    visibility: 'listed',
+    neighborhood: 'North Boulder',
+  })
+  assert(untagged.listing === undefined, 'an untagged event must get NO school listing')
+  const untaggedUri = (untagged.event as { uri: string }).uri
+  const knitting = await postJson(req, '/api/events', host.cookie, {
+    name: `Knitting circle (${suffix})`,
+    startsAt,
+    endsAt,
+    visibility: 'listed',
+    neighborhood: 'North Boulder',
+    tags: ['knitting'],
+  })
+  assert(knitting.listing === undefined, 'an event tagged only ["knitting"] must get NO school listing (does not route)')
+  const knittingUri = (knitting.event as { uri: string }).uri
+  ok('an untagged event and a ["knitting"]-tagged event both get NO coop.lexicon.event.listing')
+
+  const { listRecords } = await import('../src/lib/pds.js')
+  const { NSID } = await import('../src/lexicons/nsids.js')
+  const schoolListings = await listRecords(school.did, NSID.eventListing)
+  assert(schoolListings.length === 1, `expected exactly 1 school listing, found ${schoolListings.length}`)
+  ok('the school repo holds exactly 1 listing — the two unrouted events did not add one')
+
+  /* 3b. update the class: replace its skills; a recurrence edit is rejected */
+  const breadScoringSkill = 'at://did:plc:taxonomy/freeschool.draft.skill/bread-scoring'
+  const updated = await putJson(req, `/api/events/${encodeURIComponent(eventUri)}`, host.cookie, {
+    skills: [{ skill: breadScoringSkill, level: 2 }],
+  })
+  assert(Array.isArray(updated.skillLevels) && updated.skillLevels.length === 1, 'expected exactly 1 replacement skill')
+  const afterUpdate = await getJson(req, `/api/events/${encodeURIComponent(eventUri)}`)
+  const skillUris = ((afterUpdate.skills as Array<{ skill: string }>) ?? []).map((s) => s.skill)
+  assert(skillUris.includes(breadScoringSkill), 'the replacement skill is missing from the event')
+  assert(!skillUris.includes(sourdoughSkill), 'the OLD skill sidecar was not removed on replace')
+  ok('PUT /api/events/:id replaced the skill sidecars (old deleted, new written)')
+
+  const seriesRejected = await req(`/api/events/${encodeURIComponent(eventUri)}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', cookie: host.cookie },
+    body: JSON.stringify({ series: { rrule: 'FREQ=WEEKLY', freq: 'weekly', timezone: 'America/Denver' } }),
+  })
+  assert(seriesRejected.status === 400, `expected 400 SeriesEditNotSupported, got ${seriesRejected.status}`)
+  const seriesRejectedBody = (await seriesRejected.json()) as { error?: string }
+  assert(seriesRejectedBody.error === 'SeriesEditNotSupported', `expected SeriesEditNotSupported, got ${String(seriesRejectedBody.error)}`)
+  ok('PUT /api/events/:id rejects a recurrence edit with 400 SeriesEditNotSupported')
 
   /* 4. RSVPs */
   step(4, 'three members RSVP (app-side only, no public record)')
@@ -230,7 +300,16 @@ async function main() {
   assert(mine, `the published class did not appear on the calendar (${listed.length} events listed)`)
   ok(`calendar: ${listed.length} listed event(s); ours is "${String(mine.name)}" in ${String(mine.neighborhood)}`)
   assert(mine.locationRedacted === true, 'the anonymous calendar must redact the location')
+  assert(mine.origin === 'ours', 'the routed, listed class should carry origin "ours"')
   info('indexed by contrail.notify() immediately after each write — no firehose involved')
+
+  const untaggedEntry = listed.find((e) => e.uri === untaggedUri)
+  const knittingEntry = listed.find((e) => e.uri === knittingUri)
+  assert(untaggedEntry, 'the UNTAGGED class (no listing at all) did not appear on the calendar')
+  assert(knittingEntry, 'the ["knitting"]-tagged class (unrouted, no listing) did not appear on the calendar')
+  assert(untaggedEntry.origin === 'ours', 'an untagged own-host class must still carry origin "ours"')
+  assert(knittingEntry.origin === 'ours', 'an unrouted-tag own-host class must still carry origin "ours"')
+  ok('calendar inclusion is by AUTHORSHIP: both unrouted classes appear, origin "ours", with no listing record')
 
   const ics = await req(`/api/events/${encodeURIComponent(eventUri)}.ics`, {
     headers: { cookie: attendees[0]!.cookie },
@@ -248,7 +327,7 @@ async function main() {
   ok('.ics for an anonymous viewer carries only the neighborhood')
 
   /* 8. the peer-registry indexing path */
-  step(8, 'index from the peer registry (the liveness floor until PdsChangeSource exists)')
+  step(8, 'index from the peer registry (the safety net beneath PdsChangeSource)')
   if (process.env.SMOKE_SKIP_BACKFILL === '1') {
     info('skipped (SMOKE_SKIP_BACKFILL=1)')
   } else {
@@ -275,6 +354,57 @@ async function main() {
   assert(!JSON.stringify(feedbackNotifs).includes('did:'), 'feedback.received must carry no actor')
   ok('feedback.received notifications carry no actor')
 
+  /* 9. invite links */
+  step(9, 'invite links: mint as the host, redeem as a newcomer')
+  const minted = await postJson(req, '/api/invites', host.cookie, { eventUri, uses: 2, ttlDays: 7 })
+  const inviteToken = minted.token as string
+  assert(typeof inviteToken === 'string' && inviteToken.length > 20, 'no invite token came back')
+  assert(!(minted.url as string).includes('did:'), 'the invite URL must not carry the inviter’s DID')
+  ok(`minted an invite link for the class (${String(minted.url).replace(inviteToken, '<token>')})`)
+
+  const newcomer = await signUp(req, `newcomer-${suffix}@example.org`)
+  const redeemed = await postJson(req, `/api/invites/${encodeURIComponent(inviteToken)}/redeem`, newcomer.cookie, {})
+  assert(redeemed.ok === true, 'the newcomer could not redeem the invite link')
+  assert(redeemed.eventUri === eventUri, 'the redemption did not carry the class it was scoped to')
+  // Everything EXCEPT `eventUri` (whose authority is the host's own public class) must be
+  // DID-free: the inviter's DID stays in `fs_invite_link`, server-side, forever.
+  assert(
+    !JSON.stringify({ ...redeemed, eventUri: undefined }).includes('did:'),
+    'the redemption response must not name the inviter',
+  )
+  ok('the newcomer redeemed it and landed on the class; the response names nobody')
+
+  const selfRedeem = await req(`/api/invites/${encodeURIComponent(inviteToken)}/redeem`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie: host.cookie },
+    body: '{}',
+  })
+  assert(selfRedeem.status === 409, `a self-redemption should be refused, got ${selfRedeem.status}`)
+  ok('the host redeeming their own link is refused (409 SelfRedeem)')
+
+  /* 10. the zine, and badges */
+  step(10, 'the printable zine payload, and the host’s badges')
+  const month = startsAt.slice(0, 7)
+  const zinePayload = await getJson(req, `/api/zine/${month}`)
+  const zineDays = (zinePayload.days as Array<{ date: string; events: Array<Record<string, unknown>> }>) ?? []
+  const zineEvents = zineDays.flatMap((d) => d.events)
+  const zineMine = zineEvents.find((e) => e.uri === eventUri)
+  assert(zineMine, `the class is not in the zine for ${month} (${zineEvents.length} event(s) listed)`)
+  assert(typeof (zinePayload.school as { name?: string })?.name === 'string', 'the zine carries no school name')
+  assert(typeof zinePayload.howToPost === 'string', 'the zine carries no "how to post" paragraph')
+  assert(!JSON.stringify(zinePayload).includes('Juniper'), 'the zine leaked the street address')
+  // A class's own AT-URI carries its host's DID — that is what a public event IS, and the
+  // zine needs it as a key. Everything else must be DID-free: no host identity, no roster.
+  assert(!withoutAtUris(zinePayload).includes('did:'), 'the zine names a DID outside a record URI')
+  ok(`zine ${month}: ${zineEvents.length} class(es) over ${zineDays.length} day(s), neighbourhood only, no DIDs`)
+
+  const badges = await getJson(req, '/api/me/badges', host.cookie)
+  const counts = badges.counts as { hosted: number; attended: number; vouched: number }
+  assert(counts.hosted >= 1, `expected the host to have hosted >= 1, got ${counts.hosted}`)
+  assert(Array.isArray(badges.badges) && (badges.badges as string[]).length > 0, 'no badge sentences came back')
+  assert(!JSON.stringify(badges).includes('did:'), 'badges must name no DIDs')
+  ok(`badges: hosted=${counts.hosted} attended=${counts.attended} vouched=${counts.vouched} — "${(badges.badges as string[])[0]}"`)
+
   /* audit trail */
   const { audit } = await import('../src/db/schema.js')
   const { eq } = await import('drizzle-orm')
@@ -283,6 +413,48 @@ async function main() {
   assert(
     auditRows.every((r) => r.reason.trim().length > 0),
     'an audit row has no reason',
+  )
+
+  /* 11. the privacy audit, over exactly the repos this run wrote */
+  step(11, 'privacy audit: no public record names a DID its holder did not write')
+  const { runPrivacyAudit, formatReport } = await import('./privacy-audit.js')
+  // Scoped to this run's repos on purpose. The local PDS accumulates a repo per member per
+  // past run (249 and counting), and the full-PDS audit — `pnpm --filter
+  // @freeschool/appview privacy-audit` — is the one that judges those. What the smoke gates
+  // is the writes THIS run just made.
+  const report = await runPrivacyAudit({
+    schoolDid: school.did,
+    repos: [school.did, host.did, newcomer.did, ...attendees.map((a) => a.did)],
+  })
+  console.log(
+    formatReport(report)
+      .split('\n')
+      .map((line) => `    ${line}`)
+      .join('\n'),
+  )
+  assert(report.violations.length === 0, `the privacy audit found ${report.violations.length} violation(s)`)
+  /**
+   * `records` is how many records exist in the AUDITED collections across this run's repos,
+   * and it is deliberately NOT asserted to be 0: F1 added the school-written collections, so
+   * a passing run legitimately has listings and occurrences in it (allowed, at their event
+   * strongRef, because the host published that event). What the claim "wrote nothing public"
+   * rests on is that 0 of them are violations, which is the assert above — and that the
+   * app-side collections in particular are EMPTY, which is this one.
+   */
+  const { NSID: NSIDs } = await import('../src/lexicons/nsids.js')
+  const appSideOnly = report.cells.filter((cell) =>
+    [NSIDs.rsvp, NSIDs.attendance, NSIDs.hostFeedback].includes(cell.collection as never),
+  )
+  const appSideRecords = appSideOnly.reduce((n, cell) => n + cell.count, 0)
+  assert(
+    appSideRecords === 0,
+    `3 RSVPs, 3 attendance attestations and 3 ballots must write NOTHING public, but ${appSideRecords} record(s) ` +
+      `exist in ${appSideOnly.map((c) => c.collection).join(', ')}`,
+  )
+  ok(
+    `privacy audit OK across ${report.repos} repo(s) this run created: ${report.records} record(s) in the ` +
+      'audited collections, 0 violations, and 0 in rsvp/attendance/hostFeedback — the 3 RSVPs, ' +
+      '3 attestations and 3 ballots wrote nothing public',
   )
 
   void steward
@@ -334,6 +506,22 @@ async function postJson(
   })
   const json = (await res.json()) as Record<string, unknown>
   assert(res.ok, `POST ${path} -> ${res.status} ${JSON.stringify(json)}`)
+  return json
+}
+
+async function putJson(
+  req: Fetcher,
+  path: string,
+  cookie: string,
+  body: unknown,
+): Promise<Record<string, unknown>> {
+  const res = await req(path, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify(body),
+  })
+  const json = (await res.json()) as Record<string, unknown>
+  assert(res.ok, `PUT ${path} -> ${res.status} ${JSON.stringify(json)}`)
   return json
 }
 

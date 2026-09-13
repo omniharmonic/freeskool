@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dayKey, formatDayStamp, groupByDay, monthDays } from './dates';
+import { dayKey, formatDayStamp, formatTime, groupByDay, monthDays } from './dates';
 
 interface Row {
   id: string;
@@ -45,6 +45,12 @@ describe('formatDayStamp', () => {
     expect(formatDayStamp(new Date(2026, 8, 17), today)).toBe('Today, Sep 17');
     expect(formatDayStamp(new Date(2026, 8, 18), today)).toBe('Tomorrow, Sep 18');
     expect(formatDayStamp(new Date(2026, 8, 24), today)).toBe('Thu, Sep 24');
+  });
+});
+
+describe('formatTime', () => {
+  it('formats a single timestamp without needing an end time', () => {
+    expect(formatTime('2026-09-17T18:30:00-06:00')).toBe('6:30pm');
   });
 });
 

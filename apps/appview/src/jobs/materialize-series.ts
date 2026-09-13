@@ -26,6 +26,7 @@
  * ESM path is the real module and carries its own types.
  */
 import { RRule } from 'rrule/dist/esm/index.js'
+import { DateTime } from 'luxon'
 import { eq } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { seriesOccurrence } from '../db/schema.js'
@@ -37,7 +38,7 @@ import { tid } from '../lib/ids.js'
 import { schoolActor, schoolDid } from '../lib/school-actor.js'
 import { getRecord } from '../lib/pds.js'
 import { resolvePdsEndpoint } from '../lib/identity.js'
-import { log } from '../lib/logging.js'
+import { describeError, log } from '../lib/logging.js'
 import { openFeedbackWindow } from '../lib/feedback.js'
 
 export const DEFAULT_WINDOW_DAYS = 90
@@ -60,9 +61,21 @@ export interface SeriesRecord {
 /**
  * Pure: expand a series into the instants that should exist right now. Unit-testable
  * without a database, which is the only way the floor/ceiling interaction stays honest.
+ *
+ * THE FIX (R6 "Recurrence approach to adopt"): `rrule` has no timezone concept — it
+ * matches `BYDAY` against whatever calendar day its `dtstart` Date object's UTC getters
+ * report. Handing it a real instant (`new Date(startsAt)`, a UTC instant) therefore
+ * matches `BYDAY` against the UTC weekday, which is NOT the host's local weekday once
+ * the series' `timezone` has a nonzero UTC offset — a Denver (UTC-6/-7) 18:00 Thursday is
+ * already Friday in UTC. So: convert `dtstart` to a FLOATING local datetime (a Date whose
+ * UTC getters equal the wall-clock numbers in `series.timezone`), expand entirely in that
+ * floating frame (where `BYDAY` now matches the real local weekday), then localize each
+ * result back to a real instant by re-interpreting its floating wall-clock fields as
+ * `series.timezone` — which also forces the same local `HH:mm:ss` every occurrence, so a
+ * DST boundary never shifts "7pm Thursday" to 6pm or 8pm.
  */
 export function plannedOccurrences(
-  series: Pick<SeriesRecord, 'rrule' | 'exdates' | 'materializeAhead'>,
+  series: Pick<SeriesRecord, 'rrule' | 'exdates' | 'materializeAhead' | 'timezone'>,
   dtstart: Date,
   now = new Date(),
 ): Date[] {
@@ -71,12 +84,14 @@ export function plannedOccurrences(
   const ceiling = new Date(now.getTime())
   ceiling.setUTCMonth(ceiling.getUTCMonth() + MAX_MONTHS_AHEAD)
 
+  const zone = series.timezone
+  const floatingStart = toFloatingLocal(dtstart, zone)
   // `RRule.parseString` + an explicit dtstart rather than `rrulestr`: rrule 2.8.1 is CJS and
   // Node's ESM interop does not surface `rrulestr` as a named export, and building the rule
   // from parsed options keeps the DTSTART out of the string entirely.
-  const rule = new RRule({ ...RRule.parseString(series.rrule), dtstart })
+  const rule = new RRule({ ...RRule.parseString(series.rrule), dtstart: floatingStart })
   // Ask for enough to satisfy the floor even when the horizon is short.
-  const candidates = rule.all((_d, i) => i < 500)
+  const candidates = rule.all((_d, i) => i < 500).map((d) => fromFloatingLocal(d, zone))
 
   const excluded = new Set((series.exdates ?? []).map((d) => safeNormalize(d)).filter(Boolean))
   const usable = candidates.filter((d) => d <= ceiling && !excluded.has(normalizeInstant(d.toISOString())))
@@ -85,6 +100,29 @@ export function plannedOccurrences(
   if (withinHorizon.length >= MIN_OCCURRENCES) return withinHorizon
   // FLOOR: take the first MIN_OCCURRENCES regardless of the horizon, still under the ceiling.
   return usable.slice(0, MIN_OCCURRENCES)
+}
+
+/** A real instant -> a floating Date whose UTC getters equal its wall-clock fields in `zone`. */
+function toFloatingLocal(instant: Date, zone: string): Date {
+  const local = DateTime.fromJSDate(instant, { zone })
+  return new Date(Date.UTC(local.year, local.month - 1, local.day, local.hour, local.minute, local.second, local.millisecond))
+}
+
+/** The inverse of `toFloatingLocal`: a floating Date's UTC fields, re-localized to `zone`. */
+function fromFloatingLocal(floating: Date, zone: string): Date {
+  const local = DateTime.fromObject(
+    {
+      year: floating.getUTCFullYear(),
+      month: floating.getUTCMonth() + 1,
+      day: floating.getUTCDate(),
+      hour: floating.getUTCHours(),
+      minute: floating.getUTCMinutes(),
+      second: floating.getUTCSeconds(),
+      millisecond: floating.getUTCMilliseconds(),
+    },
+    { zone },
+  )
+  return local.toJSDate()
 }
 
 function safeNormalize(iso: string): string {
@@ -113,7 +151,7 @@ export async function materializeAllSeries(now = new Date()): Promise<Materializ
       out.written += res.written
       out.skipped += res.skipped
     } catch (err) {
-      log.warn('series materialization failed', { detail: String(err) })
+      log.warn('series materialization failed', { detail: describeError(err) })
     }
   }
   return out
@@ -239,6 +277,9 @@ export async function materializeSeries(
         sequence: i + 1,
       })
       .onConflictDoNothing()
+    // The occurrence's `fs_series_occurrence` row exists by now (just above), which is
+    // what `lib/events.ts#resolveHostDid` reads — so the feedback this window will collect
+    // is attributed to, and notifies, the SERIES AUTHOR and not the school (A8).
     await openFeedbackWindow(event.uri, endsAt ?? originalStartsAt)
     written++
   }

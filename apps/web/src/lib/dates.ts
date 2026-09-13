@@ -64,6 +64,11 @@ export function formatTimeRange(startsAt: string, endsAt: string): string {
   return `${clock.format(start).toLowerCase().replace(' ', '')}–${clock.format(end).toLowerCase().replace(' ', '')}`;
 }
 
+/** A single timestamp, for real data where `endsAt` is optional and may be absent. */
+export function formatTime(at: string): string {
+  return clock.format(new Date(at)).toLowerCase().replace(' ', '');
+}
+
 export function formatWeekday(date: Date): string {
   return weekday.format(date);
 }

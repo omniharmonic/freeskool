@@ -1,0 +1,1 @@
+ALTER TABLE "fs_newsletter_issue" ADD COLUMN "failed_count" integer;

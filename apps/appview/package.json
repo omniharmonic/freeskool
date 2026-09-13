@@ -1,7 +1,7 @@
 {
   "name": "@freeschool/appview",
   "version": "0.0.1",
-  "description": "Free School AppView \u2014 ATProto indexer, BFF/OAuth, app-side privacy tables, jobs.",
+  "description": "Free School AppView — ATProto indexer, BFF/OAuth, app-side privacy tables, jobs.",
   "author": "Benjamin Life (@omniharmonic)",
   "license": "AGPL-3.0-or-later",
   "type": "module",
@@ -12,26 +12,35 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc -p tsconfig.json",
+    "build": "tsc -p tsconfig.json && cp src/lib/skill-tiers.seed.json dist/src/lib/skill-tiers.seed.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
     "create-school": "tsx scripts/create-school.ts",
+    "appoint-steward": "tsx scripts/appoint-steward.ts",
+    "privacy-audit": "tsx scripts/privacy-audit.ts",
     "smoke": "tsx scripts/smoke.ts"
   },
   "dependencies": {
     "@atmo-dev/contrail": "0.23.0",
     "@atproto/api": "^0.20.44",
+    "@atproto/identity": "0.5.13",
     "@atproto/jwk-jose": "^0.2.4",
+    "@atproto/lex-cbor": "0.1.6",
     "@atproto/oauth-client": "^0.8.7",
     "@atproto/oauth-client-node": "^0.5.7",
+    "@atproto/repo": "0.10.14",
+    "@atproto/sync": "0.4.10",
+    "@atproto/xrpc-server": "0.13.1",
+    "@freeschool/pds-follow": "workspace:*",
     "@freeschool/school-actor": "workspace:*",
     "@freeschool/shared": "workspace:*",
     "@freeschool/spaces-shim": "workspace:*",
     "@hono/node-server": "^2.1.1",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.13.7",
+    "luxon": "^3.7.2",
     "nodemailer": "^10.0.9",
     "pg": "^8.16.3",
     "pg-boss": "^12.31.0",
@@ -41,12 +50,15 @@
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
+    "@types/luxon": "^3.7.1",
     "@types/nodemailer": "^7.0.2",
     "@types/pg": "^8.11.10",
     "@types/web-push": "^3.6.4",
+    "@types/ws": "^8.18.1",
     "drizzle-kit": "^0.31.10",
     "tsx": "^4.19.2",
     "typescript": "^5.9.2",
-    "vitest": "^3.2.4"
+    "vitest": "^3.2.4",
+    "ws": "8.21.3"
   }
 }

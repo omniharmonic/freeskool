@@ -15,13 +15,52 @@
  *   upheldNegativeFeedback  resolved `fs_moderation_queue` rows against the DID
  *   stewardAppointed        `fs_steward`
  */
-import { and, eq, isNotNull, isNull, or, sql } from 'drizzle-orm'
+import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm'
 import { deriveRole, Role, type Evidence } from '@freeschool/shared'
 import { getDb } from '../db/index.js'
-import { attendanceTally, custodialAccount, invite, moderationQueue, steward } from '../db/schema.js'
+import { attendanceTally, custodialAccount, invite, member, moderationQueue, steward } from '../db/schema.js'
 import { getThresholds } from './policy.js'
 import { config } from '../config.js'
 import { getIndexer } from '../index/indexer.js'
+import { describeError, log } from './logging.js'
+
+/**
+ * Does this DID belong to THIS school at all — by having EVER signed in through either
+ * door, or by steward appointment? Used to decide calendar/zine inclusion by AUTHORSHIP
+ * (`http/visibility.ts#calendarInclusion`), independent of any `coop.lexicon.event.listing`
+ * (which exists for routing to PEERS, not for deciding what is ours).
+ *
+ * Reads `fs_member` (a DURABLE fact, written once at `createSession` and never deleted),
+ * NOT `fs_oauth_session` — that table is the OAuth client's own token/session store and
+ * `PostgresSessionStore.del` (`http/oauth.ts`) deletes a row on revocation or a failed
+ * refresh, which would make an OAuth-door host's classes vanish from their own calendar
+ * the moment their token needed renewing. Deliberately narrower than `hasProfile` above:
+ * that function's `hasIndexedRecords` fallback counts ANY indexed record anywhere, which
+ * would wrongly call a peer school's host "ours" once their events are indexed.
+ *
+ * Single-DID convenience wrapper around `isOwnMemberSet` — prefer the batch form when
+ * checking more than one DID (calendar/zine routes do).
+ */
+export async function isOwnMember(did: string): Promise<boolean> {
+  return (await isOwnMemberSet([did])).has(did)
+}
+
+/** Batched form of `isOwnMember`: one query per table instead of one per DID. */
+export async function isOwnMemberSet(dids: string[]): Promise<Set<string>> {
+  const unique = [...new Set(dids)]
+  if (unique.length === 0) return new Set()
+  const db = getDb()
+  const [custodialRows, memberRows, stewardRows] = await Promise.all([
+    db.select({ did: custodialAccount.did }).from(custodialAccount).where(inArray(custodialAccount.did, unique)),
+    db.select({ did: member.did }).from(member).where(inArray(member.did, unique)),
+    db.select({ did: steward.did }).from(steward).where(inArray(steward.did, unique)),
+  ])
+  const out = new Set<string>()
+  for (const r of custodialRows) out.add(r.did)
+  for (const r of memberRows) out.add(r.did)
+  for (const r of stewardRows) out.add(r.did)
+  return out
+}
 
 export async function evidenceFor(did: string, schoolDid = config().SCHOOL_DID): Promise<Evidence> {
   const db = getDb()
@@ -91,23 +130,44 @@ export async function roleOf(did: string, schoolDid = config().SCHOOL_DID): Prom
 export async function bumpTally(
   did: string,
   delta: { attendedConfirmed?: number; hostedEvents?: number },
+  schoolDid = config().SCHOOL_DID,
 ): Promise<void> {
   await getDb()
     .insert(attendanceTally)
     .values({
       did,
-      attendedConfirmed: delta.attendedConfirmed ?? 0,
-      hostedEvents: delta.hostedEvents ?? 0,
+      // A negative delta for a DID with no row at all is 0, not -1: these are counts of
+      // things that happened, and nothing has.
+      attendedConfirmed: Math.max(0, delta.attendedConfirmed ?? 0),
+      hostedEvents: Math.max(0, delta.hostedEvents ?? 0),
       updatedAt: new Date(),
     })
     .onConflictDoUpdate({
       target: attendanceTally.did,
       set: {
-        attendedConfirmed: sql`${attendanceTally.attendedConfirmed} + ${delta.attendedConfirmed ?? 0}`,
-        hostedEvents: sql`${attendanceTally.hostedEvents} + ${delta.hostedEvents ?? 0}`,
+        // GREATEST(0, …) because deltas can now be NEGATIVE — `void-attendance` takes an
+        // attendance back (`http/routes/admin.ts`), and a tally that can go below zero
+        // would both be nonsense and silently raise the bar for that member forever.
+        attendedConfirmed: sql`GREATEST(0, ${attendanceTally.attendedConfirmed} + ${delta.attendedConfirmed ?? 0})`,
+        hostedEvents: sql`GREATEST(0, ${attendanceTally.hostedEvents} + ${delta.hostedEvents ?? 0})`,
         updatedAt: new Date(),
       },
     })
+
+  // THE ROLE RE-DERIVATION PATH: evidence just changed, so the derived role may have
+  // just crossed into Host+. `publishRoleClaim` itself is the gate (policy off AND/OR
+  // not opted in is the common case and costs one already-warm cache read) — this is a
+  // best-effort side effect, dynamically imported to avoid a module cycle
+  // (roles.ts -> membership-claims.ts -> school-actor.ts -> roles.ts), and never allowed
+  // to fail the attendance/hosting write it rides along with.
+  if (!schoolDid) return
+  try {
+    const { publishRoleClaim } = await import('./membership-claims.js')
+    const role = await roleOf(did, schoolDid)
+    await publishRoleClaim(schoolDid as `did:${string}`, did as `did:${string}`, role)
+  } catch (err) {
+    log.warn('role re-derivation publish check failed', { detail: describeError(err) })
+  }
 }
 
 export { Role, deriveRole }

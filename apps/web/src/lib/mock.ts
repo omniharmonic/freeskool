@@ -5,7 +5,14 @@
  * `freeschool.draft.*` sidecars (skill, skillClaim, skillAttestation, request,
  * resource). Nothing here names a DID that the DID holder did not write: RSVP
  * and attendance are counts, not rosters (R9 privacy default).
+ *
+ * `USE_MOCK` gates whether screens still not wired to the real API
+ * (`lib/api.ts`, `lib/queries.ts`) fall back to this data. It defaults to
+ * false: once a screen is wired in a later task it ignores this flag
+ * entirely, and until then it must render an empty state rather than a
+ * crash — see the screens that read `USE_MOCK ? someMockArray : []`.
  */
+export const USE_MOCK = import.meta.env.VITE_USE_MOCK === '1';
 
 export type SkillLevel = 1 | 2 | 3;
 

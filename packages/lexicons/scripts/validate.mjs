@@ -20,7 +20,10 @@ const samples = {
   'freeschool.draft.resource': { $type:'freeschool.draft.resource', title:'Park Tool repair guide', skills:['at://did:plc:abc/freeschool.draft.skill/bicycle-repair'], uri:'https://example.org', license:'CC-BY-SA-4.0', createdAt: now },
   'freeschool.draft.course': { $type:'freeschool.draft.course', title:'Welding in three Saturdays', sessions:[sref], createdAt: now },
   'freeschool.draft.policy': { $type:'freeschool.draft.policy', title:'Free School Boulder rules', text:'No money changes hands for classes.', version:'1', effectiveAt: now, thresholds:{ hostMinAttended:0, feedbackK:3, destructiveActionStewards:2 }, createdAt: now },
-  'freeschool.draft.moderationAction': { $type:'freeschool.draft.moderationAction', action:'remove-listing', reason:'Duplicate of an existing class.', actors:['did:plc:steward'], subjectRecord:'at://did:plc:abc/coop.lexicon.event.listing/3k', createdAt: now },
+  // The sample is what the app actually writes (F0): no `reason` and no subject. Both
+  // fields remain in the schema for records written before that rule, and are documented
+  // there as deprecated — a reason is still MANDATORY for the action, app-side.
+  'freeschool.draft.moderationAction': { $type:'freeschool.draft.moderationAction', action:'remove-listing', actors:['did:plc:steward'], policyRef:'at://did:plc:school/freeschool.draft.policy/3k', createdAt: now },
   'freeschool.draft.appeal': { $type:'freeschool.draft.appeal', action:sref, text:'It was not a duplicate.', createdAt: now },
   'freeschool.draft.skillLevel': { $type:'freeschool.draft.skillLevel', event:sref, skill:'at://did:plc:abc/freeschool.draft.skill/bicycle-repair', level:2, prerequisites:'Bring your own bike.', createdAt: now },
   'freeschool.draft.series': { $type:'freeschool.draft.series', firstEvent:sref, rrule:'FREQ=WEEKLY;INTERVAL=1;BYDAY=TH;COUNT=8', freq:'weekly', interval:1, byDay:['TH'], count:8, timezone:'America/Denver', materializeAhead:60, createdAt: now },

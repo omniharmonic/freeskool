@@ -23,9 +23,11 @@ import { tid } from '../src/lib/ids.js'
 import { NSID } from '../src/lexicons/nsids.js'
 import { defaultThresholds } from '@freeschool/shared'
 import { getDb, closeDb } from '../src/db/index.js'
-import { steward } from '../src/db/schema.js'
+import { member, steward } from '../src/db/schema.js'
 import { runMigrations } from '../src/db/migrate.js'
+import { seedSkillTiers } from '../src/lib/skill-tiers.js'
 import { isMain } from '../src/lib/is-main.js'
+import { describeError, log } from '../src/lib/logging.js'
 
 export interface CreateSchoolResult {
   did: string
@@ -119,14 +121,36 @@ export async function createSchool(options?: {
     validate: false,
   })
 
+  // `fs_*` may not have been migrated yet at this point in the documented run order
+  // (README step 3 runs before step 4's `db:migrate`), so this is defensive everywhere
+  // it is needed, not just for the steward row.
+  await runMigrations().catch(() => {})
+
+  // The school DID (and the steward, if any) are `isOwnMember` facts too — they never go
+  // through `createSession` (the school is never a browser session), so they need a
+  // durable `fs_member` row written explicitly here.
+  const seenAt = new Date()
+  await getDb()
+    .insert(member)
+    .values({ did, door: 'custodial', firstSeenAt: seenAt, lastSeenAt: seenAt })
+    .onConflictDoUpdate({ target: member.did, set: { lastSeenAt: seenAt } })
+    .catch((err) => log.warn('could not record the school as fs_member', { detail: describeError(err) }))
+
   // The founder is the bootstrap steward: the one role that cannot be derived.
   if (options?.stewardDid) {
-    await runMigrations().catch(() => {})
     await getDb()
       .insert(steward)
       .values({ did: options.stewardDid, schoolDid: did, appointedAt: new Date() })
       .onConflictDoNothing()
+    await getDb()
+      .insert(member)
+      .values({ did: options.stewardDid, door: 'custodial', firstSeenAt: seenAt, lastSeenAt: seenAt })
+      .onConflictDoUpdate({ target: member.did, set: { lastSeenAt: seenAt } })
+      .catch((err) => log.warn('could not record the steward as fs_member', { detail: describeError(err) }))
   }
+
+  // A fresh deploy enforces the Tier B gate from the moment the school exists.
+  await seedSkillTiers().catch((err) => log.warn('skill-tier seed failed during create-school', { detail: describeError(err) }))
 
   return {
     did,

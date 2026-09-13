@@ -12,7 +12,7 @@ import type { Context, MiddlewareHandler } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 import { eq, lt } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
-import { session } from '../db/schema.js'
+import { member, session } from '../db/schema.js'
 import { config } from '../config.js'
 import { newSessionId, signSessionId, verifySessionCookie } from '../lib/crypto.js'
 import { roleOf } from '../lib/roles.js'
@@ -32,6 +32,15 @@ export async function createSession(c: Context, did: string, kind: SessionKind):
   const id = newSessionId()
   const ttlMs = config().SESSION_TTL_DAYS * 86_400_000
   await getDb().insert(session).values({ id, did, kind, expiresAt: new Date(Date.now() + ttlMs) })
+  // DURABLE membership fact, never deleted on logout/expiry (unlike `fs_session` and
+  // `fs_oauth_session`, both of which are session-store rows) — see `fs_member`'s doc
+  // comment in db/schema.ts and `lib/roles.ts#isOwnMember`. This is the ONE chokepoint
+  // both doors' login flows share (auth.ts's /verify, oauth.ts's /callback).
+  const now = new Date()
+  await getDb()
+    .insert(member)
+    .values({ did, door: kind, firstSeenAt: now, lastSeenAt: now })
+    .onConflictDoUpdate({ target: member.did, set: { door: kind, lastSeenAt: now } })
   setCookie(c, config().SESSION_COOKIE, signSessionId(id), {
     httpOnly: true,
     secure: config().isProd,

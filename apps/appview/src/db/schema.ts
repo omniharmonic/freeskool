@@ -108,6 +108,29 @@ export const emailVerification = pgTable(
 )
 
 /**
+ * `takeOwnership`'s one-time reveal. The PDS account password is rotated IMMEDIATELY
+ * (`com.atproto.admin.updateAccountPassword`) when the member requests this, and the
+ * new password is held here, wrapped under the same versioned custody key as
+ * `fs_custodial_account.wrapped_password`, ONLY long enough for the member to open the
+ * single-use link we email them — `GET /api/auth/take-ownership/:token` nulls
+ * `wrapped_password` the moment it is read, and `used_at` makes a second read 410
+ * regardless. 24 h TTL. See `lib/custody.ts#takeOwnership`.
+ */
+export const ownershipReveal = pgTable(
+  'fs_ownership_reveal',
+  {
+    tokenHash: text('token_hash').primaryKey(),
+    did: text('did').notNull(),
+    keyVersion: text('key_version').notNull(),
+    wrappedPassword: bytea('wrapped_password'),
+    expiresAt: ts('expires_at').notNull(),
+    usedAt: ts('used_at'),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [index('fs_ownership_reveal_did_idx').on(t.did)],
+)
+
+/**
  * Invite codes. `inviterDid` is evidence for the `invite-or-vouch` member gate, and
  * is PURGED 30 days after use by the retention job — the social graph of who invited
  * whom is not something we keep.
@@ -125,6 +148,71 @@ export const invite = pgTable(
   (t) => [index('fs_invite_used_by_idx').on(t.usedByDid)],
 )
 
+/**
+ * Shareable invite LINKS (distinct from `fs_invite`, the signup-invite-code evidence
+ * table above). Anyone signed in can mint one; only its SHA-256 is ever stored, so a
+ * stolen database row cannot be replayed as a working link. `inviterDid` never leaves
+ * this table — it is not returned from the mint endpoint's URL, nor to the redeemer.
+ */
+export const inviteLink = pgTable(
+  'fs_invite_link',
+  {
+    id: text('id').primaryKey(),
+    tokenHash: text('token_hash').notNull(),
+    inviterDid: text('inviter_did').notNull(),
+    schoolDid: text('school_did').notNull(),
+    eventUri: text('event_uri'),
+    usesLeft: integer('uses_left').notNull().default(1),
+    expiresAt: ts('expires_at').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    redeemedAt: ts('redeemed_at'),
+  },
+  (t) => [uniqueIndex('fs_invite_link_token_hash_idx').on(t.tokenHash)],
+)
+
+/**
+ * Tier B marks a skill as sensitive/high-risk (security culture, legal support, street
+ * medicine, ...): its claims default to app-side-only and a public claim needs an
+ * explicit confirmation. App-side, not a lexicon field — see src/lib/skill-tiers.ts.
+ */
+export const skillTier = pgTable('fs_skill_tier', {
+  skillId: text('skill_id').primaryKey(),
+  /** 'A' | 'B' */
+  tier: text('tier').notNull().default('A'),
+  reason: text('reason'),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+})
+
+/**
+ * "I'm interested" on a needs-board request — app-side (R9: no roster), and the count
+ * a request's own `threshold` is checked against before a host may claim it.
+ */
+export const requestRsvp = pgTable(
+  'fs_request_rsvp',
+  {
+    requestUri: text('request_uri').notNull(),
+    did: text('did').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.requestUri, t.did] }), index('fs_request_rsvp_req_idx').on(t.requestUri)],
+)
+
+/**
+ * A DURABLE record that this DID has ever authenticated with THIS school, through either
+ * door. Written on every successful `createSession` call (see `http/session.ts`) and by
+ * `create-school` for the school/steward DIDs. Deliberately NEVER deleted on logout or
+ * session expiry — `fs_oauth_session` and `fs_session` are ephemeral session-store rows
+ * that get cleared on revocation/expiry, and `lib/roles.ts#isOwnMember` (calendar/zine
+ * inclusion by authorship) needs a fact that outlives those.
+ */
+export const member = pgTable('fs_member', {
+  did: text('did').primaryKey(),
+  /** 'custodial' | 'oauth' — the door most recently used; presence is what matters. */
+  door: text('door').notNull(),
+  firstSeenAt: ts('first_seen_at').notNull().defaultNow(),
+  lastSeenAt: ts('last_seen_at').notNull().defaultNow(),
+})
+
 /* ───────────────────────────────── RSVP & attendance ───────────────────────────── */
 
 /**
@@ -138,7 +226,12 @@ export const rsvp = pgTable(
     id: text('id').primaryKey(),
     eventUri: text('event_uri').notNull(),
     did: text('did').notNull(),
-    /** 'going' | 'interested' | 'notgoing' */
+    /**
+     * 'going' | 'interested' | 'notgoing' | 'waitlisted'. `waitlisted` is never what a
+     * caller requests — the server assigns it instead of 'going' when `capacity` is set
+     * and already met (`lib/rsvp.ts#resolveGoingOrWaitlist`); a departure promotes the
+     * earliest-by-`createdAt` waitlisted row (`promoteFromWaitlist`).
+     */
     status: text('status').notNull(),
     alsoPublicRecord: boolean('also_public_record').notNull().default(false),
     publicRecordUri: text('public_record_uri'),
@@ -318,6 +411,21 @@ export const peer = pgTable('fs_peer', {
   disabledAt: ts('disabled_at'),
 })
 
+/**
+ * Materials and a supplies note for a class — `coop.lexicon.event.config` (our ASSUMED
+ * shape, `lexicons/coop.ts`) has no fields for either, so they live here, app-side, one
+ * row per event. `suppliesNote` is free text the host writes ("bring a lock and cable");
+ * it is never auto-linkified or rendered as a payment affordance by this API — that is a
+ * client rendering rule, not something enforced by storage.
+ */
+export const eventExtra = pgTable('fs_event_extra', {
+  eventUri: text('event_uri').primaryKey(),
+  /** string[], ≤ 20 items of ≤ 120 chars — enforced by the route's zod schema. */
+  materials: jsonb('materials').notNull().default([]),
+  suppliesNote: text('supplies_note'),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+})
+
 /* ───────────────────────────────── recurrence ─────────────────────────────────── */
 
 /** Idempotency ledger for the materializer: one row per materialized slot. */
@@ -421,16 +529,74 @@ export const notificationFeed = pgTable(
   (t) => [index('fs_notification_feed_did_idx').on(t.did, t.createdAt)],
 )
 
-/** Monthly digest drafts (compose stub). */
-export const newsletter = pgTable('fs_newsletter', {
+/**
+ * Monthly digest issues: composed by `jobs/newsletter.ts#composeNewsletterIssue`,
+ * sent by `sendNewsletterIssue` once a steward calls `POST
+ * /api/admin/newsletter/:id/send`. `html`/`text` are the BASE digest content, with no
+ * unsubscribe link baked in — each send appends a per-recipient one-click unsubscribe
+ * footer built from that subscriber's own (freshly rotated) token.
+ */
+export const newsletterIssue = pgTable('fs_newsletter_issue', {
   id: text('id').primaryKey(),
-  period: text('period').notNull(),
-  subject: text('subject').notNull(),
-  body: text('body').notNull(),
+  month: text('month').notNull(),
+  html: text('html').notNull(),
+  text: text('text').notNull(),
+  /** 'draft' | 'sent' */
   status: text('status').notNull().default('draft'),
-  createdAt: ts('created_at').notNull().defaultNow(),
   sentAt: ts('sent_at'),
+  recipientCount: integer('recipient_count'),
+  /** Per-recipient sends are isolated (one throwing send must not abort the rest). */
+  failedCount: integer('failed_count'),
 })
+
+/**
+ * Newsletter consent, ONE row per DID. `emailRef` is a snapshot of the account email at
+ * subscribe time (not a foreign key) — the same address a custodial signup already
+ * holds. `tokenHash` is the hash of the CURRENT one-click unsubscribe token; it is
+ * ROTATED on every send (`lib/newsletter-subscriptions.ts#rotateUnsubscribeToken`), so a
+ * token in any one email works exactly once, ever — only its hash is ever stored.
+ */
+export const newsletterSubscription = pgTable(
+  'fs_newsletter_subscription',
+  {
+    did: text('did').primaryKey(),
+    emailRef: text('email_ref').notNull(),
+    subscribedAt: ts('subscribed_at').notNull().defaultNow(),
+    unsubscribedAt: ts('unsubscribed_at'),
+    tokenHash: text('token_hash').notNull(),
+  },
+  (t) => [uniqueIndex('fs_newsletter_subscription_token_idx').on(t.tokenHash)],
+)
+
+/**
+ * Opt-in to having one's DERIVED role published as a public `coop.lexicon.membership`
+ * claim (`lib/membership-claims.ts`). OFF by default — R9: no public record may name a
+ * DID its holder did not choose to.
+ */
+export const memberPrefs = pgTable('fs_member_prefs', {
+  did: text('did').primaryKey(),
+  publicRole: boolean('public_role').notNull().default(false),
+  updatedAt: ts('updated_at').notNull().defaultNow(),
+})
+
+/**
+ * A steward-to-successor hand-off token (7-day TTL, single use). `toDid` is nullable:
+ * an open link accepted by whoever redeems it first, or a link addressed to one named
+ * successor. See `http/routes/handoff.ts`.
+ */
+export const handoff = pgTable(
+  'fs_handoff',
+  {
+    id: text('id').primaryKey(),
+    fromDid: text('from_did').notNull(),
+    toDid: text('to_did'),
+    tokenHash: text('token_hash').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    acceptedAt: ts('accepted_at'),
+    expiresAt: ts('expires_at').notNull(),
+  },
+  (t) => [uniqueIndex('fs_handoff_token_idx').on(t.tokenHash)],
+)
 
 /* ───────────────────────────── spaces-shim (Postgres) ─────────────────────────── */
 
@@ -484,8 +650,14 @@ export const schema = {
   oauthClientKey,
   custodialAccount,
   emailVerification,
+  ownershipReveal,
   invite,
+  inviteLink,
+  skillTier,
+  requestRsvp,
+  member,
   rsvp,
+  eventExtra,
   attendance,
   attendanceRollup,
   attendanceTally,
@@ -503,7 +675,10 @@ export const schema = {
   notificationSent,
   notificationOutbox,
   notificationFeed,
-  newsletter,
+  newsletterIssue,
+  newsletterSubscription,
+  memberPrefs,
+  handoff,
   space,
   spaceMember,
   spaceRecord,

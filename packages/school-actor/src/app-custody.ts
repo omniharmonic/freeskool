@@ -12,6 +12,8 @@ const MIN_ROLE: Record<SchoolAction, Role> = {
   'suspend-role': Role.Steward,
   'write-policy': Role.Steward,
   'void-attendance': Role.Steward,
+  'publish-role-claim': Role.Host,
+  'retract-role-claim': Role.Visitor,
 }
 
 /**
@@ -59,7 +61,23 @@ export class AppCustodyAdapter implements SchoolActorPort {
   }
 
   async putRecordAsSchool(i: { schoolDid: Did; callerDid: Did; scope: string; action: SchoolAction; collection: string; rkey: string; record: unknown; swapRecord?: string | null; audit: ActInput['audit'] }) {
-    const r = await this.actAs({ ...i, method: 'POST', nsid: 'com.atproto.repo.putRecord', body: { repo: i.schoolDid, collection: i.collection, rkey: i.rkey, record: i.record, swapRecord: i.swapRecord ?? null } })
+    // `swapRecord: null` is an assertion to the PDS that the record does NOT already
+    // exist (CAS against "no record"), which would fail every update. Only send the
+    // field at all when the CALLER explicitly passed one (null included, for a caller
+    // that genuinely wants "must not exist yet"); an omitted `swapRecord` means an
+    // ordinary upsert, with no existence assertion either way.
+    const r = await this.actAs({
+      ...i,
+      method: 'POST',
+      nsid: 'com.atproto.repo.putRecord',
+      body: {
+        repo: i.schoolDid,
+        collection: i.collection,
+        rkey: i.rkey,
+        record: i.record,
+        ...(i.swapRecord !== undefined ? { swapRecord: i.swapRecord } : {}),
+      },
+    })
     if (!r.ok) throw new SchoolActError(r)
     const out = r.output as { uri: AtUri; cid: string }
     return { uri: out.uri, cid: out.cid, auditId: r.auditId }

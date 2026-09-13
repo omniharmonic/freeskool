@@ -14,8 +14,10 @@ import { z } from 'zod'
 import type { AppEnv } from '../session.js'
 import { getIndexer } from '../../index/indexer.js'
 import { eventsInWindow, sidecarsForEvent } from '../../index/queries.js'
+import { isOwnMemberSet } from '../../lib/roles.js'
+import { resolveHostDids } from '../../lib/events.js'
 import type { EventConfig, EventListing } from '../../lexicons/coop.js'
-import { isListed, projectEvent, type CalendarEvent, type ViewerRelation } from '../visibility.js'
+import { calendarInclusion, projectEvent, type CalendarEvent, type ViewerRelation } from '../visibility.js'
 import { viewerRelation } from '../relation.js'
 
 export const calendar = new Hono<AppEnv>()
@@ -39,6 +41,13 @@ calendar.get('/calendar', async (c) => {
   const events = await eventsInWindow(indexer, fromIso, toIso, limit)
   const viewer = c.var.viewer
 
+  // A8: the HOST of each event. A materialized occurrence's record author is the SCHOOL;
+  // its host is the series author. One query for the whole page, not one per event.
+  const hostDids = await resolveHostDids(events)
+  // One batched membership lookup for the whole page, not one per event (N+1). Both the
+  // authors AND the resolved hosts, so an occurrence can be recognized as ours.
+  const ownDids = await isOwnMemberSet([...events.map((e) => e.did), ...hostDids.values()])
+
   const out: unknown[] = []
   for (const e of events) {
     const [listings, configs] = await Promise.all([
@@ -51,10 +60,18 @@ calendar.get('/calendar', async (c) => {
       continue
     }
     const inputs = { listings: listingValues, configs: configValues }
-    if (!isListed(inputs)) continue
+    // AUTHORSHIP decides inclusion, not the listing (gap-report §A item 11: listings are
+    // for routing to peers; a host who belongs to this school is 'ours' regardless of
+    // whether the tags they chose happened to route — see http/visibility.ts).
+    const hostDid = hostDids.get(e.uri) ?? e.did
+    // Inclusion still asks about the event's AUTHOR for an ordinary class; for an
+    // occurrence the school authored it, so ask about the host instead — an occurrence of
+    // one of our own members' series is ours.
+    const { show, origin } = calendarInclusion(ownDids.has(e.did) || ownDids.has(hostDid), inputs)
+    if (!show) continue
 
-    const relation: ViewerRelation = viewer ? await viewerRelation(viewer, e.uri, e.did) : 'public'
-    out.push(projectEvent(toCalendarEvent(e.uri, e.did, e.value), inputs, relation))
+    const relation: ViewerRelation = viewer ? await viewerRelation(viewer, e.uri, hostDid) : 'public'
+    out.push({ ...projectEvent(toCalendarEvent(e.uri, hostDid, e.value), inputs, relation), origin })
   }
 
   return c.json({ from: fromIso, to: toIso, events: out })

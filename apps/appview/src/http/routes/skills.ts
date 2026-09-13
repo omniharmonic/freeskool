@@ -16,6 +16,7 @@ import { Hono } from 'hono'
 import type { AppEnv } from '../session.js'
 import { getIndexer } from '../../index/indexer.js'
 import { listCollection, sidecarsForEvent } from '../../index/queries.js'
+import { tiersFor, type SkillTierValue } from '../../lib/skill-tiers.js'
 
 export const skills = new Hono<AppEnv>()
 
@@ -35,6 +36,8 @@ export interface SkillNode {
   label: string
   description?: string
   status: string
+  /** 'A' (ordinary) | 'B' (sensitive/high-risk) — see `lib/skill-tiers.ts`. */
+  tier: SkillTierValue
   alsoUnder: string[]
   children: SkillNode[]
 }
@@ -46,6 +49,8 @@ skills.get('/skills', async (c) => {
   const indexer = await getIndexer()
   const { records } = await listCollection<SkillRecord>(indexer, 'skill', { limit: 1000 })
   const nodes = records.filter((r) => includeProposed || r.value.status !== 'proposed')
+
+  const tiers = await tiersFor(nodes.map((n) => n.value.id))
 
   const byUri = new Map(nodes.map((n) => [n.uri, n]))
   const childrenOf = new Map<string, string[]>()
@@ -70,6 +75,7 @@ skills.get('/skills', async (c) => {
       label: n.value.label,
       ...(n.value.description ? { description: n.value.description } : {}),
       status: n.value.status,
+      tier: tiers[n.value.id] ?? 'A',
       alsoUnder: (n.value.broader ?? []).slice(1),
       children: (childrenOf.get(uri) ?? [])
         .map((child) => build(child, depth + 1, next))
@@ -94,20 +100,18 @@ skills.get('/skills/:id', async (c) => {
   const self = byUri.get(uri)
   if (!self) return c.json({ error: 'NotFound' }, 404)
 
-  const ancestors: Array<{ uri: string; label: string }> = []
+  const ancestors: Array<{ uri: string; id: string; label: string }> = []
   let cursor = self
   for (let i = 0; i < MAX_DEPTH; i++) {
     const parentUri = cursor.value.broader?.[0]
     if (!parentUri) break
     const parent = byUri.get(parentUri)
     if (!parent) break
-    ancestors.unshift({ uri: parent.uri, label: parent.value.label })
+    ancestors.unshift({ uri: parent.uri, id: parent.value.id, label: parent.value.label })
     cursor = parent
   }
 
-  const children = records
-    .filter((r) => (r.value.broader ?? []).includes(uri))
-    .map((r) => ({ uri: r.uri, label: r.value.label, status: r.value.status }))
+  const childRecords = records.filter((r) => (r.value.broader ?? []).includes(uri))
 
   // Classes that teach this skill, via the skillLevel sidecar's `skill` field.
   const levels = await sidecarsForEvent<{ event: { uri: string }; level: number }>(
@@ -117,16 +121,25 @@ skills.get('/skills/:id', async (c) => {
     'skill',
   )
 
+  // One batched lookup for self + every ancestor + every child, never one query each.
+  const tiers = await tiersFor([self.value.id, ...ancestors.map((a) => a.id), ...childRecords.map((r) => r.value.id)])
+
   return c.json({
     uri: self.uri,
     id: self.value.id,
     label: self.value.label,
     description: self.value.description,
     status: self.value.status,
+    tier: tiers[self.value.id] ?? 'A',
     replacedBy: self.value.replacedBy,
     prerequisites: self.value.prerequisites ?? [],
-    ancestors,
-    children,
+    ancestors: ancestors.map((a) => ({ uri: a.uri, label: a.label, tier: tiers[a.id] ?? 'A' })),
+    children: childRecords.map((r) => ({
+      uri: r.uri,
+      label: r.value.label,
+      status: r.value.status,
+      tier: tiers[r.value.id] ?? 'A',
+    })),
     taughtIn: levels.map((l) => ({ event: l.value.event?.uri, level: l.value.level })),
   })
 })

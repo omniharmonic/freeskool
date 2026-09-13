@@ -25,10 +25,36 @@ export type SchoolAction =
   | 'close-request'
   | 'void-attendance'
   | 'materialize-occurrence'
+  /**
+   * The school republishing a MEMBER'S OWN already-derived role as a public
+   * `coop.lexicon.membership` claim, once that member has opted in and the policy
+   * allows it (see `apps/appview/src/lib/membership-claims.ts`). The caller is the
+   * subject themselves — they are consenting to their own already-qualifying role
+   * being named, not asking the school to grant anything — so this sits at Host, not
+   * Steward. Distinct from `set-role`, which is a STEWARD decision (e.g. a hand-off).
+   */
+  | 'publish-role-claim'
+  /**
+   * The school retracting a previously-published `coop.lexicon.membership` claim
+   * (opted back out, or the role dropped below Host). Visitor-level on purpose: by the
+   * time this is needed the subject's CURRENT role may itself be below Host, and
+   * removing a name one already consented to naming can never need a HIGHER bar than
+   * publishing it did.
+   */
+  | 'retract-role-claim'
 
-/** Actions that require the policy's destructiveActionStewards threshold (default 2). */
+/**
+ * Actions that require the policy's destructiveActionStewards threshold (default 2).
+ *
+ * `write-policy` is deliberately NOT here: PRD F15 requires an admin to change every
+ * policy default without a deploy, and the first school has exactly one steward — a
+ * two-steward threshold on policy writes would make the policy unwritable. Policy writes
+ * stay single-steward but remain audit-logged (every `actAs`/`putRecordAsSchool` call
+ * writes an `AuditRow` regardless of threshold), and the policy record itself is public,
+ * so any steward changing the threshold (or anything else) is visible to the community.
+ */
 export const DESTRUCTIVE_ACTIONS: ReadonlySet<SchoolAction> = new Set<SchoolAction>([
-  'remove-listing', 'suspend-role', 'void-attendance', 'write-policy',
+  'remove-listing', 'suspend-role', 'void-attendance',
 ])
 
 export interface Approval { stewardDid: Did; at: string; sig?: string }

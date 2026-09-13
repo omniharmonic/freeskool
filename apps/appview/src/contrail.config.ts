@@ -174,6 +174,13 @@ export function buildContrailConfig(input: BuildConfigInput): ContrailConfig {
         queryable: { level: {}, skill: {} },
         references: { skill: { collection: 'skill', field: 'skill' } },
       },
+      /** A positive-only peer attestation ("I vouch that they can do this"). See GET
+       * /api/me/badges, which turns these into "Vouched for <skill> by N people". */
+      skillAttestation: {
+        collection: NSID.skillAttestation,
+        queryable: { subject: {}, skill: {}, direction: {} },
+        references: { skill: { collection: 'skill', field: 'skill' } },
+      },
 
       /* ── cooperative events ───────────────────────────────────────────────── */
       eventConfig: {

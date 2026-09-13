@@ -13,7 +13,7 @@
  */
 import { PgBoss } from 'pg-boss'
 import { config } from '../config.js'
-import { log } from '../lib/logging.js'
+import { describeError, log } from '../lib/logging.js'
 import { materializeAllSeries } from './materialize-series.js'
 import { runReminders } from './reminders.js'
 import { runRetention } from './retention.js'
@@ -34,7 +34,7 @@ export const QUEUES = {
 
 export async function startJobs(): Promise<PgBoss> {
   const boss = new PgBoss({ connectionString: config().DATABASE_URL, schema: 'pgboss' })
-  boss.on('error', (err: unknown) => log.error('pg-boss error', { detail: String(err) }))
+  boss.on('error', (err: unknown) => log.error('pg-boss error', { detail: describeError(err) }))
   await boss.start()
 
   for (const queue of Object.values(QUEUES)) {
@@ -79,8 +79,9 @@ export async function startJobs(): Promise<PgBoss> {
   await boss.schedule(QUEUES.newsletter, '0 9 1 * *')
   await boss.schedule(QUEUES.notifyOutbox, '* * * * *')
   await boss.schedule(QUEUES.pushOutbox, '* * * * *')
-  // Until `PdsChangeSource` exists (src/sync/README.md), a periodic backfill IS our
-  // liveness floor for other people's writes.
+  // `PdsChangeSource` (src/sync/README.md) is the fast path for other people's
+  // writes; this stays the safety net beneath it. It closes anything a dropped
+  // socket, a cold start, or a peer's exhausted stream retention missed.
   await boss.schedule(QUEUES.backfill, '*/15 * * * *')
 
   log.info('jobs started', { queues: Object.values(QUEUES).length })

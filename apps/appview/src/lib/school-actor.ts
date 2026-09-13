@@ -33,7 +33,9 @@ import { getThresholds } from './policy.js'
 import { roleOf } from './roles.js'
 import { log } from './logging.js'
 
-class PostgresAuditSink implements AuditSink {
+/** Exported so tests can wire a REAL `AppCustodyAdapter` against the real `fs_audit`
+ * table while faking only the PDS session — see `test/handoff.test.ts`. */
+export class PostgresAuditSink implements AuditSink {
   async write(row: AuditRow): Promise<string> {
     const id = rowId()
     await getDb().insert(audit).values({

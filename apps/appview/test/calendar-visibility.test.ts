@@ -4,11 +4,14 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  calendarInclusion,
   icsLocation,
   isListed,
+  isVenueNeeded,
   neighborhoodOf,
   projectEvent,
   seesFullLocation,
+  tagsOf,
   type CalendarEvent,
   type ListingInputs,
 } from '../src/http/visibility.js'
@@ -61,12 +64,89 @@ describe('is the event on the public calendar at all?', () => {
     expect(
       isListed({
         listings: [
-          { event: ref, school: 'did:plc:school', status: 'listed' },
-          { event: ref, school: 'did:plc:school', status: 'removed' },
+          { event: ref, school: 'did:plc:school', status: 'listed', createdAt: '2026-09-01T00:00:00Z' },
+          { event: ref, school: 'did:plc:school', status: 'removed', createdAt: '2026-09-02T00:00:00Z' },
         ],
         configs: [{ event: ref, visibility: 'listed' }],
       }),
     ).toBe(false)
+  })
+
+  /**
+   * A4. Listings are APPEND-ONLY — the school writes another rather than editing one — so
+   * the question is always about the newest record. The old rule ("any removal wins,
+   * forever") made `restore-listing` structurally impossible: the removal it was undoing
+   * was still sitting in the history.
+   */
+  describe('the newest listing wins, by createdAt', () => {
+    const listing = (status: 'listed' | 'removed', createdAt: string) => ({
+      event: ref,
+      school: 'did:plc:school',
+      status,
+      createdAt,
+    })
+
+    it('a restore AFTER a removal puts the class back on the calendar', () => {
+      expect(
+        isListed({
+          listings: [
+            listing('listed', '2026-09-01T00:00:00Z'),
+            listing('removed', '2026-09-02T00:00:00Z'),
+            listing('listed', '2026-09-03T00:00:00Z'),
+          ],
+          configs: [],
+        }),
+      ).toBe(true)
+    })
+
+    it('a removal AFTER a restore takes it off again', () => {
+      expect(
+        isListed({
+          listings: [listing('listed', '2026-09-03T00:00:00Z'), listing('removed', '2026-09-04T00:00:00Z')],
+          configs: [{ event: ref, visibility: 'listed' }],
+        }),
+      ).toBe(false)
+    })
+
+    it('does not care what order the rows arrive in', () => {
+      expect(
+        isListed({
+          listings: [
+            listing('listed', '2026-09-03T00:00:00Z'),
+            listing('removed', '2026-09-02T00:00:00Z'),
+            listing('listed', '2026-09-01T00:00:00Z'),
+          ],
+          configs: [],
+        }),
+      ).toBe(true)
+    })
+
+    it('a stamped listing beats an unstamped one, whichever way round they are', () => {
+      expect(
+        isListed({ listings: [{ event: ref, school: 'did:plc:school', status: 'removed' }, listing('listed', '2026-09-01T00:00:00Z')], configs: [] }),
+      ).toBe(true)
+      expect(
+        isListed({ listings: [{ event: ref, school: 'did:plc:school' }, listing('removed', '2026-09-01T00:00:00Z')], configs: [] }),
+      ).toBe(false)
+    })
+
+    it('resolves a dead tie to REMOVED — hidden is the safe answer when we cannot tell', () => {
+      expect(
+        isListed({
+          listings: [listing('listed', '2026-09-02T00:00:00Z'), listing('removed', '2026-09-02T00:00:00Z')],
+          configs: [{ event: ref, visibility: 'listed' }],
+        }),
+      ).toBe(false)
+    })
+
+    it('falls through to the host’s own config only when there is no school listing at all', () => {
+      expect(isListed({ listings: [], configs: [{ event: ref, visibility: 'listed' }] })).toBe(true)
+      // A live school listing is the only voice once one exists — including a `removed`
+      // one, which is what makes moderation stick.
+      expect(
+        isListed({ listings: [listing('removed', '2026-09-02T00:00:00Z')], configs: [{ event: ref, visibility: 'listed' }] }),
+      ).toBe(false)
+    })
   })
 })
 
@@ -87,6 +167,8 @@ describe('how much of it does this viewer see?', () => {
       status: 'community.lexicon.calendar.event#scheduled',
       neighborhood: 'North Boulder',
       locationRedacted: true,
+      venueNeeded: false,
+      tags: [],
     })
     const serialized = JSON.stringify(out)
     expect(serialized).not.toContain('Juniper')
@@ -141,5 +223,95 @@ describe('the .ics LOCATION line respects the same boundary', () => {
     const online: CalendarEvent = { uri: 'u', hostDid: 'd', locations: [{ uri: 'https://meet.example.org/abc' }] }
     expect(icsLocation(online, { listings: [], configs: [] }, 'rsvp')).toBe('https://meet.example.org/abc')
     expect(icsLocation(online, { listings: [], configs: [] }, 'public')).toBeUndefined()
+  })
+})
+
+describe('venueNeeded', () => {
+  it('is true when a class has no address and no neighborhood at all', () => {
+    const noVenue: CalendarEvent = { uri: 'u', hostDid: 'd', name: 'Knife sharpening' }
+    expect(isVenueNeeded(noVenue, { listings: [], configs: [] })).toBe(true)
+    const out = projectEvent(noVenue, { listings: [], configs: [] }, 'public')
+    expect(out.venueNeeded).toBe(true)
+  })
+
+  it('is false once a neighborhood is configured, even with no precise address', () => {
+    const noVenue: CalendarEvent = { uri: 'u', hostDid: 'd' }
+    const inputs: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'listed', neighborhood: 'North Boulder' }] }
+    expect(isVenueNeeded(noVenue, inputs)).toBe(false)
+  })
+
+  it('is false once a location is set', () => {
+    expect(isVenueNeeded(event, { listings: [], configs: [] })).toBe(false)
+  })
+})
+
+describe('tags', () => {
+  it('collects tags from every config and listing sidecar, deduped and lowercased', () => {
+    const inputs: ListingInputs = {
+      listings: [{ event: ref, school: 'did:plc:school', status: 'listed', tags: ['Skillshare'] }],
+      configs: [{ event: ref, visibility: 'listed', tags: ['skillshare', 'bikes'] }],
+    }
+    expect(tagsOf(inputs)).toEqual(['skillshare', 'bikes'])
+  })
+
+  it('is an empty array, never undefined, when nothing carries a tag', () => {
+    expect(tagsOf({ listings: [], configs: [] })).toEqual([])
+  })
+
+  it('projectEvent carries tags for both the public and trusted views', () => {
+    const inputs: ListingInputs = {
+      listings: [],
+      configs: [{ event: ref, visibility: 'listed', tags: ['knitting'] }],
+    }
+    expect(projectEvent(event, inputs, 'public').tags).toEqual(['knitting'])
+    expect(projectEvent(event, inputs, 'host').tags).toEqual(['knitting'])
+  })
+})
+
+describe('calendarInclusion — ours by AUTHORSHIP, not by listing', () => {
+  it('an own-host event with no tags and no listing still shows, origin "ours"', () => {
+    // This is the exact regression: an untagged event gets NO listing (see
+    // lib/events.ts), but it must still appear on our own calendar.
+    const noListingNoTags: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'listed' }] }
+    expect(calendarInclusion(true, noListingNoTags)).toEqual({ show: true, origin: 'ours' })
+  })
+
+  it('an own-host event tagged ["knitting"] (does not route) still shows, origin "ours"', () => {
+    const mismatchedTag: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'listed', tags: ['knitting'] }] }
+    expect(calendarInclusion(true, mismatchedTag)).toEqual({ show: true, origin: 'ours' })
+  })
+
+  it('an own-host event tagged ["skillshare"] (routes, has a listing) shows, origin "ours"', () => {
+    const routed: ListingInputs = {
+      listings: [{ event: ref, school: 'did:plc:school', status: 'listed', tags: ['skillshare'] }],
+      configs: [{ event: ref, visibility: 'listed', tags: ['skillshare'] }],
+    }
+    expect(calendarInclusion(true, routed)).toEqual({ show: true, origin: 'ours' })
+  })
+
+  it('an own-host event the host marked private is hidden, even though it is ours', () => {
+    const privateEvent: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'private' }] }
+    expect(calendarInclusion(true, privateEvent)).toEqual({ show: false, origin: 'ours' })
+  })
+
+  it('an own-host event a steward removed is hidden, even though it is ours', () => {
+    const removed: ListingInputs = {
+      listings: [{ event: ref, school: 'did:plc:school', status: 'removed' }],
+      configs: [{ event: ref, visibility: 'listed' }],
+    }
+    expect(calendarInclusion(true, removed)).toEqual({ show: false, origin: 'ours' })
+  })
+
+  it('a non-own host with no listing at all is hidden', () => {
+    const foreignNoListing: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'listed' }] }
+    expect(calendarInclusion(false, foreignNoListing)).toEqual({ show: false, origin: 'listed' })
+  })
+
+  it('a non-own host with a live listing from our school shows, origin "listed"', () => {
+    const foreignListed: ListingInputs = {
+      listings: [{ event: ref, school: 'did:plc:school', status: 'listed' }],
+      configs: [],
+    }
+    expect(calendarInclusion(false, foreignListed)).toEqual({ show: true, origin: 'listed' })
   })
 })

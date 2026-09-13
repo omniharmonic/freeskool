@@ -25,6 +25,11 @@ import { admin } from './routes/admin.js'
 import { notifications } from './routes/notifications.js'
 import { me } from './routes/me.js'
 import { oauthRoutes } from './routes/oauth.js'
+import { invites } from './routes/invites.js'
+import { zine } from './routes/zine.js'
+import { school } from './routes/school.js'
+import { newsletterRoutes } from './routes/newsletter.js'
+import { handoffRoutes } from './routes/handoff.js'
 
 export function createApp() {
   const app = new Hono<AppEnv>()
@@ -62,6 +67,11 @@ export function createApp() {
   app.route('/api/admin', admin)
   app.route('/api', notifications)
   app.route('/api/me', me)
+  app.route('/api', invites)
+  app.route('/api', zine)
+  app.route('/api', school)
+  app.route('/api', newsletterRoutes)
+  app.route('/api', handoffRoutes)
 
   app.notFound((c) => c.json({ error: 'NotFound' }, 404))
   app.onError((err, c) => {

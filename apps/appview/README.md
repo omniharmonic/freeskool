@@ -11,7 +11,7 @@ src/
   contrail.config.ts     the projection: collections, references, relations, outbox, peers
   db/                    Drizzle schema + migrations for the fs_* tables
   index/                 contrail wiring: Postgres adapter, peers, backfill, outbox
-  sync/                  where PdsChangeSource plugs in (README + stub). NOT implemented.
+  sync/                  PdsChangeSource: live subscribeRepos indexing from peer PDS hosts
   spaces/                PostgresSpaceStore — the v1 backing for the Spaces shim
   lib/                   school-actor, roles, policy, custody, feedback, ics, crypto, pds
   http/                  the Hono app, sessions, OAuth, visibility rules, routes
@@ -179,7 +179,7 @@ Postgres postgres://***@localhost:5434/freeschool
     --  indexed by contrail.notify() immediately after each write — no firehose involved
     ok  .ics served: text/calendar; charset=utf-8, 21 lines, full address included
     ok  .ics for an anonymous viewer carries only the neighborhood
-[8] index from the peer registry (the liveness floor until PdsChangeSource exists)
+[8] index from the peer registry (the safety net beneath PdsChangeSource)
 [contrail] discovering users…
 [contrail]   discovered 0 users
 [contrail] backfilling…
@@ -264,8 +264,10 @@ Verified against `@atmo-dev/contrail@0.23.0` (MIT) as published.
 
 7. **`contrail.ingest()` is Jetstream-only.** It speaks Bluesky Jetstream v2 and checkpoints
    an instance-local `seq`. On a peered/private deployment that is pure cost, so live ingest
-   is behind `CONTRAIL_LIVE_INGEST` (default off) and `src/sync/README.md` documents the
-   hole.
+   is behind `CONTRAIL_LIVE_INGEST` (default off). Live indexing instead comes from
+   `PdsChangeSource` (`src/sync/`), which holds one
+   `com.atproto.sync.subscribeRepos` socket per peer PDS and feeds `ingestRecords`
+   directly; `contrail.ingest()` is never used.
 
 `relays` as the peer registry, the Postgres adapter
 (`createPostgresDatabase(pool)`), `references`/`relations` for sidecars, `listRecords`
@@ -275,7 +277,6 @@ backfill, and the transactional outbox all behave as the brief describes.
 
 | thing | where | why |
 |---|---|---|
-| `PdsChangeSource` | `src/sync/pds-change-source.stub.ts` — throws `not implemented` | a later step adds it; `src/sync/README.md` documents the interface, the per-host cursor-map problem, the `mark()` trick `subscribeRepos` forces, and the wiring point. The cursor-map codec (`encodeCursorMap` / `decodeCursorMap` / `cursorMapReached`) is real and already testable. |
 | `takeOwnership` | `src/lib/custody.ts` — throws 501 | the four steps are written out. Step 2 is genuinely open: the PDS's own reset flow emails the user (which is what we want) but invalidates the password we are holding mid-flight. |
 | newsletter **sending** | `src/jobs/newsletter.ts` | composing is implemented and stores a draft; sending needs a consent table distinct from `fs_notification_target`, MJML templates, an unsubscribe token namespace, and a steward approval. A cron that mails the whole school unattended is not a feature. |
 | `coop.lexicon.*` record shapes | `src/lexicons/coop.ts` | documented assumptions, not vendored lexicons — see divergence 2. |

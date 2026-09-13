@@ -9,3 +9,11 @@ infra/data
 coverage
 .turbo
 infra/seed/.authority.env
+.superpowers/
+infra/pds.env
+infra/seed/.authority.env
+# the dev mail sink (apps/appview/src/lib/mail.ts) — magic links and addresses, never committed
+apps/appview/.dev-mail.log
+# Playwright output (apps/web/playwright.config.ts)
+test-results/
+playwright-report/

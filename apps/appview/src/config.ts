@@ -4,6 +4,7 @@
  * Privacy note (R9): nothing in this file is ever logged. `redactedConfig()` is the
  * only thing allowed near a log line.
  */
+import { fileURLToPath } from 'node:url'
 import { z } from 'zod'
 
 const csv = (s: string) =>
@@ -25,6 +26,8 @@ const schema = z.object({
   DATABASE_URL: z.string().default('postgres://freeschool:freeschool@localhost:5434/freeschool'),
   APPVIEW_PORT: z.coerce.number().int().positive().default(4000),
   APPVIEW_PUBLIC_URL: z.string().url().default('http://localhost:4000'),
+  /** The PWA's own origin. Invite links point here. Falls back to APPVIEW_PUBLIC_URL. */
+  WEB_PUBLIC_URL: z.string().url().optional(),
 
   /** Our reference PDS — the primary door mints accounts here. */
   PDS_URL: z.string().url().default('http://localhost:3000'),
@@ -47,6 +50,14 @@ const schema = z.object({
 
   /** Hosts allowed past contrail's SSRF guard (local/private PDSes). */
   ALLOWED_PRIVATE_PDS_HOSTS: z.string().default('localhost,127.0.0.1,host.docker.internal').transform(csv),
+
+  /**
+   * Live indexing from peer PDS hosts over `com.atproto.sync.subscribeRepos`
+   * (src/sync/README.md). On by default — the 15-minute `backfillFromPeers` job is
+   * the safety net beneath it, not the primary path. Set `PEER_LIVE_SYNC=0` to run
+   * on the backfill alone.
+   */
+  PEER_LIVE_SYNC: z.stringbool().default(true),
 
   CONTRAIL_NAMESPACE: z.string().default('org.freeschool.appview'),
   /** Jetstream live ingest only makes sense on the public network; off locally. */
@@ -91,6 +102,13 @@ const schema = z.object({
 
   SMTP_URL: z.string().default(''),
   MAIL_FROM: z.string().default('Free School <no-reply@localhost>'),
+  /**
+   * DEV ONLY. With `SMTP_URL` unset, every outgoing mail is appended as one JSON line to
+   * this file (`{to, subject, body, at}`) so a local run — and the Playwright e2e, which
+   * reads the magic link from it — can see a link that must never reach a log line.
+   * Defaults to `apps/appview/.dev-mail.log` (gitignored). Ignored once SMTP is configured.
+   */
+  DEV_MAIL_LOG: z.string().default(''),
 })
 
 export type Config = z.infer<typeof schema> & {
@@ -112,6 +130,10 @@ export type Config = z.infer<typeof schema> & {
   oauthUsable: boolean
   oauthClientId: string
   isProd: boolean
+  /** WEB_PUBLIC_URL, or APPVIEW_PUBLIC_URL when the PWA is not given its own origin. */
+  webPublicUrl: string
+  /** Resolved `DEV_MAIL_LOG`: where `lib/mail.ts` appends mail when SMTP is unset. */
+  devMailLog: string
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -119,6 +141,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const publicUrl = parsed.APPVIEW_PUBLIC_URL.replace(/\/$/, '')
   if (!parsed.CUSTODY_KEYS.has(parsed.CUSTODY_KEY_VERSION)) {
     throw new Error(`CUSTODY_KEY_VERSION ${parsed.CUSTODY_KEY_VERSION} is not present in CUSTODY_KEYS`)
+  }
+  /**
+   * A production deployment with no SMTP transport cannot sign ANYBODY in: the primary
+   * door is a magic link, and the dev fallback appends it to a FILE on the server — which
+   * in production is both useless to the member and a plaintext magic-link log. Refuse at
+   * boot rather than accept signups nobody can complete. (`DEV_MAIL_LOG` is ignored once
+   * SMTP is set; there is no production use for it.)
+   */
+  if (parsed.NODE_ENV === 'production' && !parsed.SMTP_URL) {
+    throw new Error(
+      'SMTP_URL is required when NODE_ENV=production: the magic-link door cannot work without a mail ' +
+        'transport, and the dev file sink would write magic links to disk instead of sending them.',
+    )
   }
   return {
     ...parsed,
@@ -128,6 +163,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // A confidential client's client_id IS the metadata URL.
     oauthClientId: `${publicUrl}/oauth/client-metadata.json`,
     isProd: parsed.NODE_ENV === 'production',
+    webPublicUrl: (parsed.WEB_PUBLIC_URL ?? publicUrl).replace(/\/$/, ''),
+    // `src/config.ts` -> `apps/appview/.dev-mail.log`.
+    devMailLog: parsed.DEV_MAIL_LOG || fileURLToPath(new URL('../.dev-mail.log', import.meta.url)),
   }
 }
 
@@ -154,6 +192,7 @@ export function redactedConfig(c: Config) {
     peers: c.PEER_PDS_HOSTS.length,
     schoolConfigured: Boolean(c.SCHOOL_DID && c.SCHOOL_APP_PASSWORD),
     liveIngest: c.CONTRAIL_LIVE_INGEST,
+    peerLiveSync: c.PEER_LIVE_SYNC,
     custodyKeyVersion: c.CUSTODY_KEY_VERSION,
     push: Boolean(c.VAPID_PUBLIC_KEY && c.VAPID_PRIVATE_KEY),
     smtp: Boolean(c.SMTP_URL),

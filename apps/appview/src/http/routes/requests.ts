@@ -8,12 +8,27 @@
  *
  * Requests and claims live in the asker's / claimer's repo, not the school's: a request
  * is a personal statement of interest and must survive the school.
+ *
+ * `GET /requests` IS PUBLIC AND STAYS PUBLIC — the needs board is the front door of the
+ * whole idea — but it does not hand out `askedBy` (A7). Only the asker themselves and a
+ * steward (who needs it to moderate) get that field. The record it comes from is public and
+ * self-authored, so nothing here is secret; what was wrong was serving an identified ROSTER
+ * as a field of its own, which is what makes scraping one.
+ *
+ * KNOWN AND DELIBERATE LIMIT: `uri` is an AT-URI, and its authority segment is the asker's
+ * DID. It cannot be withheld — it is the record's address, and every follow-up call
+ * (`/requests/:id/rsvp`, `/requests/:id/claim`) takes it — so a determined reader can still
+ * parse an asker out of it. Hiding that would mean an AppView-local opaque id, i.e. a second
+ * identity namespace to keep in sync, which this codebase has deliberately not built (see
+ * `routes/events.ts`'s note on `:id`). What A7 closes is the easy path: a field literally
+ * named "who asked for this", present on every row, served to anyone.
  */
 import { Hono } from 'hono'
 import { z } from 'zod'
 import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireRole, requireViewer } from '../session.js'
+import { roleOf } from '../../lib/roles.js'
 import { actorAgent, NoActorCredentialError } from '../../lib/actor-agent.js'
 import { NSID } from '../../lexicons/nsids.js'
 import { tid } from '../../lib/ids.js'
@@ -21,6 +36,7 @@ import { getIndexer } from '../../index/indexer.js'
 import { getRecordByUri, listCollection, parseAtUri } from '../../index/queries.js'
 import { getRecord } from '../../lib/pds.js'
 import { resolvePdsEndpoint } from '../../lib/identity.js'
+import { countInterested, isInterested, meetsThreshold, toggleInterest } from '../../lib/request-rsvp.js'
 
 export const requests = new Hono<AppEnv>()
 
@@ -42,19 +58,36 @@ requests.get('/requests', async (c) => {
     limit: Number(c.req.query('limit') ?? 50),
     ...(c.req.query('cursor') ? { cursor: c.req.query('cursor')! } : {}),
   })
-  return c.json({
-    cursor,
-    requests: records.map((r) => ({
+  // The optional-session pattern, as in `calendar.ts`: `c.var.viewer` is set by
+  // `withViewer` for a signed-in caller and absent otherwise — the route itself is not
+  // gated. One role lookup for the page, not one per row.
+  const viewer = c.var.viewer
+  const viewerIsSteward = viewer ? (await roleOf(viewer.did)) >= Role.Steward : false
+  const items = await Promise.all(
+    records.map(async (r) => ({
       uri: r.uri,
-      askedBy: r.did,
+      // A7: never a list of who asked. Only the asker themselves and a steward (who needs
+      // it to moderate) see it.
+      ...(viewerIsSteward || viewer?.did === r.did ? { askedBy: r.did } : {}),
       title: r.value.title,
       description: r.value.description,
       skill: r.value.skill,
       threshold: r.value.threshold,
       status: r.value.status,
       claims: r.counts?.claim ?? r.counts?.claims ?? 0,
+      // "I'm interested" — app-side (R9: no public roster), the count a `threshold`
+      // gates claiming against. Never a list of who.
+      rsvpCount: await countInterested(r.uri),
+      viewerInterested: viewer ? await isInterested(r.uri, viewer.did) : false,
     })),
-  })
+  )
+  return c.json({ cursor, requests: items })
+})
+
+requests.post('/requests/:id/rsvp', requireViewer, async (c) => {
+  const requestUri = decodeURIComponent(c.req.param('id'))
+  const result = await toggleInterest(requestUri, c.var.viewer!.did)
+  return c.json(result)
 })
 
 const createBody = z.object({
@@ -104,9 +137,18 @@ requests.post('/requests/:id/claim', requireViewer, requireRole(Role.Host), asyn
   const viewer = c.var.viewer!
   const indexer = await getIndexer()
 
-  const request = await getRecordByUri(indexer, 'request', requestUri)
+  const request = await getRecordByUri<RequestRecord>(indexer, 'request', requestUri)
   const requestCid = request?.cid ?? (await cidFromPds(requestUri))
   if (!requestCid) return c.json({ error: 'NotFound', message: 'unknown request' }, 404)
+
+  const threshold = request?.value.threshold
+  const interested = await countInterested(requestUri)
+  if (!meetsThreshold(interested, threshold)) {
+    return c.json(
+      { error: 'ThresholdNotMet', message: `this request needs ${threshold} interested people; has ${interested}` },
+      409,
+    )
+  }
 
   let eventRef: { uri: string; cid: string } | undefined
   if (parsed.data.eventUri) {

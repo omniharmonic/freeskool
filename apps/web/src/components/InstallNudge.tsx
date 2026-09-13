@@ -15,7 +15,12 @@ type Mode = 'closed' | 'install' | 'inapp' | 'denied';
 
 interface InstallFlow {
   surface: Surface;
-  /** Call after a successful RSVP — never on first load. */
+  /**
+   * Call from a REAL RSVP mutation's `onSuccess` — never speculatively before
+   * the network call resolves, and never on first load. `EventScreen` wires
+   * this into `useRsvpMutation()`'s per-call `onSuccess`, so a failed RSVP
+   * (the server rejects it, the request drops) never shows the nudge.
+   */
   afterRsvp: () => void;
   /** Opens the install sheet from a gated "Remind me" tap. */
   openInstallSheet: () => void;
