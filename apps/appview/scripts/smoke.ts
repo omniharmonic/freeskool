@@ -12,7 +12,10 @@
  *   1. create the school (account + `freeschool.draft.school` + default policy)
  *   2. create a custodial member and verify their email (the primary door)
  *   3. publish an event as that host (event + config + skillLevel in the HOST's repo,
- *      listing in the SCHOOL's repo via SchoolActorPort)
+ *      listing in the SCHOOL's repo via SchoolActorPort); confirm tag routing — an
+ *      untagged or unrouted-tag event gets NO listing but still appears on our own
+ *      calendar by authorship; update the class (replace its skills, and confirm a
+ *      recurrence edit is rejected)
  *   4. three more custodial members RSVP app-side
  *   5. the host attests attendance for all three
  *   6. all three submit feedback; read the k-anonymous summary
@@ -119,6 +122,7 @@ async function main() {
   step(3, 'publish a class as the host')
   const startsAt = new Date(Date.now() - 2 * 3_600_000).toISOString()
   const endsAt = new Date(Date.now() - 1 * 3_600_000).toISOString()
+  const sourdoughSkill = 'at://did:plc:taxonomy/freeschool.draft.skill/sourdough-starter'
   const created = await postJson(req, '/api/events', host.cookie, {
     name: `Sourdough for beginners (${suffix})`,
     description: 'Bring a jar. We will talk about flour.',
@@ -128,6 +132,8 @@ async function main() {
     visibility: 'listed',
     neighborhood: 'North Boulder',
     rsvpRequired: true,
+    tags: ['skillshare'],
+    skills: [{ skill: sourdoughSkill, level: 1 }],
     locations: [
       {
         $type: 'community.lexicon.location.address',
@@ -146,6 +152,56 @@ async function main() {
   ok(`event    ${eventUri}`)
   ok(`config   ${(created.config as { uri: string }).uri}`)
   ok(`listing  ${(created.listing as { uri: string }).uri}  (written as the school via SchoolActorPort)`)
+
+  /* 3a. tag routing: an untagged / unrouted-tag event gets NO listing, still ours */
+  const untagged = await postJson(req, '/api/events', host.cookie, {
+    name: `Untagged mending circle (${suffix})`,
+    startsAt,
+    endsAt,
+    visibility: 'listed',
+    neighborhood: 'North Boulder',
+  })
+  assert(untagged.listing === undefined, 'an untagged event must get NO school listing')
+  const untaggedUri = (untagged.event as { uri: string }).uri
+  const knitting = await postJson(req, '/api/events', host.cookie, {
+    name: `Knitting circle (${suffix})`,
+    startsAt,
+    endsAt,
+    visibility: 'listed',
+    neighborhood: 'North Boulder',
+    tags: ['knitting'],
+  })
+  assert(knitting.listing === undefined, 'an event tagged only ["knitting"] must get NO school listing (does not route)')
+  const knittingUri = (knitting.event as { uri: string }).uri
+  ok('an untagged event and a ["knitting"]-tagged event both get NO coop.lexicon.event.listing')
+
+  const { listRecords } = await import('../src/lib/pds.js')
+  const { NSID } = await import('../src/lexicons/nsids.js')
+  const schoolListings = await listRecords(school.did, NSID.eventListing)
+  assert(schoolListings.length === 1, `expected exactly 1 school listing, found ${schoolListings.length}`)
+  ok('the school repo holds exactly 1 listing — the two unrouted events did not add one')
+
+  /* 3b. update the class: replace its skills; a recurrence edit is rejected */
+  const breadScoringSkill = 'at://did:plc:taxonomy/freeschool.draft.skill/bread-scoring'
+  const updated = await putJson(req, `/api/events/${encodeURIComponent(eventUri)}`, host.cookie, {
+    skills: [{ skill: breadScoringSkill, level: 2 }],
+  })
+  assert(Array.isArray(updated.skillLevels) && updated.skillLevels.length === 1, 'expected exactly 1 replacement skill')
+  const afterUpdate = await getJson(req, `/api/events/${encodeURIComponent(eventUri)}`)
+  const skillUris = ((afterUpdate.skills as Array<{ skill: string }>) ?? []).map((s) => s.skill)
+  assert(skillUris.includes(breadScoringSkill), 'the replacement skill is missing from the event')
+  assert(!skillUris.includes(sourdoughSkill), 'the OLD skill sidecar was not removed on replace')
+  ok('PUT /api/events/:id replaced the skill sidecars (old deleted, new written)')
+
+  const seriesRejected = await req(`/api/events/${encodeURIComponent(eventUri)}`, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', cookie: host.cookie },
+    body: JSON.stringify({ series: { rrule: 'FREQ=WEEKLY', freq: 'weekly', timezone: 'America/Denver' } }),
+  })
+  assert(seriesRejected.status === 400, `expected 400 SeriesEditNotSupported, got ${seriesRejected.status}`)
+  const seriesRejectedBody = (await seriesRejected.json()) as { error?: string }
+  assert(seriesRejectedBody.error === 'SeriesEditNotSupported', `expected SeriesEditNotSupported, got ${String(seriesRejectedBody.error)}`)
+  ok('PUT /api/events/:id rejects a recurrence edit with 400 SeriesEditNotSupported')
 
   /* 4. RSVPs */
   step(4, 'three members RSVP (app-side only, no public record)')
@@ -230,7 +286,16 @@ async function main() {
   assert(mine, `the published class did not appear on the calendar (${listed.length} events listed)`)
   ok(`calendar: ${listed.length} listed event(s); ours is "${String(mine.name)}" in ${String(mine.neighborhood)}`)
   assert(mine.locationRedacted === true, 'the anonymous calendar must redact the location')
+  assert(mine.origin === 'ours', 'the routed, listed class should carry origin "ours"')
   info('indexed by contrail.notify() immediately after each write — no firehose involved')
+
+  const untaggedEntry = listed.find((e) => e.uri === untaggedUri)
+  const knittingEntry = listed.find((e) => e.uri === knittingUri)
+  assert(untaggedEntry, 'the UNTAGGED class (no listing at all) did not appear on the calendar')
+  assert(knittingEntry, 'the ["knitting"]-tagged class (unrouted, no listing) did not appear on the calendar')
+  assert(untaggedEntry.origin === 'ours', 'an untagged own-host class must still carry origin "ours"')
+  assert(knittingEntry.origin === 'ours', 'an unrouted-tag own-host class must still carry origin "ours"')
+  ok('calendar inclusion is by AUTHORSHIP: both unrouted classes appear, origin "ours", with no listing record')
 
   const ics = await req(`/api/events/${encodeURIComponent(eventUri)}.ics`, {
     headers: { cookie: attendees[0]!.cookie },
@@ -334,6 +399,22 @@ async function postJson(
   })
   const json = (await res.json()) as Record<string, unknown>
   assert(res.ok, `POST ${path} -> ${res.status} ${JSON.stringify(json)}`)
+  return json
+}
+
+async function putJson(
+  req: Fetcher,
+  path: string,
+  cookie: string,
+  body: unknown,
+): Promise<Record<string, unknown>> {
+  const res = await req(path, {
+    method: 'PUT',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify(body),
+  })
+  const json = (await res.json()) as Record<string, unknown>
+  assert(res.ok, `PUT ${path} -> ${res.status} ${JSON.stringify(json)}`)
   return json
 }
 

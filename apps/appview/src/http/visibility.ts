@@ -50,6 +50,30 @@ export function isListed({ listings, configs }: ListingInputs): boolean {
   return configs.some((c) => c.visibility === 'listed')
 }
 
+export interface CalendarInclusion {
+  show: boolean
+  origin: 'ours' | 'listed'
+}
+
+/**
+ * Does this event belong on OUR calendar (and zine), and under what origin? The
+ * inclusion rule is AUTHORSHIP, not the listing: an event whose host belongs to this
+ * school (`isOwnHost`, from `lib/roles.ts#isOwnMember`) is `'ours'` and is shown or
+ * hidden by the ordinary `isListed` rule (moderation removal and the host's own
+ * visibility choice both still apply, exactly as before). An event hosted elsewhere is
+ * shown ONLY if our own school has a live curation listing for it — `'listed'`, the
+ * peer-routing case. `coop.lexicon.event.listing` is for routing content TO PEERS; it is
+ * never required for OUR OWN content to appear on OUR OWN calendar.
+ */
+export function calendarInclusion(isOwnHost: boolean, inputs: ListingInputs): CalendarInclusion {
+  if (isOwnHost) {
+    return { show: isListed(inputs), origin: 'ours' }
+  }
+  // Ignore the config fallback for a host that is not ours — a foreign host's own
+  // `visibility: 'listed'` flag grants nothing on OUR calendar; only OUR curation does.
+  return { show: isListed({ listings: inputs.listings, configs: [] }), origin: 'listed' }
+}
+
 /** Union of every config sidecar's declared tags, deduped, lowercase. Never the event's author. */
 export function tagsOf({ configs, listings }: ListingInputs): string[] {
   const out = new Set<string>()

@@ -4,6 +4,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import {
+  calendarInclusion,
   icsLocation,
   isListed,
   isVenueNeeded,
@@ -187,5 +188,53 @@ describe('tags', () => {
     }
     expect(projectEvent(event, inputs, 'public').tags).toEqual(['knitting'])
     expect(projectEvent(event, inputs, 'host').tags).toEqual(['knitting'])
+  })
+})
+
+describe('calendarInclusion — ours by AUTHORSHIP, not by listing', () => {
+  it('an own-host event with no tags and no listing still shows, origin "ours"', () => {
+    // This is the exact regression: an untagged event gets NO listing (see
+    // lib/events.ts), but it must still appear on our own calendar.
+    const noListingNoTags: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'listed' }] }
+    expect(calendarInclusion(true, noListingNoTags)).toEqual({ show: true, origin: 'ours' })
+  })
+
+  it('an own-host event tagged ["knitting"] (does not route) still shows, origin "ours"', () => {
+    const mismatchedTag: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'listed', tags: ['knitting'] }] }
+    expect(calendarInclusion(true, mismatchedTag)).toEqual({ show: true, origin: 'ours' })
+  })
+
+  it('an own-host event tagged ["skillshare"] (routes, has a listing) shows, origin "ours"', () => {
+    const routed: ListingInputs = {
+      listings: [{ event: ref, school: 'did:plc:school', status: 'listed', tags: ['skillshare'] }],
+      configs: [{ event: ref, visibility: 'listed', tags: ['skillshare'] }],
+    }
+    expect(calendarInclusion(true, routed)).toEqual({ show: true, origin: 'ours' })
+  })
+
+  it('an own-host event the host marked private is hidden, even though it is ours', () => {
+    const privateEvent: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'private' }] }
+    expect(calendarInclusion(true, privateEvent)).toEqual({ show: false, origin: 'ours' })
+  })
+
+  it('an own-host event a steward removed is hidden, even though it is ours', () => {
+    const removed: ListingInputs = {
+      listings: [{ event: ref, school: 'did:plc:school', status: 'removed' }],
+      configs: [{ event: ref, visibility: 'listed' }],
+    }
+    expect(calendarInclusion(true, removed)).toEqual({ show: false, origin: 'ours' })
+  })
+
+  it('a non-own host with no listing at all is hidden', () => {
+    const foreignNoListing: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'listed' }] }
+    expect(calendarInclusion(false, foreignNoListing)).toEqual({ show: false, origin: 'listed' })
+  })
+
+  it('a non-own host with a live listing from our school shows, origin "listed"', () => {
+    const foreignListed: ListingInputs = {
+      listings: [{ event: ref, school: 'did:plc:school', status: 'listed' }],
+      configs: [],
+    }
+    expect(calendarInclusion(false, foreignListed)).toEqual({ show: true, origin: 'listed' })
   })
 })

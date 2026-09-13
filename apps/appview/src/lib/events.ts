@@ -54,9 +54,10 @@ export interface CreateEventInput {
   rsvpRequired?: boolean
   /**
    * Lowercase kebab tags, ≤ 10. Routes the school's own curation listing — see
-   * `routeListing` below. Left unset (or empty), an event defaults to the school's own
-   * routing tags, i.e. it is assumed to be offered under the school unless the host says
-   * otherwise.
+   * `routeListing` below. An event with no tag that routes gets NO curation listing at
+   * all (it is not silently defaulted into one): it still appears on OUR OWN calendar,
+   * because calendar/zine inclusion is decided by AUTHORSHIP, not by the listing — see
+   * `calendarInclusion` in `http/visibility.ts`. Listings exist for routing TO PEERS.
    */
   tags?: string[]
   /** One sidecar per (skill, level) the class teaches. */
@@ -85,12 +86,13 @@ export interface CreatedEvent {
 
 /**
  * TAG ROUTING. The school's curation listing (`coop.lexicon.event.listing`) is written
- * only when the event carries at least one tag the school routes on — taken from the
+ * ONLY when the event carries at least one tag the school routes on — taken from the
  * school's own `freeschool.draft.school#tags`, falling back to
- * `['skillshare', 'free-school']` when the school has not set any (or is not reachable,
- * which is also what happens in a unit test with no real school record). An event whose
- * tags do not route still appears on our own calendar (the host's config can still say
- * `visibility: 'listed'`) — it simply gets no curation record.
+ * `['skillshare', 'free-school']` when the school has not set any (or is not reachable).
+ * An event with no tag that routes gets NO listing, full stop — it is not silently
+ * defaulted into one. It still appears on OUR OWN calendar regardless, because
+ * calendar/zine inclusion is decided by authorship (`calendarInclusion` in
+ * `http/visibility.ts`), never by the listing. Listings exist for routing TO PEERS.
  */
 export const DEFAULT_ROUTING_TAGS = ['skillshare', 'free-school']
 
@@ -119,12 +121,18 @@ export interface RouteListingInput {
   tags: string[]
   visibility?: 'listed' | 'unlisted' | 'private'
   callerDid: Did
+  /**
+   * Injectable tag source, mainly for tests: when omitted, `schoolRoutingTags()` is
+   * called, which makes a live HTTP request to the school's own PDS. Pass an explicit
+   * array to keep a unit test hermetic (no network, no warning log).
+   */
+  schoolTags?: string[]
 }
 
 /** Writes the school's curation listing, as the school, only when tags + visibility route. */
 export async function routeListing(input: RouteListingInput): Promise<{ uri: string; cid: string } | undefined> {
   if ((input.visibility ?? 'listed') !== 'listed') return undefined
-  const schoolTags = await schoolRoutingTags()
+  const schoolTags = input.schoolTags ?? (await schoolRoutingTags())
   if (!routesOnTags(input.tags, schoolTags)) return undefined
   const res = await schoolActor().putRecordAsSchool({
     schoolDid: schoolDid(),
@@ -146,10 +154,33 @@ export async function routeListing(input: RouteListingInput): Promise<{ uri: str
   return { uri: res.uri, cid: res.cid }
 }
 
+export type ListingEditAction = 'create' | 'remove' | 'none'
+
+/**
+ * Pure decision for re-routing a listing on a host's edit (no DB, no PDS — see
+ * `updateEventAsHost` for the plumbing around it). The key distinction (the bug this
+ * closes): `everListedByUs` asks "have we EVER written a listing for this event", NOT
+ * "is it currently active" — a moderation REMOVAL is sticky. Once a steward has removed
+ * our listing, a host retagging back onto a routed tag must never recreate it; only a
+ * steward restoring it can. We only ever CREATE a listing the first time an event
+ * transitions into a routed state.
+ */
+export function decideListingEdit(state: {
+  everListedByUs: boolean
+  isActivelyListedByUs: boolean
+  routesNow: boolean
+}): ListingEditAction {
+  if (state.routesNow && !state.everListedByUs) return 'create'
+  if (!state.routesNow && state.isActivelyListedByUs) return 'remove'
+  return 'none'
+}
+
 export async function createEventAsHost(viewer: Viewer, input: CreateEventInput): Promise<CreatedEvent> {
   const agent = await actorAgent(viewer)
   const now = new Date().toISOString()
-  const tags = input.tags?.length ? input.tags : DEFAULT_ROUTING_TAGS
+  // No default: an untagged event gets no listing at all (see the doc comment on `tags`
+  // above). It still appears on our own calendar by authorship, not by this array.
+  const tags = input.tags ?? []
 
   const eventRkey = tid()
   const event = await put(agent, viewer.did, NSID.event, eventRkey, {
@@ -259,20 +290,34 @@ export interface UpdatedEvent {
   event: { uri: string; cid: string }
   config: { uri: string; cid: string }
   listing?: { uri: string; cid: string }
+  skillLevels?: Array<{ uri: string; cid: string }>
   /** True when retagging away from a routed tag could not remove the school's listing
    * (that needs a steward) — the event stays listed until one acts. */
   unlisted?: boolean
 }
 
+export class SeriesEditNotSupportedError extends Error {
+  constructor() {
+    super('recurrence cannot be changed here — see the dedicated recurrence edit path')
+    this.name = 'SeriesEditNotSupportedError'
+  }
+}
+
 /**
  * A host updates their own class. Same "whose repo" rule as creation: the event and its
- * config are overwritten in place, in the HOST's repo. The school's curation listing is
- * re-routed (see routeListing) but never deleted unilaterally by the host — removing one
- * is moderation (MIN_ROLE['remove-listing'] = Steward), so a detagging host that is not
- * themselves a steward gets `unlisted: false` back and the event stays listed until a
- * steward acts.
+ * config are overwritten in place, in the HOST's repo. `skills`, when present, REPLACES
+ * the event's `freeschool.draft.skillLevel` sidecars entirely (old ones deleted, new
+ * ones written) — omit it to leave them untouched. `series` is rejected outright
+ * (`SeriesEditNotSupportedError`); recurrence has its own dedicated edit path.
+ *
+ * The school's curation listing is re-routed (see `decideListingEdit`) but never deleted
+ * unilaterally by the host — removing one is moderation (MIN_ROLE['remove-listing'] =
+ * Steward), so a detagging host who is not themselves a steward gets `unlisted: false`
+ * back and the event stays listed until a steward acts.
  */
 export async function updateEventAsHost(viewer: Viewer, eventUri: string, input: UpdateEventInput): Promise<UpdatedEvent> {
+  if (input.series !== undefined) throw new SeriesEditNotSupportedError()
+
   const indexer = await getIndexer()
   const current = await getRecordByUri(indexer, 'event', eventUri)
   if (!current) throw new EventNotFoundError(eventUri)
@@ -298,7 +343,9 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
   const configRows = await sidecarsForEvent<EventConfig>(indexer, 'eventConfig', eventUri)
   const existingConfig = configRows[0]
   const configParts = existingConfig ? parseAtUri(existingConfig.uri) : null
-  const newTags = input.tags !== undefined ? (input.tags.length ? input.tags : DEFAULT_ROUTING_TAGS) : existingConfig?.value.tags ?? DEFAULT_ROUTING_TAGS
+  // No default here either (see createEventAsHost): an explicit `tags: []` or an omitted
+  // `tags` both mean "use whatever is already there", never a silent re-route.
+  const newTags = input.tags !== undefined ? input.tags : existingConfig?.value.tags ?? []
   const newVisibility = input.visibility ?? existingConfig?.value.visibility ?? 'listed'
   const mergedConfig: EventConfig & { $type: string } = {
     ...existingConfig?.value,
@@ -315,18 +362,62 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
   }
   const cfg = await put(agent, viewer.did, NSID.eventConfig, configParts?.rkey ?? tid(), mergedConfig)
 
+  // Replace the skill sidecars entirely when `skills` is present; leave them alone
+  // otherwise. All in the HOST's own repo, same as creation.
+  let skillLevels: Array<{ uri: string; cid: string }> | undefined
+  let deletedSkillUris: string[] = []
+  if (input.skills !== undefined) {
+    const existingSkills = await sidecarsForEvent<{ skill: string; level: number; prerequisites?: string }>(
+      indexer,
+      'skillLevel',
+      eventUri,
+    )
+    for (const s of existingSkills) {
+      const p = parseAtUri(s.uri)
+      if (p) {
+        await agent.com.atproto.repo
+          .deleteRecord({ repo: viewer.did, collection: NSID.skillLevel, rkey: p.rkey })
+          .catch(() => {
+            /* best effort: the new sidecars are the record of truth going forward */
+          })
+      }
+    }
+    // A PDS 404 on notify() is what tells contrail to drop a record from the index
+    // (README: "Only an authoritative not-found response deletes local state") — so the
+    // OLD uris need a notify too, not just the new ones, or the index keeps the deleted
+    // sidecars around until the next backfill happens to notice.
+    deletedSkillUris = existingSkills.map((s) => s.uri)
+    skillLevels = []
+    for (const s of input.skills) {
+      skillLevels.push(
+        await put(agent, viewer.did, NSID.skillLevel, tid(), {
+          $type: NSID.skillLevel,
+          event: { uri: event.uri, cid: event.cid },
+          skill: s.skill,
+          level: s.level,
+          ...(s.prerequisites ? { prerequisites: s.prerequisites } : {}),
+          createdAt: new Date().toISOString(),
+        }),
+      )
+    }
+  }
+
   // Re-run tag routing against the NEW tags/visibility. Only OUR school's own listings
   // decide whether WE already have a curation record — a peer's listing of this event
   // (once inbound exchange exists) is not ours to re-route.
   const listingRows = await sidecarsForEvent<EventListing>(indexer, 'eventListing', eventUri)
   const ourListings = listingRows.map((r) => r.value).filter((l) => l.school === schoolDid())
+  // "ever listed" (any status, including removed) vs "actively listed right now" are
+  // DELIBERATELY different checks — see `decideListingEdit`'s doc comment.
+  const everListedByUs = ourListings.length > 0
   const isActivelyListedByUs = isListed({ listings: ourListings, configs: [] })
   const schoolTags = await schoolRoutingTags()
   const routesNow = newVisibility === 'listed' && routesOnTags(newTags, schoolTags)
+  const action = decideListingEdit({ everListedByUs, isActivelyListedByUs, routesNow })
 
   let listing: { uri: string; cid: string } | undefined
   let unlisted: boolean | undefined
-  if (routesNow && !isActivelyListedByUs) {
+  if (action === 'create') {
     listing = await routeListing({
       event: { uri: event.uri, cid: event.cid },
       name: String(mergedEvent.name ?? ''),
@@ -334,7 +425,7 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
       visibility: newVisibility,
       callerDid: viewer.did as Did,
     })
-  } else if (!routesNow && isActivelyListedByUs) {
+  } else if (action === 'remove') {
     try {
       await schoolActor().putRecordAsSchool({
         schoolDid: schoolDid(),
@@ -361,11 +452,25 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
     }
   }
 
-  await indexer.notify([event.uri, cfg.uri, ...(listing ? [listing.uri] : [])]).catch(() => {
-    /* the periodic backfill will pick it up */
-  })
+  await indexer
+    .notify([
+      event.uri,
+      cfg.uri,
+      ...deletedSkillUris,
+      ...(skillLevels ?? []).map((s) => s.uri),
+      ...(listing ? [listing.uri] : []),
+    ])
+    .catch(() => {
+      /* the periodic backfill will pick it up */
+    })
 
-  return { event, config: cfg, ...(listing ? { listing } : {}), ...(unlisted !== undefined ? { unlisted } : {}) }
+  return {
+    event,
+    config: cfg,
+    ...(skillLevels ? { skillLevels } : {}),
+    ...(listing ? { listing } : {}),
+    ...(unlisted !== undefined ? { unlisted } : {}),
+  }
 }
 
 async function put(

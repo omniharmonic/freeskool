@@ -1,13 +1,23 @@
 /**
  * `/api/invites` — shareable invite LINKS.
  *
- *   POST /invites                mint a bearer link (auth required)
+ *   POST /invites                mint a bearer link (auth required, Member+)
  *   POST /invites/:token/redeem  consume one use (auth required)
  *
- * Distinct from `fs_invite`, the signup-invite-code evidence table: anyone already
- * signed in can mint one of these to hand to a friend (optionally scoped to one class),
- * it can be reused up to `uses` times, and it expires. Only the SHA-256 of the token is
- * ever stored, so a leaked database row is not a working link.
+ * Distinct from `fs_invite`, the signup-invite-code evidence table: a member (Role.Member
+ * or above — a bare Visitor cannot) can mint one of these to hand to a friend (optionally
+ * scoped to one class), it can be reused up to `uses` times, and it expires. Only the
+ * SHA-256 of the token is ever stored, so a leaked database row is not a working link.
+ *
+ * THE MEMBER ADMISSION GATE, three independent layers (closes the self-promotion hole
+ * where a fresh Visitor mints their own link and redeems it to promote themselves):
+ *   1. minting requires Role.Member+ (`requireRole` at the route, `roleOf` inside
+ *      `mintInviteLink` itself so the function is safe even called directly);
+ *   2. `redeemInviteLink` refuses a redemption where `redeemerDid === inviterDid`
+ *      (409 `SelfRedeem`) — no self-invite, from any account;
+ *   3. `redeemInviteLink` refuses a redeemer who ALREADY satisfies the invite-or-vouch
+ *      gate (409 `AlreadyInvited`) — this mechanism exists to admit people who do not yet
+ *      have qualifying evidence, not to accumulate more of it.
  *
  * PRIVACY (R9): the inviter's DID never appears in the minted URL, in the token, or in
  * the redeemer's response — `fs_invite_link.inviterDid` stays server-side, same as
@@ -16,14 +26,16 @@
  */
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, eq, gt, sql } from 'drizzle-orm'
+import { and, eq, gt, isNotNull, or, sql } from 'drizzle-orm'
+import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
-import { requireViewer } from '../session.js'
+import { requireRole, requireViewer } from '../session.js'
 import { getDb } from '../../db/index.js'
 import { invite, inviteLink } from '../../db/schema.js'
 import { config } from '../../config.js'
 import { hashToken, newInviteToken } from '../../lib/crypto.js'
 import { rowId } from '../../lib/ids.js'
+import { roleOf } from '../../lib/roles.js'
 
 export const invites = new Hono<AppEnv>()
 
@@ -41,7 +53,19 @@ export interface MintedInvite {
   expiresAt: string
 }
 
+export class MintPermissionError extends Error {
+  constructor() {
+    super('must be at least a member to mint an invite link')
+    this.name = 'MintPermissionError'
+  }
+}
+
 export async function mintInviteLink(inviterDid: string, input: z.infer<typeof mintBody>): Promise<MintedInvite> {
+  // Belt-and-braces: the route also gates on `requireRole(Role.Member)`, but this
+  // function is called directly by tests (and could be called from elsewhere), so the
+  // rule lives here too rather than only at the door.
+  if ((await roleOf(inviterDid)) < Role.Member) throw new MintPermissionError()
+
   const token = newInviteToken()
   const expiresAt = new Date(Date.now() + (input.ttlDays ?? DEFAULT_TTL_DAYS) * 86_400_000)
   await getDb().insert(inviteLink).values({
@@ -70,6 +94,24 @@ export async function redeemInviteLink(token: string, redeemerDid: string): Prom
     return { ok: false, status: 410, error: 'InviteExpired', message: 'this invite link has expired' }
   }
 
+  // Layer 2: no self-invite. Checked against the minter's stored DID, which never leaves
+  // this function — not in the request, not in the response.
+  if (row.inviterDid === redeemerDid) {
+    return { ok: false, status: 409, error: 'SelfRedeem', message: 'you cannot redeem your own invite link' }
+  }
+
+  // Layer 3: this mechanism is for FIRST admission. A redeemer who already satisfies
+  // invite-or-vouch (the exact condition `evidenceFor` checks) has nothing to gain here,
+  // and letting them consume a link meant for someone new is not what it is for.
+  const already = await db
+    .select({ code: invite.code })
+    .from(invite)
+    .where(and(eq(invite.usedByDid, redeemerDid), or(isNotNull(invite.inviterDid), isNotNull(invite.inviterPurgedAt))))
+    .limit(1)
+  if (already.length > 0) {
+    return { ok: false, status: 409, error: 'AlreadyInvited', message: 'you already satisfy the member admission gate' }
+  }
+
   // Atomic claim: decrement only while a use remains, so two simultaneous redemptions
   // cannot both succeed past the limit.
   const claimed = await db
@@ -93,16 +135,21 @@ export async function redeemInviteLink(token: string, redeemerDid: string): Prom
   return { ok: true, ...(claim.eventUri ? { eventUri: claim.eventUri } : {}) }
 }
 
-invites.post('/invites', requireViewer, async (c) => {
+invites.post('/invites', requireViewer, requireRole(Role.Member), async (c) => {
   const parsed = mintBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
-  const minted = await mintInviteLink(c.var.viewer!.did, parsed.data)
-  return c.json(minted, 201)
+  try {
+    const minted = await mintInviteLink(c.var.viewer!.did, parsed.data)
+    return c.json(minted, 201)
+  } catch (err) {
+    if (err instanceof MintPermissionError) return c.json({ error: 'PermissionDenied', message: err.message }, 403)
+    throw err
+  }
 })
 
 invites.post('/invites/:token/redeem', requireViewer, async (c) => {
   const token = c.req.param('token')
   const result = await redeemInviteLink(token, c.var.viewer!.did)
-  if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status as 404 | 410)
+  if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status as 404 | 409 | 410)
   return c.json({ ok: true, ...(result.eventUri ? { eventUri: result.eventUri } : {}) })
 })

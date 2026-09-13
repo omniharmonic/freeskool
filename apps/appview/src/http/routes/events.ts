@@ -16,7 +16,13 @@ import { and, eq, isNull, sql } from 'drizzle-orm'
 import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireViewer, requireRole } from '../session.js'
-import { createEventAsHost, EventNotFoundError, EventPermissionError, updateEventAsHost } from '../../lib/events.js'
+import {
+  createEventAsHost,
+  EventNotFoundError,
+  EventPermissionError,
+  SeriesEditNotSupportedError,
+  updateEventAsHost,
+} from '../../lib/events.js'
 import { NoActorCredentialError } from '../../lib/actor-agent.js'
 import { getIndexer } from '../../index/indexer.js'
 import { getRecordByUri, sidecarsForEvent } from '../../index/queries.js'
@@ -111,6 +117,9 @@ events.put('/events/:id', requireViewer, async (c) => {
   } catch (err) {
     if (err instanceof EventNotFoundError) return c.json({ error: 'NotFound' }, 404)
     if (err instanceof EventPermissionError) return c.json({ error: 'PermissionDenied', message: err.message }, 403)
+    if (err instanceof SeriesEditNotSupportedError) {
+      return c.json({ error: 'SeriesEditNotSupported', message: err.message }, 400)
+    }
     if (err instanceof NoActorCredentialError) {
       return c.json({ error: 'ReauthRequired', message: 'sign in again before updating your class' }, 401)
     }

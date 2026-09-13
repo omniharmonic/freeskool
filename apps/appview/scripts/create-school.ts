@@ -25,6 +25,7 @@ import { defaultThresholds } from '@freeschool/shared'
 import { getDb, closeDb } from '../src/db/index.js'
 import { steward } from '../src/db/schema.js'
 import { runMigrations } from '../src/db/migrate.js'
+import { seedSkillTiers } from '../src/lib/skill-tiers.js'
 import { isMain } from '../src/lib/is-main.js'
 
 export interface CreateSchoolResult {
@@ -119,14 +120,21 @@ export async function createSchool(options?: {
     validate: false,
   })
 
+  // `fs_*` may not have been migrated yet at this point in the documented run order
+  // (README step 3 runs before step 4's `db:migrate`), so this is defensive everywhere
+  // it is needed, not just for the steward row.
+  await runMigrations().catch(() => {})
+
   // The founder is the bootstrap steward: the one role that cannot be derived.
   if (options?.stewardDid) {
-    await runMigrations().catch(() => {})
     await getDb()
       .insert(steward)
       .values({ did: options.stewardDid, schoolDid: did, appointedAt: new Date() })
       .onConflictDoNothing()
   }
+
+  // A fresh deploy enforces the Tier B gate from the moment the school exists.
+  await seedSkillTiers().catch(() => {})
 
   return {
     did,

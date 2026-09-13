@@ -6,6 +6,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb } from './helpers/pg.js'
 import { explicitTierBSlugs, seedSkillTiers, taxonomyTierBSlugs, tierOf } from '../src/lib/skill-tiers.js'
+import { resolveSkillTier } from '../src/http/routes/me.js'
 import { skillTier } from '../src/db/schema.js'
 
 let available = false
@@ -89,5 +90,32 @@ describe('tierOf', () => {
     await seedSkillTiers()
     const after = (await testDb().select().from(skillTier)).length
     expect(after).toBe(before)
+  })
+
+  it('a fresh DB has Tier B rows after boot-seed (src/index.ts and create-school.ts both call seedSkillTiers)', async () => {
+    if (!available) return
+    await testDb().delete(skillTier) // simulate a brand-new database, nothing seeded yet
+    await seedSkillTiers()
+    const rows = await testDb().select().from(skillTier)
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.some((r) => r.skillId === 'street-medicine' && r.tier === 'B')).toBe(true)
+  })
+})
+
+describe('resolveSkillTier (me.ts) fails CLOSED for an unresolvable skill', () => {
+  it('treats an unresolvable skill (no slug) as Tier B, not Tier A', async () => {
+    expect(await resolveSkillTier(undefined)).toBe('B')
+  })
+
+  it('still resolves a known, ordinary skill to Tier A', async () => {
+    if (!available) return
+    await seedSkillTiers()
+    expect(await resolveSkillTier('bicycle-repair')).toBe('A')
+  })
+
+  it('still resolves a known sensitive skill to Tier B', async () => {
+    if (!available) return
+    await seedSkillTiers()
+    expect(await resolveSkillTier('street-medicine')).toBe('B')
   })
 })

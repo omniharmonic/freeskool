@@ -201,12 +201,24 @@ export function checkPublicClaims(
   return { ok: true }
 }
 
-/** The skill AT-URI's taxonomy slug (`value.id`), for a tier lookup. Unindexed → Tier A. */
-async function tierOfSkillUri(skillUri: string): Promise<SkillTierValue> {
+/**
+ * FAILS CLOSED: a skill we cannot resolve a slug for (not indexed yet, or missing its
+ * `id`) is treated as Tier B for the public-visibility decision — we cannot verify it is
+ * safe to default-public, so we do not. `tierOf` itself still defaults an unlisted but
+ * RESOLVED skill to Tier A (most skills are ordinary); this is specifically about a
+ * skill we cannot look up at all. Split from `tierOfSkillUri` so the decision is testable
+ * without the indexer.
+ */
+export async function resolveSkillTier(skillId: string | undefined): Promise<SkillTierValue> {
+  if (!skillId) return 'B'
+  return tierOf(skillId)
+}
+
+/** The skill AT-URI's taxonomy slug (`value.id`), for a tier lookup — see `resolveSkillTier`. */
+export async function tierOfSkillUri(skillUri: string): Promise<SkillTierValue> {
   const indexer = await getIndexer()
   const skill = await getRecordByUri<{ id?: string }>(indexer, 'skill', skillUri)
-  if (!skill?.value.id) return 'A'
-  return tierOf(skill.value.id)
+  return resolveSkillTier(skill?.value.id)
 }
 
 me.put('/skill-claims', async (c) => {

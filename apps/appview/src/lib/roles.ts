@@ -18,10 +18,29 @@
 import { and, eq, isNotNull, isNull, or, sql } from 'drizzle-orm'
 import { deriveRole, Role, type Evidence } from '@freeschool/shared'
 import { getDb } from '../db/index.js'
-import { attendanceTally, custodialAccount, invite, moderationQueue, steward } from '../db/schema.js'
+import { attendanceTally, custodialAccount, invite, moderationQueue, oauthSession, steward } from '../db/schema.js'
 import { getThresholds } from './policy.js'
 import { config } from '../config.js'
 import { getIndexer } from '../index/indexer.js'
+
+/**
+ * Does this DID belong to THIS school at all — by signing in through either door, or by
+ * steward appointment? Used to decide calendar/zine inclusion by AUTHORSHIP
+ * (`http/visibility.ts#calendarInclusion`), independent of any `coop.lexicon.event.listing`
+ * (which exists for routing to PEERS, not for deciding what is ours). Deliberately
+ * narrower than `hasProfile` above: `hasIndexedRecords` counts ANY indexed record
+ * anywhere, which would wrongly call a peer school's host "ours" once their events are
+ * indexed; these three tables are specifically OUR OWN accounts.
+ */
+export async function isOwnMember(did: string): Promise<boolean> {
+  const db = getDb()
+  const [custodial, oauth, stewardRow] = await Promise.all([
+    db.select({ did: custodialAccount.did }).from(custodialAccount).where(eq(custodialAccount.did, did)).limit(1),
+    db.select({ sub: oauthSession.sub }).from(oauthSession).where(eq(oauthSession.sub, did)).limit(1),
+    db.select({ did: steward.did }).from(steward).where(eq(steward.did, did)).limit(1),
+  ])
+  return custodial.length > 0 || oauth.length > 0 || stewardRow.length > 0
+}
 
 export async function evidenceFor(did: string, schoolDid = config().SCHOOL_DID): Promise<Evidence> {
   const db = getDb()

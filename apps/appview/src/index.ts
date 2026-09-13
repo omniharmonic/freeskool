@@ -12,6 +12,7 @@ import { log } from './lib/logging.js'
 import { startJobs } from './jobs/index.js'
 import { getIndexer } from './index/indexer.js'
 import { refreshPolicyCache } from './lib/policy.js'
+import { seedSkillTiers } from './lib/skill-tiers.js'
 import { closeDb } from './db/index.js'
 import { isMain } from './lib/is-main.js'
 
@@ -20,6 +21,9 @@ export async function main(): Promise<{ close: () => Promise<void> }> {
   log.info('starting appview', redactedConfig(c))
 
   await runMigrations()
+  // Idempotent: a fresh deploy enforces the Tier B gate from the first boot, not only
+  // once an operator remembers to run it by hand.
+  await seedSkillTiers().catch((err) => log.warn('skill-tier boot-seed failed', { detail: String(err) }))
   const indexer = await getIndexer()
   await indexer.init()
   if (c.SCHOOL_DID) await refreshPolicyCache(c.SCHOOL_DID).catch(() => {})

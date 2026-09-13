@@ -14,9 +14,9 @@ import { z } from 'zod'
 import type { AppEnv } from '../session.js'
 import { getIndexer } from '../../index/indexer.js'
 import { eventsInWindow, sidecarsForEvent } from '../../index/queries.js'
-import { config } from '../../config.js'
+import { isOwnMember } from '../../lib/roles.js'
 import type { EventConfig, EventListing } from '../../lexicons/coop.js'
-import { isListed, projectEvent, type CalendarEvent, type ViewerRelation } from '../visibility.js'
+import { calendarInclusion, projectEvent, type CalendarEvent, type ViewerRelation } from '../visibility.js'
 import { viewerRelation } from '../relation.js'
 
 export const calendar = new Hono<AppEnv>()
@@ -52,17 +52,13 @@ calendar.get('/calendar', async (c) => {
       continue
     }
     const inputs = { listings: listingValues, configs: configValues }
-    if (!isListed(inputs)) continue
+    // AUTHORSHIP decides inclusion, not the listing (gap-report §A item 11: listings are
+    // for routing to peers; a host who belongs to this school is 'ours' regardless of
+    // whether the tags they chose happened to route — see http/visibility.ts).
+    const { show, origin } = calendarInclusion(await isOwnMember(e.did), inputs)
+    if (!show) continue
 
     const relation: ViewerRelation = viewer ? await viewerRelation(viewer, e.uri, e.did) : 'public'
-    // 'ours' when our own school curated or configured it; 'listed' means it reached us
-    // only through ANOTHER school's listing (peer exchange — see docs/plans/gap-report.md
-    // §A item 11; inbound consumption is not built yet, so this is almost always 'ours').
-    const schoolDid = config().SCHOOL_DID
-    const origin: 'ours' | 'listed' =
-      listingValues.some((l) => l.school === schoolDid) || configValues.some((cfg) => cfg.school === schoolDid)
-        ? 'ours'
-        : 'listed'
     out.push({ ...projectEvent(toCalendarEvent(e.uri, e.did, e.value), inputs, relation), origin })
   }
 

@@ -11,9 +11,10 @@ import { getIndexer } from '../../index/indexer.js'
 import { eventsInWindow, sidecarsForEvent } from '../../index/queries.js'
 import { config } from '../../config.js'
 import { getRecord } from '../../lib/pds.js'
+import { isOwnMember } from '../../lib/roles.js'
 import { NSID } from '../../lexicons/nsids.js'
 import type { EventConfig, EventListing } from '../../lexicons/coop.js'
-import { isListed, projectEvent, type PublicCalendarEntry } from '../visibility.js'
+import { calendarInclusion, projectEvent, type PublicCalendarEntry } from '../visibility.js'
 import { toCalendarEvent } from './calendar.js'
 
 export const zine = new Hono<AppEnv>()
@@ -83,7 +84,9 @@ zine.get('/zine/:yyyyMm', async (c) => {
       sidecarsForEvent<EventConfig>(indexer, 'eventConfig', e.uri),
     ])
     const inputs = { listings: listings.map((l) => l.value), configs: configs.map((x) => x.value) }
-    if (!isListed(inputs)) continue
+    // Same authorship-based inclusion as the calendar (see http/visibility.ts).
+    const { show } = calendarInclusion(await isOwnMember(e.did), inputs)
+    if (!show) continue
     // 'public': this endpoint has no session at all, by design (R9 — no public endpoint
     // enumerates members, and the zine is for anyone to print).
     projected.push(projectEvent(toCalendarEvent(e.uri, e.did, e.value), inputs, 'public'))
