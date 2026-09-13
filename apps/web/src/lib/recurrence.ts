@@ -127,11 +127,21 @@ function weekdayShift(startsAt: string, timezone: string): number {
   return WEEKDAY_INDEX[utcWeekdayCode(startsAt)] - WEEKDAY_INDEX[localWeekdayCode(startsAt, timezone)];
 }
 
-/** The editor's weekday picker shows LOCAL days (the host types "Thursdays");
+/**
+ * The editor's weekday picker shows LOCAL days (the host types "Thursdays");
  * this translates that choice — or the inferred default, the start date's
  * own local day — into the UTC-equivalent codes `rrule` needs to actually
  * include `dtstart` as the series' first occurrence. See `utcWeekdayCode`'s
- * doc comment for why the translation exists at all. */
+ * doc comment for why the translation exists at all.
+ *
+ * TEMPORARY, per the controller's Task 5 review ruling: this client-side
+ * shift is a workaround, not the real fix. The real fix is expanding BYDAY
+ * in the series' OWN timezone server-side (assigned to Task 12, on
+ * `apps/appview/src/jobs/materialize-series.ts`); once that lands, Task 10
+ * removes this shift entirely and sends the host's literal local-day choice
+ * unmodified. Do not build further client-side timezone logic on top of this
+ * — it is scaffolding for a backend gap, not a design to extend.
+ */
 function effectiveByDay(
   state: Pick<RecurrenceState, 'freq' | 'byDay'>,
   startsAt: string,

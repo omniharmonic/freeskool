@@ -35,6 +35,7 @@ vi.mock('../lib/api', () => {
       events: { get: vi.fn(), create: vi.fn(), update: vi.fn() },
       auth: { me: vi.fn() },
       skills: { tree: vi.fn() },
+      requests: { list: vi.fn() },
     },
     ApiError,
   };
@@ -86,6 +87,8 @@ describe('EventEditScreen', () => {
       });
     vi.mocked(api.events.update).mockReset();
     vi.mocked(api.events.get).mockReset();
+    vi.mocked(api.requests.list).mockReset().mockResolvedValue({ requests: [] });
+    window.history.pushState({}, '', '/events/new');
   });
 
   it('omits `locations` entirely when "venue needed" is checked, even after address fields were filled in', async () => {
@@ -184,5 +187,122 @@ describe('EventEditScreen', () => {
     const [id, body] = vi.mocked(api.events.update).mock.calls[0]!;
     expect(id).toBe(EVENT_URI);
     expect('series' in body).toBe(false);
+  });
+
+  it('CRITICAL FIX: editing a class and saving WITHOUT touching visibility sends no `visibility` key at all', async () => {
+    paramsReturn = { id: EVENT_URI };
+    vi.mocked(api.events.get).mockResolvedValue({
+      uri: EVENT_URI,
+      name: 'Sourdough basics',
+      startsAt: '2026-10-01T18:00:00-06:00',
+      locationRedacted: false,
+      hostDid: 'did:plc:host1',
+      venueNeeded: true,
+      tags: [],
+      listed: true,
+      skills: [],
+      rsvps: { going: 0, interested: 0 },
+      viewerRelation: 'host' as const,
+    });
+    vi.mocked(api.events.update).mockResolvedValue({
+      event: { uri: EVENT_URI, cid: 'cid9' },
+      config: { uri: 'at://did:plc:host1/coop.lexicon.event.config/cfg1', cid: 'cid2' },
+    });
+
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Edit class' });
+    // Never touch a visibility radio — this is the whole point of the test.
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(api.events.update).toHaveBeenCalled());
+    const [, body] = vi.mocked(api.events.update).mock.calls[0]!;
+    expect('visibility' in body).toBe(false);
+  });
+
+  it('edit: checking "venue needed" on a class that HAD an address sends `locations: []`, not an omitted key', async () => {
+    paramsReturn = { id: EVENT_URI };
+    vi.mocked(api.events.get).mockResolvedValue({
+      uri: EVENT_URI,
+      name: 'Sourdough basics',
+      startsAt: '2026-10-01T18:00:00-06:00',
+      locationRedacted: false,
+      hostDid: 'did:plc:host1',
+      venueNeeded: false,
+      locations: [{ name: 'Sanitas Kitchen', street: '123 Main St', locality: 'Boulder' }],
+      tags: [],
+      listed: true,
+      skills: [],
+      rsvps: { going: 0, interested: 0 },
+      viewerRelation: 'host' as const,
+    });
+    vi.mocked(api.events.update).mockResolvedValue({
+      event: { uri: EVENT_URI, cid: 'cid9' },
+      config: { uri: 'at://did:plc:host1/coop.lexicon.event.config/cfg1', cid: 'cid2' },
+    });
+
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Edit class' });
+    fireEvent.click(screen.getByLabelText(/venue needed/i));
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(api.events.update).toHaveBeenCalled());
+    const [, body] = vi.mocked(api.events.update).mock.calls[0]!;
+    expect(body.locations).toEqual([]);
+  });
+
+  it('edit: clearing the only skill sends `skills: []`, not an omitted key', async () => {
+    paramsReturn = { id: EVENT_URI };
+    vi.mocked(api.events.get).mockResolvedValue({
+      uri: EVENT_URI,
+      name: 'Sourdough basics',
+      startsAt: '2026-10-01T18:00:00-06:00',
+      locationRedacted: false,
+      hostDid: 'did:plc:host1',
+      venueNeeded: true,
+      tags: [],
+      listed: true,
+      skills: [{ skill: 'at://did:plc:school/freeschool.draft.skill/bread', level: 2 as const }],
+      rsvps: { going: 0, interested: 0 },
+      viewerRelation: 'host' as const,
+    });
+    vi.mocked(api.events.update).mockResolvedValue({
+      event: { uri: EVENT_URI, cid: 'cid9' },
+      config: { uri: 'at://did:plc:host1/coop.lexicon.event.config/cfg1', cid: 'cid2' },
+    });
+
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Edit class' });
+    expect(await screen.findByText('Bread baking')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(api.events.update).toHaveBeenCalled());
+    const [, body] = vi.mocked(api.events.update).mock.calls[0]!;
+    expect(body.skills).toEqual([]);
+  });
+
+  it('prefills title and skill from `?request=<id>` (the needs-board claim flow)', async () => {
+    const REQUEST_URI = 'at://did:plc:asker1/freeschool.draft.request/req1';
+    window.history.pushState({}, '', `/events/new?request=${encodeURIComponent(REQUEST_URI)}`);
+    vi.mocked(api.requests.list).mockResolvedValue({
+      requests: [
+        {
+          uri: REQUEST_URI,
+          askedBy: 'did:plc:asker1',
+          title: 'Someone teach me to sharpen things properly',
+          status: 'open',
+          claims: 0,
+          rsvpCount: 6,
+          viewerInterested: false,
+          skill: 'at://did:plc:school/freeschool.draft.skill/bread',
+        },
+      ],
+    });
+
+    renderScreen();
+
+    const titleInput = await screen.findByLabelText(/class title/i);
+    await waitFor(() => expect(titleInput).toHaveValue('Someone teach me to sharpen things properly'));
+    expect(await screen.findByText('Bread baking')).toBeInTheDocument();
   });
 });

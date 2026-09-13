@@ -1,8 +1,10 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from '@tanstack/react-router';
+import { useQuery } from '@tanstack/react-query';
 import { Screen } from '../components/Screen';
 import { Button, SectionHeading } from '../components/bits';
 import { SessionGate } from '../components/SessionGate';
+import { api } from '../lib/api';
 import { useEvent, useMe, useSkillTree, useCreateEventMutation, useUpdateEventMutation } from '../lib/queries';
 import {
   NO_RECURRENCE,
@@ -104,6 +106,14 @@ function EventEditForm() {
   const [startLocal, setStartLocal] = useState('');
   const [endLocal, setEndLocal] = useState('');
   const [visibility, setVisibility] = useState<'listed' | 'unlisted' | 'private'>('listed');
+  // On edit, `GET /api/events/:id` never returns the raw `visibility` enum
+  // (see `projectEvent` in `apps/appview/src/http/visibility.ts` — it only
+  // ever derives `locationRedacted`), so there is nothing to prefill and no
+  // way to know what the host's current setting even is. `visibility`'s
+  // default above is therefore meaningless until the host actually picks a
+  // radio; `onSubmit` must not send it otherwise, or editing any OTHER field
+  // would silently re-publish a private/unlisted class as listed.
+  const [visibilityTouched, setVisibilityTouched] = useState(false);
   const [venueNeeded, setVenueNeeded] = useState(false);
   const [locationName, setLocationName] = useState('');
   const [street, setStreet] = useState('');
@@ -118,6 +128,25 @@ function EventEditForm() {
   const [recurrence, setRecurrence] = useState<RecurrenceState>(NO_RECURRENCE);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+
+  // `/events/new?request=<id>` — claiming a needs-board request
+  // (`RequestsScreen.tsx`) lands here to post the class that satisfies it.
+  // There is no `GET /api/requests/:id`, only the list, so this re-fetches it
+  // and finds the one request by URI; `enabled` keeps that fetch from firing
+  // at all on a plain `/events/new` visit or on the edit route.
+  const requestId = !isEdit ? (new URLSearchParams(window.location.search).get('request') ?? undefined) : undefined;
+  const { data: prefillRequests } = useQuery({
+    queryKey: ['request-prefill', requestId],
+    queryFn: () => api.requests.list(),
+    enabled: Boolean(requestId),
+  });
+  const prefillRequest = prefillRequests?.requests.find((r) => r.uri === requestId);
+
+  useEffect(() => {
+    if (!prefillRequest) return;
+    setName((prev) => prev || prefillRequest.title);
+    if (prefillRequest.skill) setSkillUri((prev) => prev || prefillRequest.skill!);
+  }, [prefillRequest]);
 
   // Prefill once the existing class loads. Only ever runs for the edit route
   // (`existing` stays undefined on `/events/new`, where `useEvent` is disabled).
@@ -233,22 +262,31 @@ function EventEditForm() {
     const descriptionParts = [description.trim()];
     if (materials.length > 0) descriptionParts.push(`Materials:\n${materials.map((m) => `- ${m}`).join('\n')}`);
     if (suppliesNote.trim()) descriptionParts.push(`Supplies note: ${suppliesNote.trim()}`);
-    const fullDescription = descriptionParts.filter(Boolean).join('\n\n') || undefined;
+    const fullDescription = descriptionParts.filter(Boolean).join('\n\n');
 
     const capacityNum = capacity.trim() ? Number(capacity) : undefined;
 
+    // `updateEventAsHost` (`apps/appview/src/lib/events.ts`) treats an ABSENT
+    // key as "leave unchanged" but an EXPLICIT empty value as "clear it" —
+    // so on edit, `description`/`neighborhood`/`tags`/`skills`/`locations`
+    // must always be sent (even empty), or a host can never remove a
+    // description, neighbourhood, tag, skill, or flip a class to
+    // venue-needed. On create there is nothing to clear, so the condition
+    // below reduces to exactly the old "only send it if it has content"
+    // behaviour. `visibility` is the one exception — see `visibilityTouched`
+    // above.
     const body: CreateEventInput = {
       name: name.trim(),
-      ...(fullDescription ? { description: fullDescription } : {}),
+      ...(isEdit || fullDescription ? { description: fullDescription } : {}),
       startsAt,
       ...(endsAt ? { endsAt } : {}),
       timezone,
       ...(typeof capacityNum === 'number' && !Number.isNaN(capacityNum) ? { capacity: capacityNum } : {}),
-      visibility,
-      ...(neighborhood.trim() ? { neighborhood: neighborhood.trim() } : {}),
-      ...(tags.length > 0 ? { tags } : {}),
-      ...(skillUri ? { skills: [{ skill: skillUri, level }] } : {}),
-      ...(locations ? { locations } : {}),
+      ...(!isEdit || visibilityTouched ? { visibility } : {}),
+      ...(isEdit || neighborhood.trim() ? { neighborhood: neighborhood.trim() } : {}),
+      ...(isEdit || tags.length > 0 ? { tags } : {}),
+      ...(isEdit || skillUri ? { skills: skillUri ? [{ skill: skillUri, level }] : [] } : {}),
+      ...(isEdit || locations ? { locations: locations ?? [] } : {}),
     };
 
     setSubmitting(true);
@@ -463,25 +501,42 @@ function EventEditForm() {
 
             <fieldset className="mt-4">
               <legend className={labelText}>Who can find this class</legend>
+              {isEdit && !visibilityTouched ? (
+                <p className="mt-1 text-caption text-ink-faint">
+                  Current visibility is kept unless you change it.
+                </p>
+              ) : null}
               <div className="mt-1.5 space-y-2">
                 <VisibilityOption
                   value="listed"
                   current={visibility}
-                  onSelect={setVisibility}
+                  preselected={!isEdit || visibilityTouched}
+                  onSelect={(v) => {
+                    setVisibility(v);
+                    setVisibilityTouched(true);
+                  }}
                   title="Listed"
                   detail="Title, time and neighbourhood are public; the exact address goes to people who RSVP."
                 />
                 <VisibilityOption
                   value="unlisted"
                   current={visibility}
-                  onSelect={setVisibility}
+                  preselected={!isEdit || visibilityTouched}
+                  onSelect={(v) => {
+                    setVisibility(v);
+                    setVisibilityTouched(true);
+                  }}
                   title="Unlisted"
                   detail="Only people with the link."
                 />
                 <VisibilityOption
                   value="private"
                   current={visibility}
-                  onSelect={setVisibility}
+                  preselected={!isEdit || visibilityTouched}
+                  onSelect={(v) => {
+                    setVisibility(v);
+                    setVisibilityTouched(true);
+                  }}
                   title="Private"
                   detail="Only you and the school's stewards."
                 />
@@ -705,12 +760,16 @@ function EventEditForm() {
 function VisibilityOption({
   value,
   current,
+  preselected,
   onSelect,
   title,
   detail,
 }: {
   value: 'listed' | 'unlisted' | 'private';
   current: 'listed' | 'unlisted' | 'private';
+  /** False shows the radio group with NOTHING checked — the edit screen's
+   * "nothing was actively chosen yet" state (see `visibilityTouched`). */
+  preselected: boolean;
   onSelect: (v: 'listed' | 'unlisted' | 'private') => void;
   title: string;
   detail: string;
@@ -721,7 +780,7 @@ function VisibilityOption({
         type="radio"
         name="visibility"
         className="mt-1"
-        checked={current === value}
+        checked={preselected && current === value}
         onChange={() => onSelect(value)}
       />
       <span>
