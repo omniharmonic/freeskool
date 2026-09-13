@@ -19,11 +19,23 @@ if (!HTMLDialogElement.prototype.showModal) {
 vi.mock('@tanstack/react-router', () => ({
   useParams: vi.fn(() => ({ id: EVENT_URI })),
   useRouter: vi.fn(() => ({ history: { back: vi.fn() } })),
-  Link: ({ to, children, ...rest }: { to: string; children?: ReactNode }) => (
-    <a href={to} {...rest}>
-      {children}
-    </a>
-  ),
+  Link: ({
+    to,
+    params,
+    children,
+    ...rest
+  }: {
+    to: string;
+    params?: Record<string, string>;
+    children?: ReactNode;
+  }) => {
+    const href = params ? Object.entries(params).reduce((acc, [k, v]) => acc.replace(`$${k}`, v), to) : to;
+    return (
+      <a href={href} {...rest}>
+        {children}
+      </a>
+    );
+  },
   Navigate: () => null,
 }));
 
@@ -202,6 +214,36 @@ describe('EventScreen', () => {
     vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, origin: 'listed' });
     renderScreen();
     expect(await screen.findByText('Listed from another school')).toBeInTheDocument();
+  });
+
+  it('shows "Leave feedback" for a past class the viewer attended, and not otherwise', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({
+      ...baseEvent,
+      startsAt: '2020-01-01T18:30:00-06:00',
+      endsAt: '2020-01-01T20:00:00-06:00',
+      viewerRelation: 'attendee',
+    });
+    renderScreen();
+    expect(await screen.findByRole('link', { name: /leave feedback/i })).toHaveAttribute(
+      'href',
+      `/events/${EVENT_URI}/feedback`,
+    );
+  });
+
+  it('hides "Leave feedback" for an attendee of a class that has not happened yet', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'attendee' });
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+    expect(screen.queryByRole('link', { name: /leave feedback/i })).not.toBeInTheDocument();
+  });
+
+  it('shows "See feedback summary" for the host', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host' });
+    renderScreen();
+    expect(await screen.findByRole('link', { name: /see feedback summary/i })).toHaveAttribute(
+      'href',
+      `/events/${EVENT_URI}/feedback-summary`,
+    );
   });
 
   it('shows no origin marker for a class hosted at this school', async () => {

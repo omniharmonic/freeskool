@@ -12,6 +12,7 @@ import type {
   AttendanceRow,
   CreateEventInput,
   CreateRequestInput,
+  FeedbackInput,
   NotificationPref,
   RequestClaimInput,
   RsvpSetInput,
@@ -222,6 +223,18 @@ export function useFeedbackSummary(id: string | undefined) {
     queryKey: ['feedback-summary', id],
     queryFn: () => api.feedback.summary(id as string),
     enabled: Boolean(id),
+  });
+}
+
+/** `POST /api/feedback` — a single anonymous ballot. Invalidates the
+ * event's summary so a host watching it live sees the new count. */
+export function useFeedbackSubmitMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: FeedbackInput) => api.feedback.submit(body),
+    onSuccess: (_data, body) => {
+      void queryClient.invalidateQueries({ queryKey: ['feedback-summary', body.eventUri] });
+    },
   });
 }
 

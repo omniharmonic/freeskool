@@ -414,8 +414,12 @@ export interface FeedbackSummary {
   released: boolean;
   positive?: number;
   negative?: number;
-  aspects?: Record<string, { mean: number }>;
+  aspects?: Partial<Record<'knowledge' | 'teaching' | 'experience', { mean: number; n: number }>>;
   textK?: number;
+  /** Free text needs a higher k than the numeric aggregate before it is shown at all. */
+  textReleased?: boolean;
+  /** Only present once `textReleased` is true. */
+  texts?: string[];
   [key: string]: unknown;
 }
 

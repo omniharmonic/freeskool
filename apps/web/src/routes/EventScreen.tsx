@@ -69,6 +69,8 @@ export function EventScreen() {
 
   const start = event.startsAt ? new Date(event.startsAt) : null;
   const locations = event.locations ?? [];
+  const endsAt = event.endsAt ? new Date(event.endsAt) : start;
+  const isPast = Boolean(endsAt && endsAt.getTime() < Date.now());
 
   return (
     <Screen title={event.name} back>
@@ -137,26 +139,55 @@ export function EventScreen() {
           <EventActions event={event} />
         </SessionGate>
 
+        {/* Task 7: an attendee may leave one anonymous ballot, once the class
+            has happened and the host checked them off (`viewerRelation` is
+            only ever 'attendee' once attendance is confirmed — see
+            `relation.ts`). The server is the real gate; this is just when to
+            show the door. */}
+        {event.viewerRelation === 'attendee' && isPast ? (
+          <div className="mt-6">
+            <Link
+              to="/events/$id/feedback"
+              params={{ id: event.uri }}
+              className="plate plate-press plate-pink display inline-flex w-full items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
+              style={{ background: 'var(--c-pink)', color: 'var(--c-on-pink)' }}
+            >
+              Leave feedback
+            </Link>
+          </div>
+        ) : null}
+
         {/* Task 5: host-only management. `viewerRelation` already comes straight
             from `GET /api/events/:id` (`projectEvent`), so there is nothing
             further to gate on here. */}
         {event.viewerRelation === 'host' ? (
-          <div className="mt-6 grid grid-cols-2 gap-3">
+          <div className="mt-6 space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <Link
+                to="/events/$id/edit"
+                params={{ id: event.uri }}
+                className="plate plate-press plate-ink display inline-flex items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
+                style={{ background: 'var(--c-paper-2)', color: 'var(--c-ink)' }}
+              >
+                Edit this class
+              </Link>
+              <Link
+                to="/events/$id/attendance"
+                params={{ id: event.uri }}
+                className="plate plate-press plate-ink display inline-flex items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
+                style={{ background: 'var(--c-paper-2)', color: 'var(--c-ink)' }}
+              >
+                Check off attendance
+              </Link>
+            </div>
+            {/* Task 7: the host's only view of feedback — a k-anonymous summary, never raw rows. */}
             <Link
-              to="/events/$id/edit"
+              to="/events/$id/feedback-summary"
               params={{ id: event.uri }}
-              className="plate plate-press plate-ink display inline-flex items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
+              className="plate plate-press plate-ink display inline-flex w-full items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
               style={{ background: 'var(--c-paper-2)', color: 'var(--c-ink)' }}
             >
-              Edit this class
-            </Link>
-            <Link
-              to="/events/$id/attendance"
-              params={{ id: event.uri }}
-              className="plate plate-press plate-ink display inline-flex items-center justify-center gap-2 px-4 py-2.5 text-center text-[16px] leading-tight font-bold"
-              style={{ background: 'var(--c-paper-2)', color: 'var(--c-ink)' }}
-            >
-              Check off attendance
+              See feedback summary
             </Link>
           </div>
         ) : null}

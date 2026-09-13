@@ -6,6 +6,8 @@ import { CalendarScreen } from './routes/CalendarScreen';
 import { EventRedirect, EventScreen } from './routes/EventScreen';
 import { EventEditScreen } from './routes/EventEditScreen';
 import { AttendanceScreen } from './routes/AttendanceScreen';
+import { FeedbackScreen } from './routes/FeedbackScreen';
+import { FeedbackSummaryScreen } from './routes/FeedbackSummaryScreen';
 import { SkillsScreen } from './routes/SkillsScreen';
 import { SkillScreen } from './routes/SkillScreen';
 import { RequestsScreen } from './routes/RequestsScreen';
@@ -57,12 +59,12 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/events/new', component: EventEditScreen }), // Task 5
   createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/edit', component: EventEditScreen }), // Task 5
   createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/attendance', component: AttendanceScreen }), // Task 5
-  createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/feedback', component: Placeholder }), // Task 7
+  createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/feedback', component: FeedbackScreen }),
   createRoute({
     getParentRoute: () => rootRoute,
     path: '/events/$id/feedback-summary',
-    component: Placeholder,
-  }), // Task 7
+    component: FeedbackSummaryScreen,
+  }),
   createRoute({ getParentRoute: () => rootRoute, path: '/invite/$token', component: InviteScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/me/settings', component: NotificationSettingsScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin', component: Placeholder }), // Task 8
