@@ -25,6 +25,7 @@ const samples = {
   'freeschool.draft.skillLevel': { $type:'freeschool.draft.skillLevel', event:sref, skill:'at://did:plc:abc/freeschool.draft.skill/bicycle-repair', level:2, prerequisites:'Bring your own bike.', createdAt: now },
   'freeschool.draft.series': { $type:'freeschool.draft.series', firstEvent:sref, rrule:'FREQ=WEEKLY;INTERVAL=1;BYDAY=TH;COUNT=8', freq:'weekly', interval:1, byDay:['TH'], count:8, timezone:'America/Denver', materializeAhead:60, createdAt: now },
   'freeschool.draft.occurrence': { $type:'freeschool.draft.occurrence', event:sref, series:sref, originalStartsAt: now, sequence:3, createdAt: now },
+  'freeschool.draft.approval': { $type:'freeschool.draft.approval', proposal:'at://did:plc:school/freeschool.draft.moderationAction/3k', action:'remove-listing', reason:'Duplicate listing', createdAt: now },
   'freeschool.draft.school': { $type:'freeschool.draft.school', name:'Free School Boulder', region:'Boulder, CO', peers:['did:plc:cohere'], tags:['skillshare','free-school'], createdAt: now },
 }
 let failed = 0
