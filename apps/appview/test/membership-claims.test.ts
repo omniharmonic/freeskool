@@ -30,12 +30,16 @@ interface PutCall {
   rkey: string
   record: unknown
   callerDid: string
+  swapRecord?: string | null
 }
 interface DeleteCall {
   collection: string
   rkey: string
   callerDid: string
 }
+
+/** No existing record — the common "first publish" case. Avoids a real PDS round-trip. */
+const noExisting = { fetchExistingCid: async () => undefined }
 
 function fakePort(puts: PutCall[], deletes: DeleteCall[]): SchoolActorPort {
   return {
@@ -46,7 +50,16 @@ function fakePort(puts: PutCall[], deletes: DeleteCall[]): SchoolActorPort {
       throw new Error('not used by this test')
     },
     async putRecordAsSchool(i) {
-      puts.push({ collection: i.collection, rkey: i.rkey, record: i.record, callerDid: i.callerDid })
+      // Mirrors the real wire behavior (packages/school-actor/src/app-custody.ts): only
+      // carry a `swapRecord` key at all when the caller actually passed one, so `'in'`
+      // checks below reflect presence/absence, not "present but undefined".
+      puts.push({
+        collection: i.collection,
+        rkey: i.rkey,
+        record: i.record,
+        callerDid: i.callerDid,
+        ...(i.swapRecord !== undefined ? { swapRecord: i.swapRecord } : {}),
+      })
       return { uri: `at://${i.schoolDid}/${i.collection}/${i.rkey}`, cid: 'bafyx', auditId: 'audit-1' }
     },
     async deleteRecordAsSchool(i) {
@@ -142,7 +155,7 @@ describe('publishRoleClaim: both flags required (live Postgres)', () => {
     const puts: PutCall[] = []
     const deletes: DeleteCall[] = []
     setSchoolActor(fakePort(puts, deletes))
-    const res = await publishRoleClaim(SCHOOL, SUBJECT, Role.Host)
+    const res = await publishRoleClaim(SCHOOL, SUBJECT, Role.Host, noExisting)
 
     expect(res.published).toBe(true)
     expect(puts.length).toBe(1)
@@ -150,6 +163,9 @@ describe('publishRoleClaim: both flags required (live Postgres)', () => {
     expect(puts[0]!.rkey).toBe(membershipClaimRkey(SCHOOL, SUBJECT))
     expect(puts[0]!.callerDid).toBe(SUBJECT)
     expect(puts[0]!.record).toMatchObject({ subject: SUBJECT, role: Role.Host, school: SCHOOL, addedBy: SCHOOL })
+    // a first publish has nothing to CAS against — swapRecord is omitted, not null
+    // (an explicit null would assert "must not exist" and fail every future update).
+    expect('swapRecord' in puts[0]!).toBe(false)
   })
 
   it('two derivations (e.g. a second hosted event) yield ONE record: the same rkey both times', async () => {
@@ -160,12 +176,27 @@ describe('publishRoleClaim: both flags required (live Postgres)', () => {
     const deletes: DeleteCall[] = []
     setSchoolActor(fakePort(puts, deletes))
 
-    await publishRoleClaim(SCHOOL, SUBJECT, Role.Host)
-    await publishRoleClaim(SCHOOL, SUBJECT, Role.Facilitator)
+    await publishRoleClaim(SCHOOL, SUBJECT, Role.Host, noExisting)
+    await publishRoleClaim(SCHOOL, SUBJECT, Role.Facilitator, { fetchExistingCid: async () => 'bafy-from-first-publish' })
 
     expect(puts.length).toBe(2)
     expect(puts[0]!.rkey).toBe(puts[1]!.rkey)
     expect(puts[0]!.collection).toBe(puts[1]!.collection)
+  })
+
+  it('updating an existing claim (e.g. Host -> Facilitator) passes the CURRENT cid as swapRecord — a CAS, not an overwrite', async () => {
+    if (!available) return
+    await setPublishRoles(true)
+    await setPublicRoleOptIn(SUBJECT, true)
+    const puts: PutCall[] = []
+    const deletes: DeleteCall[] = []
+    setSchoolActor(fakePort(puts, deletes))
+
+    const res = await publishRoleClaim(SCHOOL, SUBJECT, Role.Facilitator, { fetchExistingCid: async () => 'bafy-prior-version' })
+    expect(res.published).toBe(true)
+    expect(puts.length).toBe(1)
+    expect(puts[0]!.swapRecord).toBe('bafy-prior-version')
+    expect(puts[0]!.record).toMatchObject({ role: Role.Facilitator })
   })
 
   it('opting back out (setPublicRoleOptIn false) retracts any published claim at the same rkey', async () => {
@@ -176,7 +207,7 @@ describe('publishRoleClaim: both flags required (live Postgres)', () => {
     const deletes: DeleteCall[] = []
     setSchoolActor(fakePort(puts, deletes))
 
-    await publishRoleClaim(SCHOOL, SUBJECT, Role.Host)
+    await publishRoleClaim(SCHOOL, SUBJECT, Role.Host, noExisting)
     expect(puts.length).toBe(1)
 
     await setPublicRoleOptIn(SUBJECT, false)
@@ -196,7 +227,7 @@ describe('publishRoleClaim: both flags required (live Postgres)', () => {
     const deletes: DeleteCall[] = []
     setSchoolActor(fakePort(puts, deletes))
 
-    await publishRoleClaim(SCHOOL, SUBJECT, Role.Host)
+    await publishRoleClaim(SCHOOL, SUBJECT, Role.Host, noExisting)
     expect(puts.length).toBe(1)
 
     const res = await publishRoleClaim(SCHOOL, SUBJECT, Role.Member)

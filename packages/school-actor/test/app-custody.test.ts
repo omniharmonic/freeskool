@@ -58,4 +58,25 @@ describe('AppCustodyAdapter', () => {
     await expect(adapter.actAs({ schoolDid: school, callerDid: steward1, scope: 's', action: 'publish-event', method: 'POST', nsid: 'n', audit: { reason: '   ' } })).rejects.toThrow(/reason/)
     await expect(adapter.actAs({ schoolDid: school, callerDid: steward1, scope: '', action: 'publish-event', method: 'POST', nsid: 'n', audit: { reason: 'ok' } })).rejects.toThrow(/scope/)
   })
+  it('putRecordAsSchool omits swapRecord entirely when the caller passes none — an ordinary upsert, not an existence assertion', async () => {
+    const { adapter, calls } = make(roles)
+    await adapter.putRecordAsSchool({ schoolDid: school, callerDid: host, scope: 's', action: 'publish-event', collection: 'c', rkey: 'r', record: { x: 1 }, audit: { reason: 'ok' } })
+    const body = (calls[0] as { body: Record<string, unknown> }).body
+    // NOT `swapRecord: null` (which would assert "must not already exist" and break
+    // every update-in-place, e.g. a re-derived coop.lexicon.membership claim).
+    expect('swapRecord' in body).toBe(false)
+  })
+  it('putRecordAsSchool passes swapRecord through untouched when the caller does provide one', async () => {
+    const { adapter, calls } = make(roles)
+    await adapter.putRecordAsSchool({ schoolDid: school, callerDid: host, scope: 's', action: 'publish-event', collection: 'c', rkey: 'r', record: { x: 1 }, swapRecord: 'bafycid123', audit: { reason: 'ok' } })
+    const body = (calls[0] as { body: Record<string, unknown> }).body
+    expect(body.swapRecord).toBe('bafycid123')
+  })
+  it('putRecordAsSchool sends an explicit null swapRecord when the caller passes null (an intentional "must not exist yet" assertion)', async () => {
+    const { adapter, calls } = make(roles)
+    await adapter.putRecordAsSchool({ schoolDid: school, callerDid: host, scope: 's', action: 'publish-event', collection: 'c', rkey: 'r', record: { x: 1 }, swapRecord: null, audit: { reason: 'ok' } })
+    const body = (calls[0] as { body: Record<string, unknown> }).body
+    expect('swapRecord' in body).toBe(true)
+    expect(body.swapRecord).toBeNull()
+  })
 })
