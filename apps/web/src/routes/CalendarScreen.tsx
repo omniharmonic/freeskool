@@ -1,12 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { events, school } from '../lib/mock';
+import { events, school, USE_MOCK } from '../lib/mock';
 import { dayKey, formatDayStamp, formatWeekday, groupByDay, monthDays } from '../lib/dates';
 import { Screen } from '../components/Screen';
 import { EventCard } from '../components/EventCard';
 
+// Not wired to `useCalendar` yet (Task 4) — real data defaults to empty
+// rather than showing the mock month once USE_MOCK is off.
+const calendarEvents = USE_MOCK ? events : [];
+
 export function CalendarScreen() {
-  const groups = useMemo(() => groupByDay(events, (event) => event.startsAt), []);
+  const groups = useMemo(() => groupByDay(calendarEvents, (event) => event.startsAt), []);
   const dayRefs = useRef(new Map<string, HTMLElement>());
   const [focused, setFocused] = useState<string | null>(groups[0]?.key ?? null);
 

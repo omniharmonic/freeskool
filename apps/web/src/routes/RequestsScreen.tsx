@@ -1,9 +1,13 @@
 import { useState } from 'react';
-import { requests as seed, skills, type LearningRequest } from '../lib/mock';
+import { requests as mockRequests, skills, USE_MOCK, type LearningRequest } from '../lib/mock';
 import { Screen } from '../components/Screen';
 import { Sheet } from '../components/Sheet';
 import { Button, SkillChip, ThresholdRule } from '../components/bits';
-import { claimRequest, createRequest } from '../lib/api';
+import { api } from '../lib/api';
+
+// Not wired to `useRequests` yet (Task 6) — real data defaults to empty
+// rather than showing the mock board once USE_MOCK is off.
+const seed: LearningRequest[] = USE_MOCK ? mockRequests : [];
 
 export function RequestsScreen() {
   const [list, setList] = useState<LearningRequest[]>(seed);
@@ -17,6 +21,7 @@ export function RequestsScreen() {
       else next.add(request.uri);
       return next;
     });
+    void api.requests.rsvp(request.uri).catch(() => undefined);
   };
 
   const onClaim = async (request: LearningRequest) => {
@@ -25,7 +30,7 @@ export function RequestsScreen() {
         candidate.uri === request.uri ? { ...candidate, status: 'claimed', claimedBy: 'You' } : candidate,
       ),
     );
-    await claimRequest(request.uri);
+    await api.requests.claim(request.uri, {}).catch(() => undefined);
   };
 
   return (
@@ -84,14 +89,16 @@ export function RequestsScreen() {
   );
 }
 
+const skillOptions = USE_MOCK ? skills : [];
+
 function ComposerSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
-  const [skillId, setSkillId] = useState(skills[0]?.id ?? '');
+  const [skillId, setSkillId] = useState(skillOptions[0]?.id ?? '');
   const [sent, setSent] = useState(false);
 
   const submit = async () => {
-    await createRequest({ title, description, skillId });
+    await api.requests.create({ title, description, skill: skillId || undefined }).catch(() => undefined);
     setSent(true);
   };
 
@@ -154,7 +161,7 @@ function ComposerSheet({ open, onClose }: { open: boolean; onClose: () => void }
           <label className="mt-4 block">
             <span className="text-caption text-ink-soft">Closest skill</span>
             <select className={field} value={skillId} onChange={(event) => setSkillId(event.target.value)}>
-              {skills.map((skill) => (
+              {skillOptions.map((skill) => (
                 <option key={skill.id} value={skill.id}>
                   {skill.label}
                 </option>

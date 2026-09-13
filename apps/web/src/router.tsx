@@ -10,6 +10,7 @@ import { RequestsScreen } from './routes/RequestsScreen';
 import { MeScreen } from './routes/MeScreen';
 import { SignInScreen } from './routes/SignInScreen';
 import { ZineScreen } from './routes/ZineScreen';
+import { Placeholder } from './routes/Placeholder';
 
 /** The zine and the sign-in screen are the two places without tabs. */
 const CHROMELESS = ['/zine', '/signin'];
@@ -37,6 +38,29 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/me', component: MeScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/signin', component: SignInScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/zine', component: ZineScreen }),
+
+  // Registered here as placeholders; each is replaced by its real screen in
+  // the task named in the plan (`.superpowers/sdd/mvp-plan/task-*-brief.md`).
+  createRoute({ getParentRoute: () => rootRoute, path: '/verify', component: Placeholder }), // Task 3
+  createRoute({ getParentRoute: () => rootRoute, path: '/oauth/confirm', component: Placeholder }), // Task 3
+  createRoute({ getParentRoute: () => rootRoute, path: '/events/new', component: Placeholder }), // Task 5
+  createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/edit', component: Placeholder }), // Task 5
+  createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/attendance', component: Placeholder }), // Task 5
+  createRoute({ getParentRoute: () => rootRoute, path: '/events/$id/feedback', component: Placeholder }), // Task 7
+  createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/events/$id/feedback-summary',
+    component: Placeholder,
+  }), // Task 7
+  createRoute({ getParentRoute: () => rootRoute, path: '/invite/$token', component: Placeholder }), // Task 4
+  createRoute({ getParentRoute: () => rootRoute, path: '/me/settings', component: Placeholder }), // Task 6
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin', component: Placeholder }), // Task 8
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/policy', component: Placeholder }), // Task 8
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/moderation', component: Placeholder }), // Task 8
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/peers', component: Placeholder }), // Task 8
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/newsletter', component: Placeholder }), // Task 8
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/handoff', component: Placeholder }), // Task 10
+  createRoute({ getParentRoute: () => rootRoute, path: '/how-it-works', component: Placeholder }), // Task 10
 ];
 
 export const router = createRouter({

@@ -1,10 +1,16 @@
 import { useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { areas, domains, skills } from '../lib/mock';
+import { areas, domains, skills, USE_MOCK } from '../lib/mock';
 import { Screen } from '../components/Screen';
 
+// Not wired to `useSkillTree` yet (Task 6) — real data defaults to empty
+// rather than showing the mock taxonomy once USE_MOCK is off.
+const domainPool = USE_MOCK ? domains : [];
+const areaPool = USE_MOCK ? areas : {};
+const skillPool = USE_MOCK ? skills : [];
+
 export function SkillsScreen() {
-  const [open, setOpen] = useState<string | null>(domains[0].id);
+  const [open, setOpen] = useState<string | null>(domainPool[0]?.id ?? null);
 
   return (
     <Screen
@@ -12,7 +18,7 @@ export function SkillsScreen() {
       standfirst="Everything anyone here has offered to teach, filed the way people actually talk about it."
     >
       <div className="safe-x mt-4 space-y-4">
-        {domains.map((domain) => {
+        {domainPool.map((domain) => {
           const expanded = open === domain.id;
           return (
             <section key={domain.id} className="plate plate-blue overflow-hidden">
@@ -41,14 +47,14 @@ export function SkillsScreen() {
               {expanded ? (
                 <div className="border-t-[1.5px] border-rule">
                   {domain.areas.map((areaId) => {
-                    const area = areas[areaId];
+                    const area = areaPool[areaId];
                     if (!area) return null;
                     return (
                       <div key={areaId} className="border-b-[1.5px] border-rule px-4 py-3 last:border-b-0">
                         <p className="stamp text-[13px] text-ink-soft">{area.label}</p>
                         <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
                           {[...new Set(area.skills)].map((skillId) => {
-                            const skill = skills.find((candidate) => candidate.id === skillId);
+                            const skill = skillPool.find((candidate) => candidate.id === skillId);
                             if (!skill) return null;
                             return (
                               <li key={skillId}>

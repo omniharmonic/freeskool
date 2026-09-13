@@ -1,16 +1,20 @@
 import { useState } from 'react';
 import { Link, useParams } from '@tanstack/react-router';
-import { events, LEVEL_LABEL } from '../lib/mock';
+import { events, LEVEL_LABEL, USE_MOCK } from '../lib/mock';
 import { formatDayStamp, formatTimeRange } from '../lib/dates';
 import { Screen } from '../components/Screen';
 import { HostCard, eventId, onInk } from '../components/EventCard';
 import { Button, LevelDots, SkillChip } from '../components/bits';
 import { useInstallFlow } from '../components/InstallNudge';
-import { icsHref, inviteHref, rsvp } from '../lib/api';
+import { api } from '../lib/api';
+
+// Not wired to `useEvent` yet (Task 4) — real data defaults to empty rather
+// than showing the mock shell once USE_MOCK is off.
+const pool = USE_MOCK ? events : [];
 
 export function EventScreen() {
   const { eventId: id } = useParams({ from: '/event/$eventId' });
-  const event = events.find((candidate) => eventId(candidate.uri) === id);
+  const event = pool.find((candidate) => eventId(candidate.uri) === id);
   const [going, setGoing] = useState(false);
   const [shared, setShared] = useState<string | null>(null);
   const [showSupplies, setShowSupplies] = useState(false);
@@ -36,8 +40,21 @@ export function EventScreen() {
   const onRsvp = async () => {
     const next = !going;
     setGoing(next);
-    await rsvp(event.uri, next);
+    await api.rsvp.set(event.uri, { status: next ? 'going' : 'notgoing' }).catch(() => undefined);
     if (next) afterRsvp(); // the nudge asks after value, never on arrival
+  };
+
+  const onInvite = async () => {
+    const minted = await api.invites.mint({ eventUri: event.uri }).catch(() => null);
+    if (!minted) return;
+    if (navigator.share) {
+      navigator.share({ title: event.name, url: minted.url }).catch(() => undefined);
+    } else {
+      navigator.clipboard?.writeText(minted.url).then(
+        () => setShared('Invite link copied'),
+        () => undefined,
+      );
+    }
   };
 
   const onShare = () => {
@@ -160,7 +177,7 @@ export function EventScreen() {
 
           <div className="grid grid-cols-2 gap-3">
             {/* A real navigation, no download attribute: iOS hands .ics to Calendar. */}
-            <Button href={icsHref(event.uri)} variant="quiet" ink="ink">
+            <Button href={api.events.icsHref(event.uri)} variant="quiet" ink="ink">
               Add to calendar
             </Button>
             <Button onClick={onShare} variant="quiet" ink="ink">
@@ -168,7 +185,7 @@ export function EventScreen() {
             </Button>
           </div>
 
-          <Button href={inviteHref(event.uri)} variant="quiet" ink="green" wide>
+          <Button onClick={() => void onInvite()} variant="quiet" ink="green" wide>
             Bring a friend
           </Button>
           {shared ? <p className="text-caption text-ink-soft">{shared}</p> : null}

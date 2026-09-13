@@ -1,12 +1,19 @@
 import { Link, useParams } from '@tanstack/react-router';
-import { events, requests, resources, skills } from '../lib/mock';
+import { events, requests, resources, skills, USE_MOCK } from '../lib/mock';
 import { Screen } from '../components/Screen';
 import { EventCard } from '../components/EventCard';
 import { Button, SkillChip, ThresholdRule } from '../components/bits';
 
+// Not wired to `useSkill`/`useSkillTree` yet (Task 6) — real data defaults to
+// empty rather than showing the mock taxonomy once USE_MOCK is off.
+const skillPool = USE_MOCK ? skills : [];
+const eventPool = USE_MOCK ? events : [];
+const requestPool = USE_MOCK ? requests : [];
+const resourcePool = USE_MOCK ? resources : {};
+
 export function SkillScreen() {
   const { skillId } = useParams({ from: '/skills/$skillId' });
-  const skill = skills.find((candidate) => candidate.id === skillId);
+  const skill = skillPool.find((candidate) => candidate.id === skillId);
 
   if (!skill) {
     return (
@@ -23,9 +30,9 @@ export function SkillScreen() {
     );
   }
 
-  const upcoming = events.filter((event) => event.skill.id === skill.id);
-  const open = requests.filter((request) => request.skill.id === skill.id && request.status !== 'scheduled');
-  const links = resources[skill.id] ?? [];
+  const upcoming = eventPool.filter((event) => event.skill.id === skill.id);
+  const open = requestPool.filter((request) => request.skill.id === skill.id && request.status !== 'scheduled');
+  const links = resourcePool[skill.id] ?? [];
 
   return (
     <Screen title={skill.label} back>

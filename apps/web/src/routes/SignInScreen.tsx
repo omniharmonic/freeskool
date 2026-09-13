@@ -3,7 +3,7 @@ import { useNavigate } from '@tanstack/react-router';
 import { school } from '../lib/mock';
 import { Sheet } from '../components/Sheet';
 import { Button } from '../components/bits';
-import { startExistingAccount, startNewIdentity } from '../lib/api';
+import { api } from '../lib/api';
 
 /**
  * Two doors, in R9's order: a new Free School identity first, an existing
@@ -18,15 +18,18 @@ export function SignInScreen() {
   const [confirming, setConfirming] = useState(false);
   const navigate = useNavigate();
 
+  // A real email-based signup flow lands in Task 3 (VerifyScreen, "check your
+  // email" states); this keeps the shell working against the real endpoint
+  // in the meantime.
   const createIdentity = async () => {
-    await startNewIdentity(handle);
+    await api.auth.signup({ email: handle }).catch(() => undefined);
     void navigate({ to: '/me' });
   };
 
-  const useExisting = async () => {
-    await startExistingAccount(handle);
+  const useExisting = () => {
     setConfirming(false);
-    void navigate({ to: '/me' });
+    // `oauth/start` is a GET that redirects the browser; it is not a fetch.
+    window.location.href = api.auth.oauthStartUrl(true);
   };
 
   return (

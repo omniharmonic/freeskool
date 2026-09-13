@@ -1,9 +1,13 @@
 import { useMemo, useState } from 'react';
 import { Link } from '@tanstack/react-router';
-import { events, school } from '../lib/mock';
+import { events, school, USE_MOCK } from '../lib/mock';
 import { formatTimeRange, groupByDay } from '../lib/dates';
 
 type Trim = 'letter' | 'a4';
+
+// Not wired to `api.zine.month` yet (Task 4) — real data defaults to empty
+// rather than showing the mock month once USE_MOCK is off.
+const zineEvents = USE_MOCK ? events : [];
 
 /**
  * The monthly print zine: a photocopied free-school calendar.
@@ -15,7 +19,7 @@ type Trim = 'letter' | 'a4';
  */
 export function ZineScreen() {
   const [trim, setTrim] = useState<Trim>('letter');
-  const groups = useMemo(() => groupByDay(events, (event) => event.startsAt), []);
+  const groups = useMemo(() => groupByDay(zineEvents, (event) => event.startsAt), []);
   const weekdayFormat = new Intl.DateTimeFormat('en-US', { weekday: 'long' });
 
   return (

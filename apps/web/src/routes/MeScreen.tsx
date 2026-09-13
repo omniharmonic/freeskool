@@ -5,7 +5,7 @@ import { applyPrefs, readPrefs, writePrefs, type ThemeChoice } from '../lib/pref
 import { Screen } from '../components/Screen';
 import { Button, LevelDots, SkillChip, Toggle } from '../components/bits';
 import { useInstallFlow } from '../components/InstallNudge';
-import { signOut } from '../lib/api';
+import { api } from '../lib/api';
 
 export function MeScreen() {
   const [prefs, setPrefs] = useState(readPrefs);
@@ -150,7 +150,7 @@ export function MeScreen() {
             variant="quiet"
             ink="ink"
             onClick={() => {
-              void signOut();
+              void api.auth.logout().catch(() => undefined);
               void navigate({ to: '/signin' });
             }}
           >

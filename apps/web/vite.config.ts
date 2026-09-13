@@ -47,4 +47,14 @@ export default defineConfig({
     }),
   ],
   build: { target: 'es2022', sourcemap: false },
+  server: {
+    proxy: {
+      // The AppView's session cookie is `SameSite=Lax`; proxying keeps the
+      // PWA and the API on the same origin in dev so the cookie round-trips
+      // without `changeOrigin` rewriting the Host header the AppView's CORS
+      // check and OAuth client metadata both key off of.
+      '/api': { target: 'http://localhost:4000', changeOrigin: false },
+      '/oauth': { target: 'http://localhost:4000', changeOrigin: false },
+    },
+  },
 });
