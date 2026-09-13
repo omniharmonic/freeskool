@@ -1,6 +1,8 @@
-# Skill taxonomy seed (from research brief R5, 2026-09-12)
+# Skill taxonomy seed (from research brief R5, 2026-09-12; expanded 2026-09-13)
 
-`skills-seed.jsonl` — 525 `freeschool.draft.skill` records: 8 domains → 52 areas → 465 leaf skills. `stats.json` has the counts; `provenance.json` records, per node, how the ESCO URI and Wikidata QID were chosen; `build_seed.py` regenerates the file (needs the ESCO cache from the research run). Nodes with `status: proposed` are community extensions ESCO lacks.
+`skills-seed.jsonl` — 745 `freeschool.draft.skill` records: 8 domains → 54 areas → 683 leaf skills. `stats.json` has the counts; `provenance.json` records, per node, how the ESCO URI and Wikidata QID were chosen; `build_seed.py` regenerates the ESCO-derived part of the file (it needs the ESCO cache from the research run) — the 2026-09-13 community expansion was hand-authored straight into the jsonl, so re-running it alone would drop those rows. Nodes with `status: proposed` are community extensions ESCO lacks.
+
+The 2026-09-13 expansion added 218 skills and two areas — `movement-rest` (Movement, rest and the body, under `care`) and `nature-outdoors` (Nature, outdoors and wayfinding, under `land`) — all `status: proposed` with authored one-sentence descriptions and no external ids. `packages/lexicons/scripts/seed.test.ts` (`pnpm --filter @freeschool/lexicons test`) checks the file's invariants: unique ids and labels, kebab-case slugs, every `broader` resolving, the three-level domain → area → skill grouping and ordering, descriptions of at most 300 characters, and that `stats.json` still matches the file.
 
 Write them to a PDS with `pnpm --filter @freeschool/lexicons seed:skills` (env: `PDS_URL`, `AUTHORITY_HANDLE`, `AUTHORITY_PASSWORD`; local dev handles use the `.test` domain). The script strips `_provenance`, turns `broader` slugs into at-uris under the authority DID, validates every record against the lexicon, and uses the slug as the rkey (`key: any`).
 
