@@ -277,6 +277,9 @@ export async function materializeSeries(
         sequence: i + 1,
       })
       .onConflictDoNothing()
+    // The occurrence's `fs_series_occurrence` row exists by now (just above), which is
+    // what `lib/events.ts#resolveHostDid` reads — so the feedback this window will collect
+    // is attributed to, and notifies, the SERIES AUTHOR and not the school (A8).
     await openFeedbackWindow(event.uri, endsAt ?? originalStartsAt)
     written++
   }

@@ -21,6 +21,8 @@ import {
   createEventAsHost,
   EventNotFoundError,
   EventPermissionError,
+  OccurrenceNotEditableError,
+  resolveHostDid,
   SeriesEditNotSupportedError,
   updateEventAsHost,
 } from '../../lib/events.js'
@@ -125,6 +127,9 @@ events.put('/events/:id', requireViewer, async (c) => {
     if (err instanceof EventPermissionError) return c.json({ error: 'PermissionDenied', message: err.message }, 403)
     if (err instanceof SeriesEditNotSupportedError) {
       return c.json({ error: 'SeriesEditNotSupported', message: err.message }, 400)
+    }
+    if (err instanceof OccurrenceNotEditableError) {
+      return c.json({ error: 'OccurrenceNotEditable', message: err.message }, 400)
     }
     if (err instanceof NoActorCredentialError) {
       return c.json({ error: 'ReauthRequired', message: 'sign in again before updating your class' }, 401)
@@ -307,9 +312,32 @@ events.post('/events/:id/attendance', requireViewer, async (c) => {
 
   const db = getDb()
   let recorded = 0
+  let tallyDelta = 0
   for (const a of parsed.data.attendees) {
     if (a.did === viewer.did) continue // a host does not attest themselves
-    const rows = await db
+
+    /**
+     * A5: THE TALLY FOLLOWS THE TRANSITION, NOT THE WRITE.
+     *
+     * The upsert is idempotent; the tally bump was not. A host who opened the attendance
+     * sheet, saved, noticed one more name and saved again gave everybody on the list a
+     * second attended-class credit — and the sheet is precisely the screen people re-save.
+     * `fs_attendance` is collapsed to counts after 90 days, so the tally is the only
+     * surviving evidence and the inflation was permanent.
+     *
+     * So: read the row's current state first, then bump only when `participated`
+     * genuinely flips. "Currently participated" means `participated AND NOT voided` — a
+     * voided row's credit was already taken back (`void-attendance`), and the upsert below
+     * un-voids it, which IS a transition back to true.
+     */
+    const existing = await db
+      .select({ participated: attendance.participated, voidedAt: attendance.voidedAt })
+      .from(attendance)
+      .where(and(eq(attendance.eventUri, uri), eq(attendance.attendeeDid, a.did)))
+      .limit(1)
+    const wasCounted = existing.length > 0 && existing[0]!.participated && existing[0]!.voidedAt === null
+
+    await db
       .insert(attendance)
       .values({
         id: rowId(),
@@ -324,13 +352,20 @@ events.post('/events/:id/attendance', requireViewer, async (c) => {
         target: [attendance.eventUri, attendance.attendeeDid],
         set: { participated: a.participated, role: a.role, attestedByDid: viewer.did, voidedAt: null },
       })
-      .returning({ id: attendance.id })
-    if (rows.length > 0 && a.participated) {
+
+    if (a.participated && !wasCounted) {
       await bumpTally(a.did, { attendedConfirmed: 1 })
-      recorded++
+      tallyDelta++
+    } else if (!a.participated && wasCounted) {
+      // The host un-ticked somebody. Take the credit back, floored at 0 by `bumpTally`.
+      await bumpTally(a.did, { attendedConfirmed: -1 })
+      tallyDelta--
     }
+    if (a.participated) recorded++
   }
-  return c.json({ ok: true, recorded })
+  // `recorded` is who is on the sheet as having taken part (stable across re-saves);
+  // `tallyChanged` is what this particular save actually moved.
+  return c.json({ ok: true, recorded, tallyChanged: tallyDelta })
 })
 
 /** Counts, for the host's own view. Never a list of DIDs. */
@@ -379,9 +414,14 @@ export async function loadEvent(uri: string): Promise<LoadedEvent | null> {
     getEventExtra(uri),
   ])
   const inputs = { listings: listings.map((l) => l.value), configs: configs.map((x) => x.value) }
+  // A8: for a materialized occurrence the record's author is the SCHOOL; the host is the
+  // series author. Everything downstream of `LoadedEvent.hostDid` — the roster gate, the
+  // attendance gate, `viewerRelation`, the raw-visibility field, the feedback notification
+  // — therefore gets the right person for free.
+  const hostDid = await resolveHostDid(uri, row.did)
   return {
-    hostDid: row.did,
-    event: toCalendarEvent(uri, row.did, row.value),
+    hostDid,
+    event: toCalendarEvent(uri, hostDid, row.value),
     inputs,
     listed: isListed(inputs),
     skillLevels: skills.map((s) => s.value),

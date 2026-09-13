@@ -1,9 +1,16 @@
 /**
- * `POST /api/admin/moderation/:id/execute` — R9 regression coverage for the defect the
- * privacy audit caught: the PUBLIC `freeschool.draft.moderationAction` record must never
- * carry `subjectDid`/`subjectRecord` (an at-uri's authority segment IS a DID), while the
- * steward-only admin queue (`GET /api/admin/moderation`) keeps showing the subject — it
- * reads the app-side `fs_moderation_queue` row, never the public record.
+ * `POST /api/admin/moderation/:id/execute`.
+ *
+ * R9 / F0 — what the public `freeschool.draft.moderationAction` record may say. NOT the
+ * subject (`subjectDid`/`subjectRecord`; an at-uri's authority segment IS a DID) and NOT
+ * the `reason` (free text a steward wrote about a particular person — moderation reasons
+ * are never public, CLAUDE.md). What is left is the decision: action, policyRef, actors,
+ * createdAt. The steward-only admin queue keeps showing both, because it reads the app-side
+ * `fs_moderation_queue` row rather than the public record.
+ *
+ * A3 / A4 — and the action has to actually DO something. `void-attendance` voids the rows
+ * and takes the credit back off the lifetime tally; `restore-listing` appends a `listed`
+ * listing, which `http/visibility.ts#isListed` now honours because the newest listing wins.
  */
 process.env.SCHOOL_DID = 'did:plc:school'
 
@@ -17,8 +24,10 @@ import { createApp } from '../src/http/app.js'
 import { createSession } from '../src/http/session.js'
 import { signSessionId } from '../src/lib/crypto.js'
 import { config } from '../src/config.js'
-import { custodialAccount, moderationQueue, steward } from '../src/db/schema.js'
+import { attendance, attendanceTally, custodialAccount, moderationQueue, steward } from '../src/db/schema.js'
 import { rowId } from '../src/lib/ids.js'
+import { eq } from 'drizzle-orm'
+import { isListed } from '../src/http/visibility.js'
 
 const SCHOOL = 'did:plc:school' as Did
 const STEWARD_A = 'did:plc:steward-a' as Did
@@ -33,7 +42,15 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   if (!available) return
-  await truncate('fs_moderation_queue', 'fs_audit', 'fs_steward', 'fs_session', 'fs_custodial_account')
+  await truncate(
+    'fs_moderation_queue',
+    'fs_audit',
+    'fs_steward',
+    'fs_session',
+    'fs_custodial_account',
+    'fs_attendance',
+    'fs_attendance_tally',
+  )
   await testDb().insert(steward).values({ did: STEWARD_A, schoolDid: SCHOOL })
   // `hasProfile` (a precondition for any derived role, including Steward) requires a
   // custodial account or indexed records — see `lib/roles.ts#evidenceFor`.
@@ -108,6 +125,10 @@ describe('POST /api/admin/moderation/:id/execute', () => {
     expect(JSON.stringify(sent.record)).not.toContain(SUBJECT)
     expect(sent.record.action).toBe('suspend-role')
     expect(sent.record.actors).toEqual([STEWARD_A])
+    // F0: no reason either. It is a steward's free text about one person.
+    expect('reason' in sent.record).toBe(false)
+    expect(JSON.stringify(sent.record)).not.toContain('repeated no-shows')
+    expect(Object.keys(sent.record).sort()).toEqual(['$type', 'action', 'actors', 'createdAt', 'policyRef'])
 
     // The steward-only queue still carries the subject — it comes from the app-side
     // row, never from the public record.
@@ -146,6 +167,144 @@ describe('POST /api/admin/moderation/:id/execute', () => {
     const moderationRecord = captured[0] as { record: Record<string, unknown> }
     expect('subjectRecord' in moderationRecord.record).toBe(false)
     expect('subjectDid' in moderationRecord.record).toBe(false)
+    expect('reason' in moderationRecord.record).toBe(false)
     expect(JSON.stringify(moderationRecord.record)).not.toContain(subjectUri)
+    expect(JSON.stringify(moderationRecord.record)).not.toContain('off-topic')
+
+    // The LISTING the school writes is a different record and DOES name the event — that
+    // is the whole point of a curation listing, and the host published that event.
+    const listing = captured[1] as { record: Record<string, unknown> } | undefined
+    expect((listing?.record.event as { uri: string }).uri).toBe(subjectUri)
+    expect(listing?.record.status).toBe('removed')
+    expect('reason' in (listing?.record ?? {})).toBe(false)
+  })
+
+  /* A4: restore-listing */
+
+  it('restore-listing appends a `listed` listing, which the newest-wins rule honours', async () => {
+    if (!available) return
+    const captured: Array<Record<string, unknown>> = []
+    setSchoolActor(wirePort(captured))
+
+    const subjectUri = 'at://did:plc:some-host/community.lexicon.calendar.event/restore-me'
+    const id = rowId()
+    await testDb().insert(moderationQueue).values({
+      id,
+      action: 'restore-listing',
+      subjectUri,
+      subjectDid: null,
+      reason: 'the report was mistaken; the class is fine',
+      openedByDid: STEWARD_A,
+      approvals: [{ stewardDid: STEWARD_A, at: new Date().toISOString() }],
+    })
+
+    const app = createApp()
+    const cookie = await cookieFor(STEWARD_A)
+    const res = await app.request(`/api/admin/moderation/${id}/execute`, { method: 'POST', headers: { Cookie: cookie } })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { listing?: { uri: string; status: string } }
+    expect(body.listing?.status).toBe('listed')
+
+    // Two writes: the decision, then the listing.
+    expect(captured.length).toBe(2)
+    const listing = captured[1] as { record: Record<string, unknown> }
+    expect(listing.record.status).toBe('listed')
+    expect((listing.record.event as { uri: string }).uri).toBe(subjectUri)
+
+    // …and the restore genuinely un-hides the class, removal still sitting in the history.
+    const ref = { uri: subjectUri, cid: 'bafy' }
+    expect(
+      isListed({
+        listings: [
+          { event: ref, school: 'did:plc:school', status: 'removed', createdAt: '2026-09-01T00:00:00Z' },
+          { event: ref, school: 'did:plc:school', status: listing.record.status as 'listed', createdAt: listing.record.createdAt as string },
+        ],
+        configs: [],
+      }),
+    ).toBe(true)
+  })
+
+  /* A3: void-attendance */
+
+  it('void-attendance voids the subject’s rows and takes the credit back off their tally', async () => {
+    if (!available) return
+    const captured: Array<Record<string, unknown>> = []
+    setSchoolActor(wirePort(captured))
+
+    const eventUri = 'at://did:plc:some-host/community.lexicon.calendar.event/void-me'
+    const otherEvent = 'at://did:plc:some-host/community.lexicon.calendar.event/untouched'
+    const voided = 'did:plc:attendance-void-subject'
+    const bystander = 'did:plc:attendance-void-bystander'
+
+    await testDb().insert(attendance).values([
+      { id: rowId(), eventUri, attendeeDid: voided, attestedByDid: 'did:plc:some-host', participated: true },
+      { id: rowId(), eventUri, attendeeDid: bystander, attestedByDid: 'did:plc:some-host', participated: true },
+      { id: rowId(), eventUri: otherEvent, attendeeDid: voided, attestedByDid: 'did:plc:some-host', participated: true },
+    ])
+    await testDb().insert(attendanceTally).values([
+      { did: voided, attendedConfirmed: 2, hostedEvents: 0 },
+      { did: bystander, attendedConfirmed: 1, hostedEvents: 0 },
+    ])
+
+    const id = rowId()
+    await testDb().insert(moderationQueue).values({
+      id,
+      action: 'void-attendance',
+      subjectUri: eventUri,
+      subjectDid: voided,
+      reason: 'the host ticked the wrong name',
+      openedByDid: STEWARD_A,
+      approvals: [{ stewardDid: STEWARD_A, at: new Date().toISOString() }],
+    })
+
+    const app = createApp()
+    const cookie = await cookieFor(STEWARD_A)
+    const res = await app.request(`/api/admin/moderation/${id}/execute`, { method: 'POST', headers: { Cookie: cookie } })
+    expect(res.status).toBe(200)
+    expect((await res.json()) as { attendanceVoided?: number }).toMatchObject({ attendanceVoided: 1 })
+
+    // Exactly the (event, person) row named, and nothing else.
+    const rows = await testDb().select().from(attendance)
+    const voidedRow = rows.find((r) => r.attendeeDid === voided && r.eventUri === eventUri)
+    expect(voidedRow?.voidedAt).not.toBeNull()
+    expect(rows.find((r) => r.attendeeDid === bystander)?.voidedAt).toBeNull()
+    expect(rows.find((r) => r.eventUri === otherEvent)?.voidedAt).toBeNull()
+
+    const tallies = await testDb().select().from(attendanceTally)
+    expect(tallies.find((t) => t.did === voided)?.attendedConfirmed).toBe(1)
+    expect(tallies.find((t) => t.did === bystander)?.attendedConfirmed).toBe(1)
+  })
+
+  it('is idempotent: re-executing a void does not decrement a second time, and never goes below zero', async () => {
+    if (!available) return
+    setSchoolActor(wirePort([]))
+    const eventUri = 'at://did:plc:some-host/community.lexicon.calendar.event/void-twice'
+    const subject = 'did:plc:attendance-void-twice'
+    await testDb()
+      .insert(attendance)
+      .values({ id: rowId(), eventUri, attendeeDid: subject, attestedByDid: 'did:plc:some-host', participated: true })
+    // Deliberately already at 0: the decrement must floor, not wrap negative.
+    await testDb().insert(attendanceTally).values({ did: subject, attendedConfirmed: 0, hostedEvents: 0 })
+
+    const app = createApp()
+    const cookie = await cookieFor(STEWARD_A)
+    for (const n of [1, 2]) {
+      const id = `${rowId()}-${n}`
+      await testDb().insert(moderationQueue).values({
+        id,
+        action: 'void-attendance',
+        subjectUri: eventUri,
+        subjectDid: subject,
+        reason: 'voiding again',
+        openedByDid: STEWARD_A,
+        approvals: [{ stewardDid: STEWARD_A, at: new Date().toISOString() }],
+      })
+      const res = await app.request(`/api/admin/moderation/${id}/execute`, { method: 'POST', headers: { Cookie: cookie } })
+      expect(res.status).toBe(200)
+      // The second pass finds nothing left to void.
+      expect((await res.json()) as { attendanceVoided?: number }).toMatchObject({ attendanceVoided: n === 1 ? 1 : 0 })
+    }
+    const tally = await testDb().select().from(attendanceTally).where(eq(attendanceTally.did, subject))
+    expect(tally[0]?.attendedConfirmed).toBe(0)
   })
 })

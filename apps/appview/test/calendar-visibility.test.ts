@@ -64,12 +64,89 @@ describe('is the event on the public calendar at all?', () => {
     expect(
       isListed({
         listings: [
-          { event: ref, school: 'did:plc:school', status: 'listed' },
-          { event: ref, school: 'did:plc:school', status: 'removed' },
+          { event: ref, school: 'did:plc:school', status: 'listed', createdAt: '2026-09-01T00:00:00Z' },
+          { event: ref, school: 'did:plc:school', status: 'removed', createdAt: '2026-09-02T00:00:00Z' },
         ],
         configs: [{ event: ref, visibility: 'listed' }],
       }),
     ).toBe(false)
+  })
+
+  /**
+   * A4. Listings are APPEND-ONLY — the school writes another rather than editing one — so
+   * the question is always about the newest record. The old rule ("any removal wins,
+   * forever") made `restore-listing` structurally impossible: the removal it was undoing
+   * was still sitting in the history.
+   */
+  describe('the newest listing wins, by createdAt', () => {
+    const listing = (status: 'listed' | 'removed', createdAt: string) => ({
+      event: ref,
+      school: 'did:plc:school',
+      status,
+      createdAt,
+    })
+
+    it('a restore AFTER a removal puts the class back on the calendar', () => {
+      expect(
+        isListed({
+          listings: [
+            listing('listed', '2026-09-01T00:00:00Z'),
+            listing('removed', '2026-09-02T00:00:00Z'),
+            listing('listed', '2026-09-03T00:00:00Z'),
+          ],
+          configs: [],
+        }),
+      ).toBe(true)
+    })
+
+    it('a removal AFTER a restore takes it off again', () => {
+      expect(
+        isListed({
+          listings: [listing('listed', '2026-09-03T00:00:00Z'), listing('removed', '2026-09-04T00:00:00Z')],
+          configs: [{ event: ref, visibility: 'listed' }],
+        }),
+      ).toBe(false)
+    })
+
+    it('does not care what order the rows arrive in', () => {
+      expect(
+        isListed({
+          listings: [
+            listing('listed', '2026-09-03T00:00:00Z'),
+            listing('removed', '2026-09-02T00:00:00Z'),
+            listing('listed', '2026-09-01T00:00:00Z'),
+          ],
+          configs: [],
+        }),
+      ).toBe(true)
+    })
+
+    it('a stamped listing beats an unstamped one, whichever way round they are', () => {
+      expect(
+        isListed({ listings: [{ event: ref, school: 'did:plc:school', status: 'removed' }, listing('listed', '2026-09-01T00:00:00Z')], configs: [] }),
+      ).toBe(true)
+      expect(
+        isListed({ listings: [{ event: ref, school: 'did:plc:school' }, listing('removed', '2026-09-01T00:00:00Z')], configs: [] }),
+      ).toBe(false)
+    })
+
+    it('resolves a dead tie to REMOVED — hidden is the safe answer when we cannot tell', () => {
+      expect(
+        isListed({
+          listings: [listing('listed', '2026-09-02T00:00:00Z'), listing('removed', '2026-09-02T00:00:00Z')],
+          configs: [{ event: ref, visibility: 'listed' }],
+        }),
+      ).toBe(false)
+    })
+
+    it('falls through to the host’s own config only when there is no school listing at all', () => {
+      expect(isListed({ listings: [], configs: [{ event: ref, visibility: 'listed' }] })).toBe(true)
+      // A live school listing is the only voice once one exists — including a `removed`
+      // one, which is what makes moderation stick.
+      expect(
+        isListed({ listings: [listing('removed', '2026-09-02T00:00:00Z')], configs: [{ event: ref, visibility: 'listed' }] }),
+      ).toBe(false)
+    })
   })
 })
 

@@ -1,8 +1,14 @@
 /**
  * What is this viewer to this event? The answer decides whether they see the address.
  *
- * Checked in order of strength, and entirely from app-side tables plus the event's own
- * author DID — no public record anywhere says "these people are coming".
+ * Checked in order of strength, and entirely from app-side tables plus the event's HOST —
+ * no public record anywhere says "these people are coming".
+ *
+ * `hostDid` is the HUMAN host, which for a materialized occurrence of a series is NOT the
+ * record's author (the school writes occurrences). Callers resolve it with
+ * `lib/events.ts#resolveHostDid` / `resolveHostDids`, or take it from
+ * `LoadedEvent.hostDid`, which already has. Passing a raw record author here is the A8 bug:
+ * the occurrence's real host reads back as `'public'` on their own class.
  */
 import { and, eq, isNull } from 'drizzle-orm'
 import { Role } from '@freeschool/shared'
@@ -15,6 +21,7 @@ import type { ViewerRelation } from './visibility.js'
 export async function viewerRelation(
   viewer: Viewer,
   eventUri: string,
+  /** The human host — see the module doc. Never an occurrence's record author. */
   hostDid: string,
 ): Promise<ViewerRelation> {
   if (viewer.did === hostDid) return 'host'

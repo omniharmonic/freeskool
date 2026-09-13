@@ -136,15 +136,20 @@ export async function bumpTally(
     .insert(attendanceTally)
     .values({
       did,
-      attendedConfirmed: delta.attendedConfirmed ?? 0,
-      hostedEvents: delta.hostedEvents ?? 0,
+      // A negative delta for a DID with no row at all is 0, not -1: these are counts of
+      // things that happened, and nothing has.
+      attendedConfirmed: Math.max(0, delta.attendedConfirmed ?? 0),
+      hostedEvents: Math.max(0, delta.hostedEvents ?? 0),
       updatedAt: new Date(),
     })
     .onConflictDoUpdate({
       target: attendanceTally.did,
       set: {
-        attendedConfirmed: sql`${attendanceTally.attendedConfirmed} + ${delta.attendedConfirmed ?? 0}`,
-        hostedEvents: sql`${attendanceTally.hostedEvents} + ${delta.hostedEvents ?? 0}`,
+        // GREATEST(0, …) because deltas can now be NEGATIVE — `void-attendance` takes an
+        // attendance back (`http/routes/admin.ts`), and a tally that can go below zero
+        // would both be nonsense and silently raise the bar for that member forever.
+        attendedConfirmed: sql`GREATEST(0, ${attendanceTally.attendedConfirmed} + ${delta.attendedConfirmed ?? 0})`,
+        hostedEvents: sql`GREATEST(0, ${attendanceTally.hostedEvents} + ${delta.hostedEvents ?? 0})`,
         updatedAt: new Date(),
       },
     })

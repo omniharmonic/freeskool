@@ -4,10 +4,11 @@
  *
  * Two independent decisions:
  *
- *   1. DOES THIS EVENT APPEAR AT ALL?  Only if it is `listed`: either the school wrote a
- *      `coop.lexicon.event.listing` with status != 'removed', or the host's own
- *      `coop.lexicon.event.config` says `visibility: 'listed'`. A removal by the school
- *      WINS over the host's own config — that is what moderation means.
+ *   1. DOES THIS EVENT APPEAR AT ALL?  Only if it is `listed`: either the school's NEWEST
+ *      `coop.lexicon.event.listing` says so, or — with no listing at all — the host's own
+ *      `coop.lexicon.event.config` says `visibility: 'listed'`. A school listing of either
+ *      status WINS over the host's own config: that is what moderation means, and it is
+ *      also what makes `restore-listing` work at all.
  *
  *   2. HOW MUCH OF IT?  Everyone sees title / time / neighborhood. The full location —
  *      street address, venue name, coordinates, join URL — is only ever sent to a viewer
@@ -43,11 +44,46 @@ export interface ListingInputs {
   configs: EventConfig[]
 }
 
+/**
+ * THE NEWEST LISTING WINS, by `createdAt`.
+ *
+ * Listings are append-only — the school never edits or deletes one, it writes another (see
+ * `http/routes/admin.ts`'s `remove-listing` / `restore-listing`) — so "is it listed" is a
+ * question about the LATEST record, not about whether a `removed` one exists anywhere in
+ * the history. The old "any removal wins, forever" rule made `restore-listing`
+ * structurally impossible: the removal it was undoing was still sitting there.
+ *
+ * Ties, including the all-missing-`createdAt` case, resolve to REMOVED. Two listings
+ * stamped the same instant is not a state a steward can intend, and between "hidden when we
+ * are unsure" and "visible when we are unsure" the privacy-respecting answer is hidden.
+ * (Every listing this codebase writes carries a `createdAt`; the tie rule is for records
+ * from elsewhere.)
+ */
 export function isListed({ listings, configs }: ListingInputs): boolean {
-  // A school removal is final, regardless of what the host's config claims.
-  if (listings.some((l) => l.status === 'removed')) return false
-  if (listings.some((l) => l.status === undefined || l.status === 'listed')) return true
+  let newest = -Infinity
+  let removed = false
+  let listed = false
+  for (const l of listings) {
+    const at = listingTime(l.createdAt)
+    if (at > newest) {
+      newest = at
+      removed = false
+      listed = false
+    }
+    if (at < newest) continue
+    if (l.status === 'removed') removed = true
+    else listed = true // 'listed', or absent (the lexicon's default reading)
+  }
+  if (removed) return false
+  if (listed) return true
+  // No school listing at all: the host's own config is the only voice.
   return configs.some((c) => c.visibility === 'listed')
+}
+
+/** An unparseable or absent `createdAt` sorts oldest, so a stamped record always beats it. */
+function listingTime(createdAt?: string): number {
+  const t = createdAt ? Date.parse(createdAt) : Number.NaN
+  return Number.isNaN(t) ? -Infinity : t
 }
 
 export interface CalendarInclusion {

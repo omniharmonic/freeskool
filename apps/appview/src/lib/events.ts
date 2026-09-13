@@ -38,6 +38,60 @@ import { isListed } from '../http/visibility.js'
 import type { EventConfig, EventListing } from '../lexicons/coop.js'
 import { getEventExtra, setEventExtra } from './event-extra.js'
 import { Role } from '@freeschool/shared'
+import { inArray, eq } from 'drizzle-orm'
+import { getDb } from '../db/index.js'
+import { seriesOccurrence } from '../db/schema.js'
+
+/**
+ * WHO IS THE HUMAN HOST OF THIS EVENT? (A8)
+ *
+ * For an ordinary class: its record's author, full stop. For a MATERIALIZED OCCURRENCE of a
+ * series the author is the SCHOOL — that is settled (`jobs/materialize-series.ts`: the host
+ * should not have to be online for next month's class to appear) — and using the author as
+ * "the host" made every occurrence after the first one un-hostable: its real host could not
+ * take attendance on it, could not see its roster, and read as `viewerRelation: 'public'`
+ * on their own class, while the school (which is nobody) was treated as the host.
+ *
+ * The link back to the person is `fs_series_occurrence`: app-side, written by the
+ * materializer next to every occurrence it creates. `series_uri`'s AUTHORITY is the series
+ * author, and a series lives in the same repo as the first event it points at — one parse
+ * rather than two more round-trips.
+ *
+ * The public record's author is NOT changed by any of this: the occurrence stays the
+ * school's record, which is what keeps the school's scheduling artifact out of somebody
+ * else's repo.
+ */
+export async function resolveHostDid(eventUri: string, recordAuthorDid: string): Promise<string> {
+  const rows = await getDb()
+    .select({ seriesUri: seriesOccurrence.seriesUri })
+    .from(seriesOccurrence)
+    .where(eq(seriesOccurrence.eventUri, eventUri))
+    .limit(1)
+  const seriesUri = rows[0]?.seriesUri
+  if (!seriesUri) return recordAuthorDid
+  return parseAtUri(seriesUri)?.did ?? recordAuthorDid
+}
+
+/**
+ * The batched form, for a whole calendar page: one query instead of one per event. Returns
+ * the host for every input uri, so callers can index it unconditionally.
+ */
+export async function resolveHostDids(
+  events: ReadonlyArray<{ uri: string; did: string }>,
+): Promise<Map<string, string>> {
+  const out = new Map(events.map((e) => [e.uri, e.did]))
+  if (events.length === 0) return out
+  const rows = await getDb()
+    .select({ eventUri: seriesOccurrence.eventUri, seriesUri: seriesOccurrence.seriesUri })
+    .from(seriesOccurrence)
+    .where(inArray(seriesOccurrence.eventUri, events.map((e) => e.uri)))
+  for (const row of rows) {
+    if (!row.eventUri) continue
+    const host = parseAtUri(row.seriesUri)?.did
+    if (host) out.set(row.eventUri, host)
+  }
+  return out
+}
 
 export interface CreateEventInput {
   name: string
@@ -305,6 +359,18 @@ export class EventPermissionError extends Error {
   }
 }
 
+/**
+ * The viewer IS this occurrence's host, but the record is the SCHOOL's (A8) — editing it
+ * here would write a COPY of the school's occurrence into the host's own repo and leave the
+ * real one untouched. The series is the thing to edit.
+ */
+export class OccurrenceNotEditableError extends Error {
+  constructor() {
+    super('this date is a materialized occurrence of a recurring class — edit the series, or cancel this date')
+    this.name = 'OccurrenceNotEditableError'
+  }
+}
+
 export type UpdateEventInput = Partial<CreateEventInput>
 
 export interface UpdatedEvent {
@@ -342,7 +408,12 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
   const indexer = await getIndexer()
   const current = await getRecordByUri(indexer, 'event', eventUri)
   if (!current) throw new EventNotFoundError(eventUri)
-  if (current.did !== viewer.did) throw new EventPermissionError()
+  // A8: for an occurrence the record's author is the school and the HOST is the series
+  // author — so "are you the host" and "is this your record" are two different questions,
+  // and only the first one is about permission.
+  const hostDid = await resolveHostDid(eventUri, current.did)
+  if (hostDid !== viewer.did) throw new EventPermissionError()
+  if (current.did !== viewer.did) throw new OccurrenceNotEditableError()
   const parts = parseAtUri(eventUri)
   if (!parts) throw new EventNotFoundError(eventUri)
 

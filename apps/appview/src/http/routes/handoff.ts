@@ -35,7 +35,7 @@
  */
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, eq, isNull } from 'drizzle-orm'
+import { and, eq, gt, isNull, or } from 'drizzle-orm'
 import { Role } from '@freeschool/shared'
 import { SchoolActError, type Did } from '@freeschool/school-actor'
 import type { AppEnv, Viewer } from '../session.js'
@@ -139,14 +139,38 @@ export type AcceptHandoffResult =
 
 export async function acceptHandoff(token: string, acceptorDid: string): Promise<AcceptHandoffResult> {
   const db = getDb()
-  const rows = await db.select().from(handoff).where(eq(handoff.tokenHash, hashToken(token))).limit(1)
-  const row = rows[0]
-  if (!row) return { ok: false, status: 404, error: 'NotFound', message: 'unknown hand-off token' }
-  if (row.acceptedAt) return { ok: false, status: 410, error: 'AlreadyUsed', message: 'this hand-off link has already been used' }
-  if (row.expiresAt.getTime() <= Date.now()) return { ok: false, status: 410, error: 'Expired', message: 'this hand-off link has expired' }
-  if (row.toDid && row.toDid !== acceptorDid) {
-    return { ok: false, status: 403, error: 'WrongRecipient', message: 'this hand-off was addressed to someone else' }
-  }
+  const tokenHash = hashToken(token)
+
+  /**
+   * A12: CLAIM FIRST, then act — the same shape as `invites.ts`'s atomic decrement.
+   *
+   * The old sequence was SELECT, check `accepted_at`, act, UPDATE. Two requests arriving
+   * together both read `accepted_at IS NULL`, both passed the check and both ran `set-role`:
+   * one link, two stewards, and the second one had no approval behind it. A single-use token
+   * has to be claimed by the database, not by a read followed by a hope.
+   *
+   * Every precondition moves into the WHERE clause — unused, unexpired, and either open or
+   * addressed to this acceptor — so exactly one concurrent caller gets a row back.
+   *
+   * `to_did` is deliberately NOT set by the claim: it is written only once the hand-off has
+   * actually succeeded, which is what lets the claim be released (below) if the school
+   * declines the write, without turning an open link into one addressed to whoever happened
+   * to fail first.
+   */
+  const claimed = await db
+    .update(handoff)
+    .set({ acceptedAt: new Date() })
+    .where(
+      and(
+        eq(handoff.tokenHash, tokenHash),
+        isNull(handoff.acceptedAt),
+        gt(handoff.expiresAt, new Date()),
+        or(isNull(handoff.toDid), eq(handoff.toDid, acceptorDid)),
+      ),
+    )
+    .returning()
+  const row = claimed[0]
+  if (!row) return await explainFailedClaim(tokenHash, acceptorDid)
 
   try {
     const result = await schoolActor().putRecordAsSchool({
@@ -160,12 +184,14 @@ export async function acceptHandoff(token: string, acceptorDid: string): Promise
       rkey: tid(),
       record: {
         $type: NSID.moderationAction,
-        // R9: the public record never names the subject. `acceptorDid` lives
-        // app-side — `fs_handoff.to_did` (set below) and `fs_steward.did` (also
-        // below, which is what actually grants the role; `evidenceFor` reads that
-        // table, not this record) — which is where a steward can look it up.
+        // R9, and F0. The public record never names the SUBJECT — `acceptorDid` lives
+        // app-side, in `fs_handoff.to_did` (set below) and `fs_steward.did` (also below,
+        // which is what actually grants the role; `evidenceFor` reads that table, not this
+        // record) — and never carries a REASON either: moderation reasons are never public
+        // (CLAUDE.md), and this record type is shared with the moderation queue, where the
+        // reason is free text a steward wrote about a particular person. The reason for THIS
+        // action is in `fs_audit` (below), which is app-side.
         action: 'set-role',
-        reason: 'steward hand-off accepted',
         policyRef: await currentPolicyUri(schoolDid()),
         actors: [row.fromDid],
         createdAt: new Date().toISOString(),
@@ -183,7 +209,8 @@ export async function acceptHandoff(token: string, acceptorDid: string): Promise
       .values({ did: acceptorDid, schoolDid: schoolDid(), appointedByDid: row.fromDid })
       .onConflictDoUpdate({ target: steward.did, set: { suspendedAt: null, appointedByDid: row.fromDid } })
 
-    await db.update(handoff).set({ acceptedAt: new Date(), toDid: acceptorDid }).where(eq(handoff.id, row.id))
+    // The claim already set `accepted_at`; record WHO accepted now that it has happened.
+    await db.update(handoff).set({ toDid: acceptorDid }).where(eq(handoff.id, row.id))
 
     const active = await db
       .select({ did: steward.did })
@@ -197,6 +224,10 @@ export async function acceptHandoff(token: string, acceptorDid: string): Promise
       ...(active.length < 2 ? { warning: 'single-steward' as const } : {}),
     }
   } catch (err) {
+    // RELEASE THE CLAIM. Nothing took effect — the port refused before writing, or threw —
+    // so the link must be usable again rather than burnt by a failure that was not the
+    // acceptor's doing. `to_did` was never touched, so an open link stays open.
+    await db.update(handoff).set({ acceptedAt: null }).where(eq(handoff.id, row.id)).catch(() => undefined)
     if (err instanceof SchoolActError) {
       return {
         ok: false,
@@ -207,6 +238,25 @@ export async function acceptHandoff(token: string, acceptorDid: string): Promise
     }
     throw err
   }
+}
+
+/**
+ * The claim matched nothing. Re-read the row — purely to say WHY, never to act — so the
+ * caller still gets "already used" / "expired" / "addressed to someone else" rather than one
+ * undifferentiated 404. A row that vanished between the two statements reads as unknown,
+ * which is accurate.
+ */
+async function explainFailedClaim(tokenHash: string, acceptorDid: string): Promise<AcceptHandoffResult> {
+  const rows = await getDb().select().from(handoff).where(eq(handoff.tokenHash, tokenHash)).limit(1)
+  const row = rows[0]
+  if (!row) return { ok: false, status: 404, error: 'NotFound', message: 'unknown hand-off token' }
+  if (row.acceptedAt) return { ok: false, status: 410, error: 'AlreadyUsed', message: 'this hand-off link has already been used' }
+  if (row.expiresAt.getTime() <= Date.now()) return { ok: false, status: 410, error: 'Expired', message: 'this hand-off link has expired' }
+  if (row.toDid && row.toDid !== acceptorDid) {
+    return { ok: false, status: 403, error: 'WrongRecipient', message: 'this hand-off was addressed to someone else' }
+  }
+  // Unreachable in practice: every WHERE condition is covered above.
+  return { ok: false, status: 409, error: 'HandoffUnavailable', message: 'this hand-off link could not be claimed' }
 }
 
 const startBody = z.object({ toHandleOrDid: z.string().optional() })

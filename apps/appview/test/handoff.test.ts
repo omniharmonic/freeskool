@@ -204,12 +204,99 @@ describe('acceptHandoff', () => {
     expect('subjectDid' in sent.record).toBe(false)
     expect('subjectRecord' in sent.record).toBe(false)
     expect(JSON.stringify(sent.record)).not.toContain(ACCEPTOR)
+    // F0: nor a reason. Moderation reasons are never public; this record type is shared
+    // with the moderation queue, where the reason is free text about a particular person.
+    expect('reason' in sent.record).toBe(false)
+    expect(Object.keys(sent.record).sort()).toEqual(['$type', 'action', 'actors', 'createdAt', 'policyRef'])
 
     // The subject is still recoverable app-side.
     const row = await testDb().select().from(handoffTable).where(eq(handoffTable.id, proposed.id))
     expect(row[0]?.toDid).toBe(ACCEPTOR)
     const stewardRows = await testDb().select().from(steward).where(eq(steward.did, ACCEPTOR))
     expect(stewardRows.length).toBe(1)
+    // …and the audit row still carries the reason.
+    const auditRows = await testDb().select().from(audit).where(eq(audit.action, 'set-role'))
+    expect(auditRows.some((r) => r.reason.includes('hand-off'))).toBe(true)
+  })
+
+  /**
+   * A12. The old sequence was SELECT, check `accepted_at`, act, UPDATE — so two requests
+   * arriving together both read `accepted_at IS NULL`, both passed the check, and both ran
+   * `set-role`. One link, two stewards, the second with no approval behind it. The fix is
+   * the same shape as `invites.ts`'s atomic decrement: claim the row in the WHERE clause
+   * and act only on a returned row.
+   */
+  describe('A12: single-use under concurrency', () => {
+    it('two simultaneous accepts produce exactly one steward and one port call', async () => {
+      if (!available) return
+      const calls: unknown[] = []
+      setSchoolActor(
+        new AppCustodyAdapter({
+          roles: { async roleOf(_school, did) { return did === FROM ? Role.Steward : Role.Visitor } },
+          policy: { async destructiveActionStewards() { return 2 } },
+          audit: new PostgresAuditSink(),
+          session: {
+            async call(i) {
+              calls.push(i)
+              // A real PDS write is not instantaneous; the whole point is that the second
+              // caller must already have been refused BEFORE this resolves.
+              await new Promise((r) => setTimeout(r, 40))
+              return { status: 200, output: { uri: `at://${SCHOOL}/freeschool.draft.moderationAction/x`, cid: 'bafyx' } }
+            },
+          },
+          pdsEndpoint: 'http://localhost:3000',
+        }),
+      )
+      const proposed = await propose()
+
+      const [a, b] = await Promise.all([acceptHandoff(proposed.token, ACCEPTOR), acceptHandoff(proposed.token, OTHER)])
+      const winners = [a, b].filter((r) => r.ok)
+      const losers = [a, b].filter((r) => !r.ok)
+      expect(winners.length).toBe(1)
+      expect(losers.length).toBe(1)
+      expect(losers[0]!.ok === false && losers[0]!.error).toBe('AlreadyUsed')
+
+      // ONE port call, ONE steward.
+      expect(calls.length).toBe(1)
+      const stewardRows = await testDb().select().from(steward)
+      expect(stewardRows.length).toBe(1)
+
+      const row = await testDb().select().from(handoffTable).where(eq(handoffTable.id, proposed.id))
+      expect(row[0]?.acceptedAt).not.toBeNull()
+      // `to_did` records who actually accepted, written only after the hand-off succeeded.
+      expect(row[0]?.toDid).toBe(stewardRows[0]?.did)
+    })
+
+    it('releases the claim when the school declines, so the link is still usable', async () => {
+      if (!available) return
+      // FROM is NOT a steward here, so the port refuses: nothing took effect, and burning
+      // the link on a refusal that was not the acceptor's doing would be wrong.
+      setSchoolActor(wirePort([]))
+      const proposed = await propose()
+      const refused = await acceptHandoff(proposed.token, ACCEPTOR)
+      expect(refused.ok).toBe(false)
+
+      const row = await testDb().select().from(handoffTable).where(eq(handoffTable.id, proposed.id))
+      expect(row[0]?.acceptedAt).toBeNull()
+      expect(row[0]?.toDid).toBeNull()
+
+      // …and now it works.
+      setSchoolActor(wirePort())
+      expect((await acceptHandoff(proposed.token, ACCEPTOR)).ok).toBe(true)
+    })
+
+    it('still distinguishes expired from already-used from unknown', async () => {
+      if (!available) return
+      setSchoolActor(wirePort())
+      const proposed = await propose()
+      await testDb()
+        .update(handoffTable)
+        .set({ expiresAt: new Date(Date.now() - 1000) })
+        .where(eq(handoffTable.id, proposed.id))
+      const expired = await acceptHandoff(proposed.token, ACCEPTOR)
+      expect(expired.ok).toBe(false)
+      if (!expired.ok) expect(expired.error).toBe('Expired')
+    })
   })
 })
 

@@ -4,13 +4,12 @@
   "defs": {
     "main": {
       "type": "record",
-      "description": "An audit-logged moderation action written as the school by the app. A written reason is mandatory. Never edits another repo; it controls the school's own listing/roles.",
+      "description": "An audit-logged moderation action written as the school by the app. A written reason is mandatory for the ACTION, and is kept app-side: moderation reasons are never public. Never edits another repo; it controls the school's own listing/roles.",
       "key": "tid",
       "record": {
         "type": "object",
         "required": [
           "action",
-          "reason",
           "actors",
           "createdAt"
         ],
@@ -18,12 +17,12 @@
           "subjectRecord": {
             "type": "string",
             "format": "at-uri",
-            "description": "The record acted on (e.g. an event listing), if any."
+            "description": "DEPRECATED, never written by this app: an at-uri's authority segment is a DID, and no public record may name a DID its holder did not write (R9). The record acted on is kept app-side, in fs_moderation_queue.subject_uri."
           },
           "subjectDid": {
             "type": "string",
             "format": "did",
-            "description": "The account acted on, if any."
+            "description": "DEPRECATED, never written by this app (R9: no public record may name a DID its holder did not write). The account acted on is kept app-side, in fs_moderation_queue.subject_did."
           },
           "action": {
             "type": "string",
@@ -40,6 +39,7 @@
           },
           "reason": {
             "type": "string",
+            "description": "DEPRECATED, never written by this app: moderation reasons are never public. A reason is MANDATORY for the action and is stored app-side, in fs_moderation_queue.reason and fs_audit.reason. Free text a steward wrote about a specific person publishes both a judgement and, in practice, enough detail to identify its subject.",
             "maxLength": 20000,
             "maxGraphemes": 2000,
             "minLength": 1
