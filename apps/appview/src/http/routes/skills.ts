@@ -14,6 +14,7 @@
  */
 import { Hono } from 'hono'
 import type { AppEnv } from '../session.js'
+import { config } from '../../config.js'
 import { getIndexer } from '../../index/indexer.js'
 import { listCollection, sidecarsForEvent } from '../../index/queries.js'
 import { tiersFor, type SkillTierValue } from '../../lib/skill-tiers.js'
@@ -44,11 +45,30 @@ export interface SkillNode {
 
 const MAX_DEPTH = 12
 
+/**
+ * When `AUTHORITY_DID` is configured, ignore every skill record written by any other
+ * DID — how a dev index carrying two duplicate taxonomy authorities gets scoped down
+ * to the one that matters. Empty (the default) is a no-op.
+ */
+function scopedToAuthority<T>(records: Array<{ did: string } & T>): Array<{ did: string } & T> {
+  const authorityDid = config().AUTHORITY_DID
+  return authorityDid ? records.filter((r) => r.did === authorityDid) : records
+}
+
 skills.get('/skills', async (c) => {
-  const includeProposed = c.req.query('includeProposed') === '1'
+  // Production was hiding 306 of 525 seeded skills because this defaulted to
+  // excluding `proposed` nodes; now they show by default and `?includeProposed=0`
+  // restores the old, hidden behavior for anyone who wants it.
+  const includeProposed = c.req.query('includeProposed') !== '0'
+  const includeDeprecated = c.req.query('includeDeprecated') === '1'
   const indexer = await getIndexer()
-  const { records } = await listCollection<SkillRecord>(indexer, 'skill', { limit: 1000 })
-  const nodes = records.filter((r) => includeProposed || r.value.status !== 'proposed')
+  const { records: allRecords } = await listCollection<SkillRecord>(indexer, 'skill', { limit: 1000 })
+  const records = scopedToAuthority(allRecords)
+  const nodes = records.filter((r) => {
+    if (r.value.status === 'proposed') return includeProposed
+    if (r.value.status === 'deprecated') return includeDeprecated
+    return true
+  })
 
   const tiers = await tiersFor(nodes.map((n) => n.value.id))
 
@@ -95,7 +115,10 @@ skills.get('/skills', async (c) => {
 skills.get('/skills/:id', async (c) => {
   const uri = decodeURIComponent(c.req.param('id'))
   const indexer = await getIndexer()
-  const { records } = await listCollection<SkillRecord>(indexer, 'skill', { limit: 1000 })
+  const { records: allRecords } = await listCollection<SkillRecord>(indexer, 'skill', { limit: 1000 })
+  // Deliberately no status filter here (unlike `/skills`): a deprecated node must
+  // still resolve directly so an existing claim against it keeps working.
+  const records = scopedToAuthority(allRecords)
   const byUri = new Map(records.map((r) => [r.uri, r]))
   const self = byUri.get(uri)
   if (!self) return c.json({ error: 'NotFound' }, 404)

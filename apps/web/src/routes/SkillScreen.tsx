@@ -56,9 +56,10 @@ export function SkillScreen() {
       <div className="safe-x">
         <nav className="breadcrumbs" aria-label="Skill ancestry"><Link to="/skills">Skills</Link>{skill.ancestors?.map(a => <span key={a.uri}> / <Link to="/skills/$skillId" params={{skillId:a.uri}}>{a.label}</Link></span>)}</nav>
         <div className="skill-detail-intro"><FieldGlyph seed={skill.id} /><div>
-        {skill.tier === 'B' ? (
-          <div className="mb-3">
-            <SkillChip ink="pink">Sensitive — kept off public listings by default</SkillChip>
+        {skill.tier === 'B' || skill.status === 'proposed' ? (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {skill.tier === 'B' ? <SkillChip ink="pink">Sensitive — kept off public listings by default</SkillChip> : null}
+            {skill.status === 'proposed' ? <SkillChip ink="ink">proposed</SkillChip> : null}
           </div>
         ) : null}
         {skill.description ? <p className="max-w-[60ch] text-body">{skill.description}</p> : <p className="text-body">Learn it together. Pass it on.</p>}</div></div>

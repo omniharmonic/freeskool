@@ -41,6 +41,14 @@ const tierASkill = {
   tier: 'A' as const,
 };
 
+const proposedSkill = {
+  ...tierASkill,
+  uri: 'at://did:plc:school/freeschool.draft.skill/beekeeping',
+  id: 'beekeeping',
+  label: 'Beekeeping',
+  status: 'proposed' as const,
+};
+
 function renderScreen() {
   const queryClient = new QueryClient();
   return render(
@@ -67,5 +75,23 @@ describe('SkillScreen', () => {
 
     expect(await screen.findByRole('heading', { name: 'Bread baking' })).toBeInTheDocument();
     expect(screen.queryByText(/sensitive/i)).not.toBeInTheDocument();
+  });
+
+  it('shows a muted "proposed" marker for a proposed skill', async () => {
+    vi.mocked(api.skills.get).mockReset().mockResolvedValue(proposedSkill);
+    vi.mocked(api.requests.list).mockReset().mockResolvedValue({ requests: [] });
+    renderScreen();
+
+    expect(await screen.findByRole('heading', { name: 'Beekeeping' })).toBeInTheDocument();
+    expect(screen.getByText('proposed')).toBeInTheDocument();
+  });
+
+  it('shows no "proposed" marker for a canonical skill', async () => {
+    vi.mocked(api.skills.get).mockReset().mockResolvedValue(tierASkill);
+    vi.mocked(api.requests.list).mockReset().mockResolvedValue({ requests: [] });
+    renderScreen();
+
+    expect(await screen.findByRole('heading', { name: 'Bread baking' })).toBeInTheDocument();
+    expect(screen.queryByText('proposed')).not.toBeInTheDocument();
   });
 });
