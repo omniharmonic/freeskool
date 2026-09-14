@@ -7,7 +7,10 @@
  *
  * Evidence sources, field by field:
  *
- *   hasProfile              a custodial account row, OR any record indexed for the DID
+ *   hasProfile              a custodial account row, OR a live `fs_membership` row for this
+ *                           school (a Bluesky-door member who signed in here but keeps
+ *                           every claim school-only has neither of the other two), OR any
+ *                           record indexed for the DID
  *   inviteOrVouch           `fs_invite` used by the DID (survives inviter-DID purge)
  *   attendedConfirmed       `fs_attendance_tally` (maintained at attest time so it
  *                           survives the 90-day collapse of the attendance rows)
@@ -161,7 +164,15 @@ export async function evidenceFor(did: string, schoolDid = legacySchoolDid()): P
       .limit(1),
   ])
 
-  const hasProfile = custodial.length > 0 || (await hasIndexedRecords(did))
+  const liveMembership =
+    custodial.length > 0
+      ? []
+      : await db
+          .select({ did: membership.did })
+          .from(membership)
+          .where(and(eq(membership.did, did), eq(membership.schoolDid, schoolDid), isNull(membership.leftAt)))
+          .limit(1)
+  const hasProfile = custodial.length > 0 || liveMembership.length > 0 || (await hasIndexedRecords(did))
 
   return {
     hasProfile,
