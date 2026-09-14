@@ -405,11 +405,17 @@ export function useSetPeersMutation() {
 }
 
 /** `GET /api/admin/skills/proposals` — the steward queue for the skill taxonomy
- * (`SkillsAdminScreen`). Also read from `AdminOverviewScreen` for the pending count. */
-export function useSkillProposals() {
+ * (`SkillsAdminScreen`). Also read from `AdminOverviewScreen` for the pending
+ * count, which passes `enabled: false` for a member who is not a steward: the
+ * route 403s for them, and an ordinary member opening `/admin` should not spend
+ * a refused request the browser logs as an error (UX audit finding 16).
+ * `retry: false` for the same reason — a 403 is an answer, not a blip. */
+export function useSkillProposals(enabled = true) {
   return useQuery({
     queryKey: ['skill-proposals'],
     queryFn: () => api.admin.skills.proposals(),
+    enabled,
+    retry: false,
   });
 }
 
@@ -520,12 +526,15 @@ export function useUpdateEventMutation() {
 }
 
 /** Host-only counts for one class (`GET /api/events/:id/attendance`) — 401s/403s
- * for anyone but the host, so `retry: false` matches `useMe()`/`useMyRsvp()`. */
-export function useAttendance(eventId: string | undefined) {
+ * for anyone but the host, so `retry: false` matches `useMe()`/`useMyRsvp()`.
+ * `enabled` lets a caller who already knows the viewer is not the host skip the
+ * request entirely, rather than spending a 403 the browser logs as an error
+ * (UX audit finding 16). */
+export function useAttendance(eventId: string | undefined, enabled = true) {
   return useQuery({
     queryKey: ['attendance', eventId],
     queryFn: () => api.attendance.list(eventId as string),
-    enabled: Boolean(eventId),
+    enabled: Boolean(eventId) && enabled,
     retry: false,
   });
 }
@@ -541,12 +550,13 @@ export function useSetAttendanceMutation() {
 }
 
 /** Host-or-steward-only roster (`GET /api/events/:id/rsvps`) — 403s for
- * anyone else, so `retry: false` matches `useAttendance()`. */
-export function useEventRoster(eventId: string | undefined) {
+ * anyone else, so `retry: false` matches `useAttendance()`, and `enabled` lets
+ * a caller skip the request when it already knows the answer would be a 403. */
+export function useEventRoster(eventId: string | undefined, enabled = true) {
   return useQuery({
     queryKey: ['roster', eventId],
     queryFn: () => api.events.roster(eventId as string),
-    enabled: Boolean(eventId),
+    enabled: Boolean(eventId) && enabled,
     retry: false,
   });
 }

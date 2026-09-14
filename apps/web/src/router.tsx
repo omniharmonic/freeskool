@@ -15,7 +15,9 @@ const ResourceScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen
 const NewResourceScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'NewResourceScreen');
 const EditResourceScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'EditResourceScreen');
 const PublicProfileScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'PublicProfileScreen');
-const EventRedirect = lazyRouteComponent(() => import('./routes/EventScreen'), 'EventRedirect');
+// Its own module, not `EventScreen`'s: resolving a short id needs the calendar,
+// and this route should not pull the whole class screen in to do it.
+const EventRedirect = lazyRouteComponent(() => import('./routes/EventRedirect'), 'EventRedirect');
 const EventScreen = lazyRouteComponent(() => import('./routes/EventScreen'), 'EventScreen');
 const EventEditScreen = lazyRouteComponent(() => import('./routes/EventEditScreen'), 'EventEditScreen');
 const AttendanceScreen = lazyRouteComponent(() => import('./routes/AttendanceScreen'), 'AttendanceScreen');
@@ -100,8 +102,8 @@ const routes = [
   createRoute({getParentRoute:()=>rootRoute,path:'/people',component:PeopleScreen}),
   createRoute({getParentRoute:()=>rootRoute,path:'/people/$did',component:PersonProfileRoute}),
   createRoute({ getParentRoute: () => rootRoute, path: '/', component: CalendarScreen }),
-  // Pre-Task-4 path, kept working: it forwards to `/events/$id` (see
-  // `EventRedirect`'s doc comment in `EventScreen.tsx`).
+  // Pre-Task-4 path, kept working: it resolves the short id against the public
+  // calendar and forwards to `/events/$id` (see `EventRedirect.tsx`).
   createRoute({ getParentRoute: () => rootRoute, path: '/event/$eventId', component: EventRedirect }),
   createRoute({ getParentRoute: () => rootRoute, path: '/events/$id', component: EventScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/skills', component: SkillsScreen }),

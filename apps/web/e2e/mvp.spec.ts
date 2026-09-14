@@ -55,7 +55,13 @@ async function signUp(browser: Browser, who: string): Promise<Member> {
 
   const verifyUrl = await magicLinkUrl(address);
   await page.goto(verifyUrl);
-  // PRD §13 constraint 2: verification lands on the needs board, not the calendar.
+  // Task 11: a brand-new member meets `/welcome` once — the handle they were
+  // given, a name, a first skill. Every card is skippable, and "Finish" is the
+  // way past all three; the verify screen wears the same title for a moment
+  // while it signs them in, so the button is what this actually waits on.
+  await expect(page.getByRole('heading', { name: 'Welcome to Free School', level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: 'Finish' }).click();
+  // PRD §13 constraint 2: onboarding lands on the needs board, not the calendar.
   await expect(page.getByRole('heading', { name: 'Requests', level: 1 })).toBeVisible();
 
   const me = (await (await page.request.get('/api/auth/me')).json()) as { did: string };

@@ -66,6 +66,8 @@ function RoleGate({ children }: { children: ReactNode }) {
   // rendering this; this second call is a cache hit, not a second request.
   const { data: me, isPending } = useMe();
   if (isPending) return <LoadingState label="Opening steward tools…" />;
+  // Every way this can go — no session read, a role below steward, a refusal —
+  // ends in the same plain notice, never an error (UX audit finding 16).
   if (!me || me.role < STEWARD_ROLE) return <StewardsOnlyNotice />;
   return <>{children}</>;
 }
@@ -104,7 +106,13 @@ export function AdminLayout({ title, current, standfirst, children }: AdminLayou
  * than flashing "0 pending" and then correcting itself.
  */
 function useProposedSkillsCount(): string {
-  const { data, isPending } = useSkillProposals();
+  // Only a steward may ask: the route 403s for everyone else, and an ordinary
+  // member who opens `/admin` should see the "Stewards only" notice without a
+  // refused request behind it (UX audit finding 16).
+  const { data: me } = useMe();
+  const isSteward = (me?.role ?? 0) >= STEWARD_ROLE;
+  const { data, isPending } = useSkillProposals(isSteward);
+  if (!isSteward) return '';
   if (isPending) return '…';
   const count = data?.proposals.length ?? 0;
   if (count === 0) return 'Nothing pending';

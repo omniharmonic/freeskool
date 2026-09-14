@@ -40,6 +40,7 @@ vi.mock('../lib/api', () => {
         checkHandle: vi.fn(),
         setHandle: vi.fn(),
         onboarded: vi.fn(),
+        profile: vi.fn(),
         updateProfile: vi.fn(),
         setSkillClaims: vi.fn(),
       },
@@ -99,6 +100,14 @@ describe('WelcomeScreen', () => {
     vi.mocked(api.me.checkHandle).mockReset().mockResolvedValue({ available: true });
     vi.mocked(api.me.setHandle).mockReset().mockResolvedValue({ handle: 'wren.fs.boulder' });
     vi.mocked(api.me.onboarded).mockReset().mockResolvedValue({ onboarded: true });
+    vi.mocked(api.me.profile).mockReset().mockResolvedValue({
+      did: 'did:plc:wren',
+      role: 20,
+      evidence: {},
+      thresholds: {},
+      rsvps: [],
+      profile: {},
+    });
     vi.mocked(api.me.updateProfile).mockReset().mockResolvedValue({
       did: 'did:plc:wren',
       profile: { displayName: 'Wren Halloway' },
@@ -165,7 +174,49 @@ describe('WelcomeScreen', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Save this handle' }));
 
-    expect(await screen.findByText(/that handle was just taken/i)).toBeInTheDocument();
+    expect(await screen.findByText('Someone already has that handle.')).toBeInTheDocument();
+  });
+
+  it('never shows the server\'s own sentence when a handle save fails', async () => {
+    vi.mocked(api.me.setHandle).mockRejectedValueOnce(
+      new ApiError(400, 'BadRequest', 'Unsupported state or unable to authenticate data'),
+    );
+    renderScreen();
+    await typeHandle('wren');
+    await screen.findByText(/is free/i);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save this handle' }));
+
+    expect(await screen.findByText('Could not save that handle. Try again.')).toBeInTheDocument();
+    expect(screen.queryByText(/unsupported state/i)).not.toBeInTheDocument();
+  });
+
+  it('says a member may change their handle three times a day', async () => {
+    vi.mocked(api.me.setHandle).mockRejectedValueOnce(
+      new ApiError(429, 'TooManyHandleChanges', 'at most 3 handle changes per day'),
+    );
+    renderScreen();
+    await typeHandle('wren');
+    await screen.findByText(/is free/i);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save this handle' }));
+
+    expect(
+      await screen.findByText('You can change your handle three times a day. Try again tomorrow.'),
+    ).toBeInTheDocument();
+  });
+
+  it('says the identity server did not answer on a 502', async () => {
+    vi.mocked(api.me.setHandle).mockRejectedValueOnce(new ApiError(502, 'PdsUnavailable', 'pds down'));
+    renderScreen();
+    await typeHandle('wren');
+    await screen.findByText(/is free/i);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save this handle' }));
+
+    expect(
+      await screen.findByText('The identity server did not answer. Try again in a moment.'),
+    ).toBeInTheDocument();
   });
 
   it('saves the profile card without publishing anything', async () => {
@@ -178,6 +229,73 @@ describe('WelcomeScreen', () => {
     await waitFor(() =>
       expect(api.me.updateProfile).toHaveBeenCalledWith({ displayName: 'Wren Halloway', bio: 'Mending pile.' }),
     );
+  });
+
+  it('prefills the profile card from the member\'s existing profile', async () => {
+    vi.mocked(api.me.profile).mockResolvedValue({
+      did: 'did:plc:wren',
+      role: 20,
+      evidence: {},
+      thresholds: {},
+      rsvps: [],
+      profile: { displayName: 'Wren Halloway', bio: 'Mending pile.' },
+    });
+    renderScreen();
+
+    expect(await screen.findByLabelText('Display name')).toHaveValue('Wren Halloway');
+    expect(screen.getByLabelText('A line about you')).toHaveValue('Mending pile.');
+  });
+
+  it('never writes an empty name or bio over one the member already has', async () => {
+    vi.mocked(api.me.profile).mockResolvedValue({
+      did: 'did:plc:wren',
+      role: 20,
+      evidence: {},
+      thresholds: {},
+      rsvps: [],
+      profile: { displayName: 'Wren Halloway', bio: 'Mending pile.' },
+    });
+    renderScreen();
+
+    fireEvent.change(await screen.findByLabelText('Display name'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('A line about you'), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await screen.findByText('Step 3 of 3');
+    expect(api.me.updateProfile).not.toHaveBeenCalled();
+  });
+
+  it('sends only the field the member changed', async () => {
+    vi.mocked(api.me.profile).mockResolvedValue({
+      did: 'did:plc:wren',
+      role: 20,
+      evidence: {},
+      thresholds: {},
+      rsvps: [],
+      profile: { displayName: 'Wren Halloway', bio: 'Mending pile.' },
+    });
+    renderScreen();
+
+    fireEvent.change(await screen.findByLabelText('A line about you'), { target: { value: 'Two dull knives.' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
+
+    await waitFor(() => expect(api.me.updateProfile).toHaveBeenCalledWith({ bio: 'Two dull knives.' }));
+  });
+
+  it('sends an onboarded member to Me instead of offering the flow again', async () => {
+    vi.mocked(api.auth.me).mockResolvedValue({
+      did: 'did:plc:wren',
+      kind: 'custodial',
+      role: 20,
+      handle: 'wren.fs.boulder',
+      isCustodial: true,
+      emailVerified: true,
+      onboarded: true,
+    });
+    renderScreen();
+
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith({ to: '/me' }));
+    expect(screen.queryByRole('button', { name: 'Save and continue' })).not.toBeInTheDocument();
   });
 
   it('saves chosen skills school-only, at "practicing"', async () => {

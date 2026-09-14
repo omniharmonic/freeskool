@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { FlowFrame } from '../components/FlowFrame';
 import { HandleChooser } from '../components/HandleChooser';
@@ -11,12 +11,13 @@ import { flattenSkills } from '../lib/skills';
 import { consumeSignInReturn } from '../lib/signin-return';
 import {
   useMe,
+  useMeProfile,
   useOnboardedMutation,
   useSetSkillClaimsMutation,
   useSkillTree,
   useUpdateProfileMutation,
 } from '../lib/queries';
-import type { ImageInput } from '../lib/types';
+import type { ImageInput, MeProfile, UpdateProfileInput } from '../lib/types';
 
 /**
  * The first minute of membership (`/welcome`).
@@ -37,12 +38,29 @@ import type { ImageInput } from '../lib/types';
  * `onboarded` flag is still false. "Finish" sets that flag
  * (`POST /api/me/onboarded`) and hands over to `consumeSignInReturn()`, so an
  * invitation that survived the magic link still lands where it was going.
+ *
+ * Anyone who arrives here after that — an old link, a typed address — is sent
+ * to Me instead, and the profile card is prefilled from `GET /api/me`. Both
+ * are UX audit finding 8: this screen used to offer the whole flow again with
+ * empty fields, and "Save and continue" then wrote those empty fields over a
+ * real name and bio.
  */
 export function WelcomeScreen() {
   const navigate = useNavigate();
   const { data: me, isPending, isError } = useMe();
+  // The profile a member may already have. `/welcome` is reachable by hand
+  // (and by an old link) long after onboarding, so the cards start from what
+  // is on file rather than from blank fields — UX audit finding 8.
+  const { data: meProfile, isPending: profilePending } = useMeProfile();
 
-  if (isPending) {
+  // Already been through this once: there is nothing here that Me does not do
+  // better, so send them there rather than offering the whole flow again.
+  const alreadyOnboarded = me?.onboarded === true;
+  useEffect(() => {
+    if (alreadyOnboarded) void navigate({ to: '/me' });
+  }, [alreadyOnboarded, navigate]);
+
+  if (isPending || alreadyOnboarded || (Boolean(me) && profilePending)) {
     return (
       <FlowFrame title="Welcome to Free School">
         <LoadingState label="Opening your notebook…" />
@@ -60,10 +78,24 @@ export function WelcomeScreen() {
     );
   }
 
-  return <WelcomeCards handle={me.handle ?? ''} onDone={() => void navigate({ to: consumeSignInReturn() })} />;
+  return (
+    <WelcomeCards
+      handle={me.handle ?? ''}
+      profile={meProfile?.profile}
+      onDone={() => void navigate({ to: consumeSignInReturn() })}
+    />
+  );
 }
 
-function WelcomeCards({ handle, onDone }: { handle: string; onDone: () => void }) {
+function WelcomeCards({
+  handle,
+  profile,
+  onDone,
+}: {
+  handle: string;
+  profile?: MeProfile;
+  onDone: () => void;
+}) {
   const [step, setStep] = useState(1);
   const advance = (from: number) => setStep((current) => (current > from ? current : from + 1));
 
@@ -72,20 +104,33 @@ function WelcomeCards({ handle, onDone }: { handle: string; onDone: () => void }
   const [choosing, setChoosing] = useState(false);
 
   // ── card 2: profile ──────────────────────────────────────────────────
-  const [displayName, setDisplayName] = useState('');
-  const [bio, setBio] = useState('');
+  // Prefilled from `GET /api/me`, so a second visit shows the name and the
+  // line a member already wrote instead of two empty boxes.
+  const savedName = profile?.displayName ?? '';
+  const savedBio = profile?.bio ?? '';
+  const [displayName, setDisplayName] = useState(savedName);
+  const [bio, setBio] = useState(savedBio);
   const [avatar, setAvatar] = useState<ImageInput | null | undefined>();
   const [profileError, setProfileError] = useState<string | null>(null);
   const updateProfile = useUpdateProfileMutation();
 
+  /** Only what this member actually typed here. An empty box means "nothing to
+   * say about that", never "erase what I had" (UX audit finding 8). */
   const saveProfile = async () => {
     setProfileError(null);
+    const typedName = displayName.trim();
+    const typedBio = bio.trim();
+    const body: UpdateProfileInput = {
+      ...(typedName && typedName !== savedName ? { displayName: typedName } : {}),
+      ...(typedBio && typedBio !== savedBio ? { bio: typedBio } : {}),
+      ...(avatar ? { avatar } : {}),
+    };
+    if (Object.keys(body).length === 0) {
+      advance(2);
+      return;
+    }
     try {
-      await updateProfile.mutateAsync({
-        displayName: displayName.trim(),
-        bio: bio.trim(),
-        ...(avatar ? { avatar } : {}),
-      });
+      await updateProfile.mutateAsync(body);
       advance(2);
     } catch (err) {
       setProfileError(err instanceof ApiError ? err.message : 'Could not save that. Try again.');

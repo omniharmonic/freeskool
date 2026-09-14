@@ -19,19 +19,30 @@ export function handleDomain(fullHandle: string): string {
 
 type CheckState = 'idle' | 'checking' | 'available' | 'taken' | 'reserved' | 'invalid' | 'error';
 
+/**
+ * Every way `PUT /api/me/handle` can refuse, said in the member's language
+ * (UX audit finding 9). The server's own sentence is never shown: during the
+ * stack trouble behind that finding, `/welcome` read "Unsupported state or
+ * unable to authenticate data" under a member's typed handle. An unmapped
+ * code falls through to one plain sentence instead.
+ */
 function saveErrorMessage(err: unknown): string {
-  if (!(err instanceof ApiError)) return 'Could not change your handle. Try again.';
+  const fallback = 'Could not save that handle. Try again.';
+  if (!(err instanceof ApiError)) return fallback;
+  if (err.status === 502) return 'The identity server did not answer. Try again in a moment.';
   switch (err.code) {
     case 'HandleTaken':
-      return 'That handle was just taken. Try another.';
+      return 'Someone already has that handle.';
     case 'InvalidHandle':
       return HANDLE_RULE;
     case 'NotCustodial':
       return 'This account brought its own handle, so it is changed where that account lives.';
     case 'TooManyHandleChanges':
-      return 'You have changed your handle a few times today. Try again tomorrow.';
+      return 'You can change your handle three times a day. Try again tomorrow.';
+    case 'PdsUnavailable':
+      return 'The identity server did not answer. Try again in a moment.';
     default:
-      return err.message;
+      return fallback;
   }
 }
 
