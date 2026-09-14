@@ -17,15 +17,15 @@
  * `invite` and `open` are the values MS §8 anticipates and this route answers 501 for
  * them: refusing loudly is better than a gate that silently reads as closed.
  *
- * WHY THE TOKEN IS NOT IN `config()`. It is read from `process.env` at the moment of the
- * request rather than at boot: rotating it is then a restart of nothing, and an operator
- * token that lives in the config object is one `GET /health` away from being printed.
+ * Both live in `config()` (`src/config.ts`), so rotating `OPERATOR_TOKEN` is a restart,
+ * not a live env change; neither is in `redactedConfig()`'s output.
  */
 import { Hono } from 'hono'
 import { timingSafeEqual } from 'node:crypto'
 import { z } from 'zod'
 import type { AppEnv } from '../session.js'
 import { requireViewer } from '../session.js'
+import { config } from '../../config.js'
 import { createSchool, listPublicSchools, SchoolCreationError } from '../../lib/schools.js'
 import { peerSchools } from '../../lib/peers.js'
 import { currentSchool } from '../school-context.js'
@@ -38,7 +38,7 @@ export const schools = new Hono<AppEnv>()
 
 /** `closed` (ruling 1) unless an operator has deliberately said otherwise. */
 function creationMode(): string {
-  return (process.env.SCHOOL_CREATION ?? 'closed').trim().toLowerCase()
+  return config().SCHOOL_CREATION
 }
 
 /**
@@ -46,7 +46,7 @@ function creationMode(): string {
  * `OPERATOR_TOKEN` must not be one empty header away from letting anyone mint a city.
  */
 function isOperator(presented: string | undefined): boolean {
-  const expected = process.env.OPERATOR_TOKEN ?? ''
+  const expected = config().OPERATOR_TOKEN
   if (!expected || !presented) return false
   const a = Buffer.from(presented)
   const b = Buffer.from(expected)

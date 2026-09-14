@@ -50,6 +50,8 @@ import {
   sec1Der,
   selected,
   shortDid,
+  snapshotFlag,
+  targetHandleUniverse,
   unknownFlags,
   verifyAccount,
   withEndpoint,
@@ -295,6 +297,24 @@ describe('flags', () => {
   })
 })
 
+describe('--snapshot: `=`-form works, space-separated is refused loudly', () => {
+  it('accepts --snapshot=<dir>', () => {
+    const v = snapshotFlag(['--handle-domain=x', '--snapshot=/tmp/snap', '--apply'])
+    expect(v).toEqual({ ok: true, dir: '/tmp/snap' })
+  })
+
+  it('is a no-op, not an error, when --snapshot is absent entirely', () => {
+    const v = snapshotFlag(['--handle-domain=x', '--apply'])
+    expect(v).toEqual({ ok: true, dir: undefined })
+  })
+
+  it('refuses a bare, space-separated --snapshot /tmp/x rather than silently writing no snapshot', () => {
+    const v = snapshotFlag(['--handle-domain=x', '--snapshot', '/tmp/snap', '--apply'])
+    expect(v.ok).toBe(false)
+    if (!v.ok) expect(v.reason).toMatch(/--snapshot needs a value/)
+  })
+})
+
 /* ───────────────────────────────────── planning ─────────────────────────────────── */
 
 describe('planning the new handles (ruling 3)', () => {
@@ -367,6 +387,57 @@ describe('collisions, caught before anything is signed', () => {
   it('leaves an ordinary plan alone', () => {
     const out = markCollisions([entry('did:a', 'cal.freeskool.directory'), entry('did:b', 'mara.freeskool.directory')], reserved)
     expect(out.every((e) => e.skip === undefined)).toBe(true)
+  })
+
+  it('flags a plan entry that collides with an account OUTSIDE the plan (the universe)', () => {
+    // `did:outside` is not itself being migrated this run — it is not even present in
+    // `plan` — but it already occupies (or would occupy) the exact handle `did:a` is
+    // headed for, and that has to refuse the run just as loudly as an in-plan duplicate.
+    const universe = new Map([['did:outside', 'cal.freeskool.directory']])
+    const out = markCollisions([entry('did:a', 'cal.freeskool.directory')], reserved, universe)
+    expect(out[0]!.skip).toBe('handle-taken')
+  })
+
+  it('a DID present in both the plan and the universe is not double-counted against itself', () => {
+    // `universe` is built from EVERY account on the PDS, which includes every account
+    // that also made it into `plan` — so the same DID appears on both sides. That must
+    // not look like two different accounts wanting the same handle.
+    const universe = new Map([
+      ['did:a', 'cal.freeskool.directory'],
+      ['did:b', 'mara.freeskool.directory'],
+    ])
+    const out = markCollisions(
+      [entry('did:a', 'cal.freeskool.directory'), entry('did:b', 'mara.freeskool.directory')],
+      reserved,
+      universe,
+    )
+    expect(out.every((e) => e.skip === undefined)).toBe(true)
+  })
+})
+
+describe('the collision universe: every account on the PDS, not just the plan', () => {
+  it('computes the handle a skipped or --limit-excluded account would land on too', () => {
+    const universe = targetHandleUniverse(
+      [
+        { did: SCHOOL, handle: 'boulder.freeskool.xyz' },
+        { did: AUTHORITY, handle: 'skills.freeskool.xyz' },
+        { did: MEMBER, handle: 'calmalder301.freeskool.xyz' },
+        { did: OWNED, handle: 'owner.example.com' },
+      ],
+      OPTS(),
+      new Set([MEMBER]),
+    )
+    expect(universe.get(SCHOOL)).toBe('boulder.freeskool.directory')
+    expect(universe.get(AUTHORITY)).toBe('skills.freeskool.directory')
+    expect(universe.get(MEMBER)).toBe('calmalder301.freeskool.directory')
+    // OWNED is "other" kind here, excluded from custodial and never selected for THIS
+    // run — but its hypothetical target is still computed, which is the whole point.
+    expect(universe.get(OWNED)).toBe('owner.freeskool.directory')
+  })
+
+  it('drops an account whose prefix cannot be derived rather than throwing', () => {
+    const universe = targetHandleUniverse([{ did: 'did:empty', handle: '' }], OPTS(), new Set())
+    expect(universe.has('did:empty')).toBe(false)
   })
 })
 
@@ -596,6 +667,42 @@ describe('the run', () => {
     // to move the school anyway and discover the clash halfway through the batch.
     expect(dry.collisions).toBe(2)
     await expect(run({ apply: true }, f)).rejects.toThrow(/refusing to apply/)
+    expect(f.submitted).toHaveLength(0)
+  })
+
+  it('refuses to apply over a collision with an account outside the plan (skipped, not-selected)', async () => {
+    const accounts = everyone()
+    // A member who took ownership and, on their own PDS, already squats the exact handle
+    // our custodial MEMBER is headed for. `--accounts=custodial` (the default) means this
+    // account is never selected and never even has its PLC log read — the old collision
+    // check only ever looked WITHIN `plan`, so it never saw this account at all.
+    accounts['did:plc:squatter0000000000000'] = {
+      handle: 'calmalder301.freeskool.directory',
+      op: op({ alsoKnownAs: ['at://calmalder301.freeskool.directory'], rotationKeys: ['did:key:zQ3shSomeoneElseToo'] }),
+    }
+    const f = fakes(accounts)
+    const dry = await run({}, f)
+    expect(dry.collisions).toBe(1)
+    expect(dry.planned).toBe(2) // school + authority; the member was pulled out by the collision
+    await expect(run({ apply: true }, f)).rejects.toThrow(/refusing to apply/)
+    expect(f.submitted).toHaveLength(0)
+    expect(f.handleCalls).toHaveLength(0)
+  })
+
+  it('refuses to apply over a collision with an account --limit cut off, on the very first limited run', async () => {
+    const accounts = everyone()
+    // Added AFTER `school`/`authority`/`member`/`owned` in iteration order, so with
+    // `limit: 1` it never makes it into THIS batch's plan — but it is still on the PDS,
+    // still custodial, and still headed for the school's exact target handle.
+    accounts['did:plc:laterboulder00000000'] = { handle: 'boulder.freeskool.io', op: op({ alsoKnownAs: ['at://boulder.freeskool.io'] }) }
+    const rows = new Map([[MEMBER, 'calmalder301.freeskool.xyz'], ['did:plc:laterboulder00000000', 'boulder.freeskool.io']])
+    const f = fakes(accounts, rows)
+    const limited = await run({ limit: 1 }, f)
+    // The school (the only entry `limit: 1` let into the plan) is the one flagged: the
+    // colliding account itself never entered `plan` at all, only the universe.
+    expect(limited.collisions).toBe(1)
+    expect(limited.planned).toBe(0)
+    await expect(run({ apply: true, limit: 1 }, f)).rejects.toThrow(/refusing to apply/)
     expect(f.submitted).toHaveLength(0)
   })
 

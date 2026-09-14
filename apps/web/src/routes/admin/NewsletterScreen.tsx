@@ -3,7 +3,7 @@ import { AdminLayout } from './AdminLayout';
 import { Button } from '../../components/bits';
 import { Sheet } from '../../components/Sheet';
 import { ApiError } from '../../lib/api';
-import { useComposeNewsletterMutation, useSendNewsletterMutation } from '../../lib/queries';
+import { useComposeNewsletterMutation, useLastNewsletterIssue, useSendNewsletterMutation } from '../../lib/queries';
 import type { NewsletterDraft } from '../../lib/types';
 
 const thisMonth = () => new Date().toISOString().slice(0, 7);
@@ -12,6 +12,8 @@ const thisMonth = () => new Date().toISOString().slice(0, 7);
 export function NewsletterScreen() {
   const composeMutation = useComposeNewsletterMutation();
   const sendMutation = useSendNewsletterMutation();
+  const lastIssueQuery = useLastNewsletterIssue();
+  const lastIssue = lastIssueQuery.data?.issue ?? null;
 
   const [period, setPeriod] = useState(thisMonth());
   const [draft, setDraft] = useState<NewsletterDraft | null>(null);
@@ -89,6 +91,23 @@ export function NewsletterScreen() {
                   aria-label="Newsletter preview"
                   readOnly
                   value={draft.body}
+                />
+              </label>
+            </div>
+          ) : lastIssue ? (
+            <div className="plate space-y-3 p-3.5">
+              <p className="text-caption text-ink-soft">
+                {lastIssue.status === 'sent' ? 'Last sent' : 'Last drafted, not yet sent'} — {lastIssue.month}
+              </p>
+              <label className="block">
+                <span className="text-caption text-ink-soft">
+                  The most recent newsletter. Pick a month above and choose “Compose draft” to write a new one.
+                </span>
+                <textarea
+                  className="mt-1.5 min-h-[180px] w-full resize-y border-[1.5px] border-ink bg-sheet px-3 py-2 text-body outline-none"
+                  aria-label="Last newsletter"
+                  readOnly
+                  value={lastIssue.text}
                 />
               </label>
             </div>

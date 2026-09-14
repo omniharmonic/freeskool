@@ -481,15 +481,55 @@ export function planAccount(
 }
 
 /**
+ * What handle EVERY account on the PDS would end up with, whether or not it is actually
+ * in `plan` — a "not-selected" account (`--accounts=custodial` skipping someone who took
+ * ownership), a "foreign-rotation-key" one, or one this batch simply has not reached yet
+ * because of `--limit`, still occupies (or will occupy) a name on the target domain, and
+ * `markCollisions` has to know that BEFORE anything is signed. `accounts` is every DID
+ * `ports.pds.accountInfos` returned — i.e. the whole PDS, never a narrowed set.
+ */
+export function targetHandleUniverse(
+  accounts: Account[],
+  opts: Pick<PlanOptions, 'handleDomain' | 'schools' | 'authorityDid' | 'authorityLabel'>,
+  custodial: Set<string>,
+): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const account of accounts) {
+    const kind = accountKind(account.did, opts, custodial)
+    try {
+      out.set(account.did, plannedHandle(account, kind, opts))
+    } catch {
+      /* an account with no derivable prefix cannot collide with anything */
+    }
+  }
+  return out
+}
+
+/**
  * Collisions, before a single operation is signed. Two members whose prefixes differ only
  * by the domain they are on would land on one handle; a member whose prefix is a reserved
  * label (`boulder`, `skills`, `www`…) would land on a name the school, the authority or
  * the app already owns. Either one means `admin.updateAccountHandle` fails halfway through
  * a batch, so we refuse the whole run instead.
+ *
+ * `universe` (optional, did → the handle that account would land on) widens the check
+ * beyond `plan` itself: a plan entry that collides with an account this batch never
+ * selected, or cut off with `--limit`, is caught here too — not discovered as an
+ * `updateAccountHandle` failure on THIS run, or silently as a collision on the NEXT one
+ * once the other side finally gets its turn.
  */
-export function markCollisions(plan: PlanEntry[], reserved: ReadonlySet<string>): PlanEntry[] {
+export function markCollisions(
+  plan: PlanEntry[],
+  reserved: ReadonlySet<string>,
+  universe: ReadonlyMap<string, string> = new Map(),
+): PlanEntry[] {
+  // One entry per DID: a plan entry's own (freshly computed) target handle wins over
+  // whatever `universe` says for that same DID, but every OTHER DID's hypothetical
+  // target still counts — that is the whole point of passing `universe` in.
+  const byDid = new Map(universe)
+  for (const e of plan) byDid.set(e.did, e.newHandle)
   const seen = new Map<string, number>()
-  for (const e of plan) seen.set(e.newHandle, (seen.get(e.newHandle) ?? 0) + 1)
+  for (const handle of byDid.values()) seen.set(handle, (seen.get(handle) ?? 0) + 1)
   return plan.map((e) => {
     if (e.skip) return e
     const prefix = e.newHandle.split('.')[0]!
@@ -640,7 +680,11 @@ export async function migratePdsHostname(opts: RunOptions, ports: Ports): Promis
     plan.push(entry)
   }
 
-  plan = markCollisions(plan, reserved)
+  // `infos` is every account `ports.pds.listRepos()` returned — never narrowed by
+  // selection or `--limit` — which is exactly what the collision check needs to see past
+  // this batch's own plan.
+  const universe = targetHandleUniverse(infos, opts, custodial)
+  plan = markCollisions(plan, reserved, universe)
   const collided = plan.filter((e) => e.skip === 'handle-taken')
   for (const e of collided) {
     counts.skipped['handle-taken'] += 1
@@ -880,6 +924,23 @@ function flag(name: string, argv = process.argv): string | undefined {
   return hit.includes('=') ? hit.slice(hit.indexOf('=') + 1) : ''
 }
 
+export type SnapshotFlagVerdict = { ok: true; dir: string | undefined } | { ok: false; reason: string }
+
+/**
+ * `--snapshot=<dir>`. Parsed separately from `flag()` on purpose: every flag here is
+ * `=`-only (`flag()` has no notion of a space-separated `--name value`), so a bare
+ * `--snapshot /tmp/x` parses as `--snapshot` with an EMPTY value — indistinguishable, to
+ * `flag()`, from "not passed" — and used to be silently treated as "no snapshot
+ * requested". A snapshot that silently was not written is a safety rail that silently did
+ * not fire, so refuse loudly instead of guessing what the operator meant.
+ */
+export function snapshotFlag(argv: string[] = process.argv): SnapshotFlagVerdict {
+  if (argv.includes('--snapshot')) {
+    return { ok: false, reason: '--snapshot needs a value as --snapshot=<dir> (space-separated form is not supported)' }
+  }
+  return { ok: true, dir: flag('snapshot', argv) || undefined }
+}
+
 /**
  * Dev-only affordance for the rehearsal in the runbook: mint a throwaway account through
  * the ordinary signup path (admin invite code → `com.atproto.server.createAccount`) so the
@@ -997,10 +1058,14 @@ export async function main(): Promise<number> {
     return 1
   }
 
-  const snapshotFlag = flag('snapshot')
+  const snapshot = snapshotFlag()
+  if (!snapshot.ok) {
+    console.error(snapshot.reason)
+    return 1
+  }
   let snapshotDir: string | undefined
-  if (snapshotFlag) {
-    snapshotDir = path.join(snapshotFlag, new Date().toISOString().replace(/[:.]/g, '-'))
+  if (snapshot.dir) {
+    snapshotDir = path.join(snapshot.dir, new Date().toISOString().replace(/[:.]/g, '-'))
     fs.mkdirSync(snapshotDir, { recursive: true })
   }
 

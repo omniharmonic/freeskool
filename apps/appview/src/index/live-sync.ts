@@ -97,10 +97,11 @@ export async function startPeerLiveSync(indexer: Indexer): Promise<LiveSync | un
    * EVERY school's peers, not the legacy school's (MS §4): one process indexes for every
    * school it hosts, so the sockets follow the same union contrail is handed as `relays`.
    * `indexerPeerHosts` already falls back to the env seed on a deployment whose rows have
-   * never been written, so there is no second fallback here — an empty answer means a
-   * registry a steward has emptied, and following nothing is then the correct behaviour.
+   * never been written, and it never rejects (every query inside it is already caught) —
+   * so there is no second fallback here: an empty answer means a registry a steward has
+   * emptied, and following nothing is then the correct behaviour.
    */
-  const registry = await indexerPeerHosts().catch(() => c.PEER_PDS_HOSTS)
+  const registry = await indexerPeerHosts()
   const hosts: PeerHostRef[] = registry.map((host) => {
     const privateHost = isPrivateHost(host, c.ALLOWED_PRIVATE_PDS_HOSTS)
     return {

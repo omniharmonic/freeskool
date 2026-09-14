@@ -262,6 +262,72 @@ release — it is a known, written-down constraint for whenever multi-school shi
 shipped here. **Resolved on branch `federation`** by the wildcard inversion — see "Caddy: handle
 hosts, school hosts, and the on-demand gate" above.
 
+## Federation release
+
+Everything the `federation` branch adds on top of "Releasing this refinement branch" above — a
+second city, a neutral PDS hostname, and (last, and separately decided) the Bluesky relay. Three
+runbooks carry the actual step-by-step for each; this section is the map between them and the
+order that keeps a deploy from happening ahead of a migration it depends on.
+
+- **`docs/runbooks/multi-school-rollout.md`** — migrations `0011`–`0013` (the primary-key
+  changes that make a rolling deploy unsafe — read the "one thing that matters" there before
+  scheduling this), `backfill-school`, and when it is finally safe to create a second school.
+- **`docs/runbooks/pds-hostname-migration.md`** — moving every account's DID document from
+  `pds.freeskool.xyz` to the neutral `pds.freeskool.directory` (R9), via
+  `migrate-pds-hostname`.
+- **`docs/runbooks/relay-switch.md`** — turning `PDS_CRAWLERS` on, a one-way door, done only
+  after the hostname migration so the relay only ever sees the neutral name.
+
+**New env keys this release introduces** (`.env.example` / `infra/production/.env.example`
+document all of these; `apps/appview/src/config.ts` is still the only thing that reads them):
+
+| Key | Default | What it does |
+|---|---|---|
+| `MULTI_SCHOOL` | `false`/`0` | Host-based tenancy switch (MS §11 Phase 3/4). `0` resolves every request to the one env-configured school regardless of Host. |
+| `SESSION_COOKIE_DOMAIN` | *(empty, host-only)* | `Domain` on the session cookie. `.freeskool.xyz` once a second city exists, so one sign-in is one identity across every city — see the cutover note below. |
+| `SCHOOL_DOMAIN_SUFFIX` | `freeskool.xyz` | The registered domain whose single labels are schools (`<label>.<suffix>` serves that school's app). |
+| `SCHOOL_LABELS` | `boulder` | The labels that are schools today, until `fs_school_domain` fully replaces this env list. |
+| `PDS_LEGACY_HANDLE_DOMAIN` / `PDS_HANDLE_DOMAINS` | empty | The hostname-migration overlap: the domain being moved off, and every domain (beyond `PDS_HANDLE_DOMAIN`) the PDS answers for at once. |
+| `SCHOOL_CREATION` | `closed` | MS §8 ruling 1: `closed`\|`invite`\|`open`. Only `closed` is implemented; the other two 501 rather than silently reading as closed. |
+| `OPERATOR_TOKEN` | *(empty)* | The `X-Operator-Token` an operator presents to create a school while `SCHOOL_CREATION=closed`. Empty refuses school creation unconditionally — required before a second city can ever be created. |
+
+**Order, end to end:**
+
+1. **Deploy the code with `MULTI_SCHOOL=0`.** Every new code path (host resolution, the
+   session's `current_school_did`, `SchoolActorPort` per school) is live either way; with the
+   flag off every request still resolves to the single legacy school, so this step is a normal
+   `release.sh` — no behaviour change a member would notice.
+2. **Migrations `0011`–`0014` run at boot**, as they do for every deploy — `0011`–`0013` are the
+   schools/memberships/credentials tables and the primary-key widening the rollout runbook
+   warns about (app DOWN for that one, not a rolling deploy); `0014` is additive (school PDS
+   endpoint, custody mode, verification timestamps) and safe either way.
+3. **`backfill-school`** (`docs/runbooks/multi-school-rollout.md` §"Order" steps 5–6) — stamps
+   `school_did` onto every pre-existing row and verifies zero rows are left unstamped. This has
+   to finish, and be verified, before step 4: a second school must never be able to see a row
+   the back-fill has not yet claimed for the first one.
+4. **Hostname migration** (`docs/runbooks/pds-hostname-migration.md`) — move every account's DID
+   document off `pds.freeskool.xyz` before any second school is created under it, so a second
+   city never has to be told to use the old name for even a day.
+5. **Flip `MULTI_SCHOOL=1` and set `OPERATOR_TOKEN` the first time a second city is actually
+   created.** Not before — see multi-school-rollout.md's "why the back-fill must precede the
+   second school". This is also the deploy that sets `SESSION_COOKIE_DOMAIN=.freeskool.xyz`
+   (below).
+6. **Relay switch, last, and by itself** (`docs/runbooks/relay-switch.md`) — a one-way door,
+   done only once the neutral hostname is the only one anybody's DID document names.
+
+**The cookie-domain cutover** (federation Task 4 report, concern 1): `SESSION_COOKIE_DOMAIN`
+must move from empty (host-only) to `.freeskool.xyz` in the SAME deploy that creates the second
+city — a school switcher that only ever sees one origin's cookie is not a school switcher. But an
+existing member's browser is still holding a host-only cookie set before the cutover, and that
+cookie keeps winning (more specific scope) until it expires or the member signs out — they will
+not silently start seeing the widened, cross-city session just because the server-side default
+changed. The clean cutover is a one-time forced sign-out at the moment `SESSION_COOKIE_DOMAIN` is
+set: every existing session invalidated, every member re-authenticates once and gets the new,
+domain-wide cookie from then on. There is no code for the forced sign-out yet — either a
+short-lived session-secret rotation (`SESSION_SECRET`, which invalidates every signed cookie at
+once) or a one-off script that empties `fs_session`, run in the same maintenance window as the
+`SESSION_COOKIE_DOMAIN` change.
+
 ## Moving the stack
 
 Everything that moves: the two volumes (`postgres`, `pds`) and `infra/production/.env`. Stop the

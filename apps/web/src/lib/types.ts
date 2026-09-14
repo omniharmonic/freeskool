@@ -981,6 +981,24 @@ export interface NewsletterDraft {
   [key: string]: unknown;
 }
 
+/** `GET /api/admin/newsletter/last` (steward) — the most recently composed
+ * `fs_newsletter_issue` for the current school. Content and status only,
+ * never a recipient list; `sentAt`/`recipientCount` are `null` on a draft
+ * that has not been sent. */
+export interface NewsletterIssue {
+  id: string;
+  month: string;
+  status: string;
+  sentAt: string | null;
+  recipientCount: number | null;
+  html: string;
+  text: string;
+}
+
+export interface LastNewsletterIssueResponse {
+  issue: NewsletterIssue | null;
+}
+
 /**
  * `POST /api/admin/handoff` (steward) — see the module doc comment on
  * `apps/appview/src/http/routes/handoff.ts`.

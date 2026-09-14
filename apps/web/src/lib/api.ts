@@ -50,6 +50,7 @@ import type {
   InviteMintInput,
   InviteMintResult,
   InviteRedeemResult,
+  LastNewsletterIssueResponse,
   LeaveSchoolResult,
   NearbySchool,
   SchoolsResponse,
@@ -381,6 +382,9 @@ export const api = {
       /** `period` defaults server-side to the current month (`YYYY-MM`). */
       compose: (period?: string) => request<NewsletterDraft>('/api/admin/newsletter', { method: 'POST', query: period ? { period } : undefined }),
       send: (id: string) => post<{ ok: boolean; recipientCount: number }>(`/api/admin/newsletter/${encodeURIComponent(id)}/send`),
+      /** The most recently composed issue, for the Preview section BEFORE a steward
+       * composes a new one this session — `{ issue: null }` when nothing ever was. */
+      last: () => get<LastNewsletterIssueResponse>('/api/admin/newsletter/last'),
     },
     handoff: {
       start: (b: HandoffStartInput) => post<HandoffStartResult>('/api/admin/handoff', b),

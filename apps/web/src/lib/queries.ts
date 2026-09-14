@@ -494,6 +494,16 @@ export function useMoveSkillMutation() {
   });
 }
 
+/** `{ issue: null }` when nothing has ever been composed for this school —
+ * NOT an error, so the screen's Preview section can fall back to "Nothing
+ * to preview yet" rather than showing a query-error state. */
+export function useLastNewsletterIssue() {
+  return useQuery({
+    queryKey: ['newsletter-last'],
+    queryFn: () => api.admin.newsletter.last(),
+  });
+}
+
 /** Composing never mutates anything server-persistent in a way the UI needs
  * to invalidate elsewhere — it only ever creates a fresh draft row the
  * caller then holds onto by id. */

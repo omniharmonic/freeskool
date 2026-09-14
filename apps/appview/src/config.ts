@@ -91,6 +91,24 @@ const schema = z.object({
   /** How long a school's `SchoolActorPort` stays cached (MS §5 and Appendix B). */
   SCHOOL_ACTOR_CACHE_TTL_MS: z.coerce.number().int().positive().default(1_800_000),
 
+  /**
+   * MS §8 ruling 1: who may create a school. `closed` (the default) means an operator
+   * holding `OPERATOR_TOKEN`, and nobody else — there is no self-serve door in this
+   * phase, because a name minted under the shared domain is a reputational surface for
+   * every other city on it. `invite` and `open` are the values MS §8 anticipates;
+   * `routes/schools.ts` answers 501 for them rather than silently reading as closed.
+   */
+  SCHOOL_CREATION: z.enum(['closed', 'invite', 'open']).default('closed'),
+  /**
+   * The token an operator presents (`X-Operator-Token`) to mint a school while
+   * `SCHOOL_CREATION=closed`. Empty by default, which `routes/schools.ts`' `isOperator`
+   * treats as "no token configured" and refuses unconditionally — a deployment that never
+   * set this must not be one empty header away from letting anyone mint a city. Because
+   * this now lives in the memoized `config()`, rotating it is a restart, not just an env
+   * change; `redactedConfig()` never includes it.
+   */
+  OPERATOR_TOKEN: z.string().default(''),
+
   /** Taxonomy authority DID: when set, the skill tree/detail routes ignore skill records from any other DID. */
   AUTHORITY_DID: z.string().default(''),
   /** Handle for the taxonomy authority account (ops/documentation use only). */

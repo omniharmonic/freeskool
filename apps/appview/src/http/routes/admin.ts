@@ -12,6 +12,8 @@
  *   GET  /peers   PUT /peers    the peer registry (= contrail's `relays`), published as
  *                               `freeschool.draft.school#peers`/`#tags` by the school actor
  *   GET  /newsletter   POST /newsletter          list / compose a monthly digest draft
+ *   GET  /newsletter/last       the most recently composed issue, for the Preview section
+ *                               of the compose screen — never a recipient list
  *   POST /newsletter/:id/send   send a draft to every subscribed member (see
  *                               ../../jobs/newsletter.ts)
  */
@@ -552,6 +554,31 @@ admin.get('/newsletter', async (c) => {
     .orderBy(desc(newsletterIssue.month))
     .limit(24)
   return c.json({ drafts: rows })
+})
+
+/**
+ * The most recently composed issue for THIS school, so the compose screen's Preview
+ * section can show something before a steward writes a new one — content and status, but
+ * never a recipient list (`fs_newsletter_issue` does not carry one; per-send fan-out lives
+ * only in the send job, `jobs/newsletter.ts`, and is never indexed per-recipient here).
+ * `null` when nothing has ever been composed for this school.
+ */
+admin.get('/newsletter/last', async (c) => {
+  const [row] = await getDb()
+    .select({
+      id: newsletterIssue.id,
+      month: newsletterIssue.month,
+      status: newsletterIssue.status,
+      sentAt: newsletterIssue.sentAt,
+      recipientCount: newsletterIssue.recipientCount,
+      html: newsletterIssue.html,
+      text: newsletterIssue.text,
+    })
+    .from(newsletterIssue)
+    .where(schoolScope(newsletterIssue.schoolDid, currentSchool(c).did))
+    .orderBy(desc(newsletterIssue.month))
+    .limit(1)
+  return c.json({ issue: row ?? null })
 })
 
 admin.post('/newsletter/:id/send', async (c) => {

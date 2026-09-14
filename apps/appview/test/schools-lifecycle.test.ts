@@ -103,7 +103,7 @@ vi.mock('../src/lib/pds.js', async (importOriginal) => ({
 import { and, eq } from 'drizzle-orm'
 import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
 import { createApp } from '../src/http/app.js'
-import { config } from '../src/config.js'
+import { config, resetConfig } from '../src/config.js'
 import { newSessionId, signSessionId, unwrapSecret } from '../src/lib/crypto.js'
 import { resetSchoolContextCache } from '../src/http/school-context.js'
 import {
@@ -448,7 +448,11 @@ describe('POST /api/schools (ruling 1: operator only)', () => {
 
   it('501s when SCHOOL_CREATION is anything else', async () => {
     if (!available) return
+    // SCHOOL_CREATION now lives in the memoized config() (src/config.ts), so flipping the
+    // env var alone would not be seen — resetConfig() forces the next config() call to
+    // re-read process.env.
     process.env.SCHOOL_CREATION = 'open'
+    resetConfig()
     try {
       const res = await createApp().request('http://legacy.test/api/schools', {
         method: 'POST',
@@ -458,6 +462,7 @@ describe('POST /api/schools (ruling 1: operator only)', () => {
       expect(res.status).toBe(501)
     } finally {
       process.env.SCHOOL_CREATION = 'closed'
+      resetConfig()
     }
   })
 })

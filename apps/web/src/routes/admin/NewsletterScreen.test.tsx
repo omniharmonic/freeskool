@@ -34,7 +34,7 @@ vi.mock('../../lib/api', () => {
   return {
     api: {
       auth: { me: vi.fn() },
-      admin: { newsletter: { compose: vi.fn(), send: vi.fn() }, skills: { proposals: vi.fn() } },
+      admin: { newsletter: { compose: vi.fn(), send: vi.fn(), last: vi.fn() }, skills: { proposals: vi.fn() } },
     },
     ApiError,
   };
@@ -70,6 +70,7 @@ beforeEach(() => {
     status: 'draft',
   });
   vi.mocked(api.admin.newsletter.send).mockReset().mockResolvedValue({ ok: true, recipientCount: 12 });
+  vi.mocked(api.admin.newsletter.last).mockReset().mockResolvedValue({ issue: null });
 });
 
 describe('NewsletterScreen', () => {
@@ -91,6 +92,39 @@ describe('NewsletterScreen', () => {
     await waitFor(() => expect(screen.getByLabelText('Newsletter preview')).toHaveValue('Eleven classes this month.'));
     expect(screen.getByText('September at Boulder Free School')).toBeInTheDocument();
     expect(screen.queryByText('Nothing to preview yet.')).not.toBeInTheDocument();
+  });
+
+  it('shows the last issue in the Preview section before anything is composed this session', async () => {
+    vi.mocked(api.admin.newsletter.last).mockResolvedValue({
+      issue: {
+        id: 'iss0',
+        month: '2026-08',
+        status: 'sent',
+        sentAt: '2026-08-01T00:00:00Z',
+        recipientCount: 9,
+        html: '<p>August classes.</p>',
+        text: 'August classes.',
+      },
+    });
+    renderScreen();
+
+    expect(await screen.findByLabelText('Last newsletter')).toHaveValue('August classes.');
+    expect(screen.getByText(/last sent/i)).toBeInTheDocument();
+    expect(screen.getByText(/2026-08/)).toBeInTheDocument();
+    expect(screen.queryByText('Nothing to preview yet.')).not.toBeInTheDocument();
+  });
+
+  it('a freshly composed draft replaces the last-issue preview, not the other way round', async () => {
+    vi.mocked(api.admin.newsletter.last).mockResolvedValue({
+      issue: { id: 'iss0', month: '2026-08', status: 'sent', sentAt: null, recipientCount: 9, html: '<p>x</p>', text: 'August classes.' },
+    });
+    renderScreen();
+    await screen.findByLabelText('Last newsletter');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Compose draft' }));
+
+    await waitFor(() => expect(screen.getByLabelText('Newsletter preview')).toHaveValue('Eleven classes this month.'));
+    expect(screen.queryByLabelText('Last newsletter')).not.toBeInTheDocument();
   });
 
   it('never says who the subscribers are, before or after sending', async () => {
