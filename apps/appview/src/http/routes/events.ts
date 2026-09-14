@@ -6,6 +6,7 @@
  *   GET    /events/:id              one event, projected for the viewer
  *   GET    /events/:id.ics          text/calendar, as an attachment
  *   POST   /events/:id/attendance   the host attests who took part (app-side)
+ *   POST   /events/:id/cancel       the host calls the class off (status, never a delete)
  *
  * `:id` is a URL-encoded AT-URI. An AppView-local opaque id would be prettier but would
  * also be a second namespace to keep in sync; the AT-URI is already the identity.
@@ -13,17 +14,21 @@
 import { getPresentation, presentationFields } from '../../lib/event-presentation.js'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
+import { and, eq, isNull, sql } from 'drizzle-orm'
 import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireViewer, requireRole } from '../session.js'
 import {
+  cancelEventAsHost,
   canViewRoster,
   createEventAsHost,
   EventNotFoundError,
   EventPermissionError,
+  isCancelledStatus,
+  NotRecurringError,
   OccurrenceNotEditableError,
-  resolveHostDid,
+  hostOfSeries,
+  seriesUriForOccurrence,
   SeriesEditNotSupportedError,
   updateEventAsHost,
 } from '../../lib/events.js'
@@ -36,13 +41,14 @@ import { viewerRelation } from '../relation.js'
 import { toCalendarEvent } from './calendar.js'
 import { buildIcs, icsStatus } from '../../lib/ics.js'
 import { getDb } from '../../db/index.js'
-import { appMeta, attendance, attendanceRollup, custodialAccount } from '../../db/schema.js'
+import { attendance, attendanceRollup } from '../../db/schema.js'
 import { rowId } from '../../lib/ids.js'
 import { bumpTally, roleOf } from '../../lib/roles.js'
 import { rsvpCounts, rsvpRoster } from '../../lib/rsvp.js'
-import { getEventExtra } from '../../lib/event-extra.js'
+import { recordAttendance } from '../../lib/attendance.js'
+import { getEventExtra, type EventExtra } from '../../lib/event-extra.js'
 import { config } from '../../config.js'
-import { PROFILE_KEY, type Profile } from './me.js'
+import { displayNamesForDids, handlesForDids } from './me.js'
 
 export const events = new Hono<AppEnv>()
 
@@ -51,12 +57,25 @@ const createBody = z.object({
   cover: z.object({ data: z.string().max(11_200_000), alt: z.string().trim().min(1).max(300) }).nullable().optional(),
   venueNeeded: z.boolean().optional(),
   name: z.string().trim().min(1).max(300),
+  /**
+   * Attendee-only, app-side (task 19c) — `fs_event_extra`, revealed by the same gate as
+   * the street address. Neither ever reaches the public event record again.
+   */
+  attendeeNotes: z.string().max(20_000).optional(),
+  meetingLink: z.string().max(2048).optional(),
+  /**
+   * @deprecated Pre-19c body fields. `description` meant "extra notes for people
+   * attending" and `uris` meant "the meeting link", and both were written straight into
+   * the world-readable `community.lexicon.calendar.event`. Still ACCEPTED so an older
+   * PWA build keeps working; `attendeeFields()` in `lib/events.ts` maps them onto
+   * `attendeeNotes` / `meetingLink`, and neither is written to a record.
+   */
   description: z.string().max(20_000).optional(),
+  uris: z.array(z.object({ uri: z.string(), name: z.string().optional() })).optional(),
   startsAt: z.string().datetime({ offset: true }),
   endsAt: z.string().datetime({ offset: true }).optional(),
   mode: z.string().optional(),
   locations: z.array(z.unknown()).optional(),
-  uris: z.array(z.object({ uri: z.string(), name: z.string().optional() })).optional(),
   timezone: z.string().optional(),
   capacity: z.number().int().positive().optional(),
   visibility: z.enum(['listed', 'unlisted', 'private']).optional(),
@@ -145,6 +164,47 @@ events.put('/events/:id', requireViewer, async (c) => {
   }
 })
 
+/**
+ * `POST /api/events/:id/cancel` — the host calls a class off.
+ *
+ * Weather, illness, a venue that fell through: a free school cancels classes constantly,
+ * and before this the only thing a host could do with a class that was not happening was
+ * edit its description and hope. See `lib/events.ts#cancelEventAsHost` for what it writes
+ * (a `status`, never a delete) and what it deliberately does not (the reason, which is
+ * app-side).
+ *
+ * Host only. A steward acts through moderation (`remove-listing`), which takes the class
+ * off OUR calendar without declaring somebody else's class cancelled in their own repo.
+ */
+const cancelBody = z.object({
+  /** App-side only — see the route's doc comment. */
+  reason: z.string().trim().max(2000).optional(),
+  scope: z.enum(['this', 'following']).optional(),
+})
+
+events.post('/events/:id/cancel', requireViewer, async (c) => {
+  const uri = decodeURIComponent(c.req.param('id'))
+  const parsed = cancelBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) {
+    return c.json({ error: 'InvalidRequest', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400)
+  }
+  try {
+    return c.json(await cancelEventAsHost(c.var.viewer!, uri, parsed.data))
+  } catch (err) {
+    if (err instanceof EventNotFoundError) return c.json({ error: 'NotFound' }, 404)
+    if (err instanceof EventPermissionError) {
+      return c.json({ error: 'PermissionDenied', message: 'only the host of a class may cancel it' }, 403)
+    }
+    if (err instanceof NotRecurringError) {
+      return c.json({ error: 'NotRecurring', message: err.message }, 400)
+    }
+    if (err instanceof NoActorCredentialError) {
+      return c.json({ error: 'ReauthRequired', message: 'sign in again before cancelling your class' }, 401)
+    }
+    throw err
+  }
+})
+
 events.get('/events/:id{.+\\.ics}', async (c) => {
   const raw = c.req.param('id')
   const uri = decodeURIComponent(raw.replace(/\.ics$/, ''))
@@ -160,7 +220,10 @@ events.get('/events/:id{.+\\.ics}', async (c) => {
       {
         uid: uri,
         summary: loaded.event.name ?? 'Free School class',
-        description: relation === 'public' ? undefined : loaded.event.description,
+        // The record's `description` IS the public overview (task 19c) — the attendee
+        // notes and the meeting link are app-side and never travel in an `.ics` file,
+        // which a calendar client may well re-share.
+        description: loaded.event.description,
         startsAt: loaded.event.startsAt,
         endsAt: loaded.event.endsAt,
         location: icsLocation(loaded.event, loaded.inputs, relation),
@@ -206,12 +269,23 @@ events.get('/events/:id', async (c) => {
   // Use the same `roleOf`-based host-or-steward check the roster route uses instead.
   const canSeeRawVisibility = viewer ? canViewRoster(loaded.hostDid, viewer.did, await roleOf(viewer.did)) : false
   return c.json({
-    ...projectEvent(loaded.event, loaded.inputs, relation),
+    // `loaded.extra` carries the attendee notes and the meeting link; `projectEvent`
+    // releases them only to a viewer who also gets the street address (task 19c).
+    ...projectEvent(loaded.event, loaded.inputs, relation, loaded.extra),
     ...presentationFields(uri, await getPresentation(uri)),
     listed: loaded.listed,
     skills: loaded.skillLevels,
     materials: loaded.extra.materials,
     ...(loaded.extra.suppliesNote ? { suppliesNote: loaded.extra.suppliesNote } : {}),
+    // App-side, and released to anyone who can already see the class: a cancellation
+    // nobody can read the reason for sends people to a locked door. `status` on the
+    // record says THAT it was cancelled; this says why. (`projectEvent` is not the place
+    // — that gates on the address predicate, and this is not attendee-only.)
+    ...(loaded.extra.cancelReason ? { cancelledReason: loaded.extra.cancelReason } : {}),
+    // Does "this one, or this and the ones after it?" even apply to this class? The
+    // client cannot tell a one-off from a recurring date otherwise, and offering that
+    // choice on a class with nothing following it is a question with no answer.
+    recurring: Boolean(loaded.series || loaded.occurrenceOf),
     // Counts only. Never the roster.
     rsvps: await rsvpCounts(uri),
     viewerRelation: relation,
@@ -249,59 +323,6 @@ events.get('/events/:id/rsvps', requireViewer, async (c) => {
   )
 })
 
-/**
- * Roster `displayName` (review I3): the app-side profile a member sets at `PUT /api/me`
- * (`fs_app_meta`, key `profile:<did>` — see `http/routes/me.ts`). One batched `inArray`
- * query for every DID on the roster, never one query per row. Omitted when the member
- * never set one.
- */
-async function displayNamesForDids(dids: string[]): Promise<Record<string, string>> {
-  if (dids.length === 0) return {}
-  const rows = await getDb()
-    .select({ key: appMeta.key, value: appMeta.value })
-    .from(appMeta)
-    .where(inArray(appMeta.key, dids.map(PROFILE_KEY)))
-  const out: Record<string, string> = {}
-  for (const r of rows) {
-    const displayName = (r.value as Profile | undefined)?.displayName
-    if (displayName) out[r.key.slice('profile:'.length)] = displayName
-  }
-  return out
-}
-
-/**
- * Best-effort DID -> handle for the roster only — never authoritative, never cached.
- * Our own custodial members resolve straight from `fs_custodial_account`; anyone else
- * (an existing OAuth account) falls back to contrail's `identities` table, which is
- * populated by indexing/backfill, not by us. A DID that resolves nowhere falls back to
- * itself rather than leaving a gap in the response.
- */
-async function handlesForDids(dids: string[]): Promise<Record<string, string>> {
-  if (dids.length === 0) return {}
-  const out: Record<string, string> = {}
-  const rows = await getDb()
-    .select({ did: custodialAccount.did, handle: custodialAccount.handle })
-    .from(custodialAccount)
-    .where(inArray(custodialAccount.did, dids))
-  for (const r of rows) out[r.did] = r.handle
-  const remaining = dids.filter((d) => !out[d])
-  if (remaining.length > 0) {
-    try {
-      const indexer = await getIndexer()
-      for (const did of remaining) {
-        const row = await indexer.db
-          .prepare('SELECT handle FROM identities WHERE did = ? LIMIT 1')
-          .bind(did)
-          .first<{ handle: string | null }>()
-        if (row?.handle) out[did] = row.handle
-      }
-    } catch {
-      /* index not ready; the did-as-handle fallback below still gives a usable response */
-    }
-  }
-  return out
-}
-
 const attendanceBody = z.object({
   attendees: z
     .array(
@@ -328,75 +349,22 @@ events.post('/events/:id/attendance', requireViewer, async (c) => {
   if (loaded.hostDid !== viewer.did) {
     return c.json({ error: 'PermissionDenied', message: 'only the host of a class may attest attendance' }, 403)
   }
+  // A cancelled class did not happen, so nobody came to it: attesting attendance here
+  // would credit real attended-class counts (and, through `deriveRole`, real standing)
+  // for a class that was called off.
+  if (isCancelledStatus(loaded.event.status)) {
+    return c.json({ error: 'EventCancelled', message: 'this class was cancelled, so there is no attendance to record' }, 400)
+  }
   const parsed = attendanceBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
 
-  const db = getDb()
-  let recorded = 0
-  let tallyDelta = 0
-  for (const a of parsed.data.attendees) {
-    if (a.did === viewer.did) continue // a host does not attest themselves
-
-    /**
-     * A5: THE TALLY FOLLOWS THE TRANSITION, NOT THE WRITE.
-     *
-     * The upsert is idempotent; the tally bump was not. A host who opened the attendance
-     * sheet, saved, noticed one more name and saved again gave everybody on the list a
-     * second attended-class credit — and the sheet is precisely the screen people re-save.
-     * `fs_attendance` is collapsed to counts after 90 days, so the tally is the only
-     * surviving evidence and the inflation was permanent.
-     *
-     * So: read the row's current state first, then bump only when `participated`
-     * genuinely flips. "Currently participated" means `participated AND NOT voided`.
-     *
-     * R3: A VOID IS A STEWARD DECISION, NOT THE HOST'S TO REVERSE. `voidedAt` is set only
-     * by the steward-approved `void-attendance` action (`admin.ts`). The host path below
-     * never clears it — it is left out of `onConflictDoUpdate`'s `set` entirely — and a
-     * voided row never counts towards the tally from this endpoint even if the host's
-     * sheet still shows the attendee ticked: `wasVoided` short-circuits the bump in both
-     * directions, so re-saving the sheet can neither re-credit a voided attendance nor
-     * double-debit it.
-     */
-    const existing = await db
-      .select({ participated: attendance.participated, voidedAt: attendance.voidedAt })
-      .from(attendance)
-      .where(and(eq(attendance.eventUri, uri), eq(attendance.attendeeDid, a.did)))
-      .limit(1)
-    const wasVoided = existing.length > 0 && existing[0]!.voidedAt !== null
-    const wasCounted = existing.length > 0 && existing[0]!.participated && !wasVoided
-
-    await db
-      .insert(attendance)
-      .values({
-        id: rowId(),
-        eventUri: uri,
-        attendeeDid: a.did,
-        attestedByDid: viewer.did,
-        participated: a.participated,
-        role: a.role,
-        eventStartsAt: loaded.event.startsAt ? new Date(loaded.event.startsAt) : null,
-      })
-      .onConflictDoUpdate({
-        target: [attendance.eventUri, attendance.attendeeDid],
-        // `voidedAt` deliberately absent: the host path never un-voids a row.
-        set: { participated: a.participated, role: a.role, attestedByDid: viewer.did },
-      })
-
-    if (wasVoided) {
-      // No tally movement for a voided row, regardless of what the sheet says now.
-    } else if (a.participated && !wasCounted) {
-      await bumpTally(a.did, { attendedConfirmed: 1 })
-      tallyDelta++
-    } else if (!a.participated && wasCounted) {
-      // The host un-ticked somebody. Take the credit back, floored at 0 by `bumpTally`.
-      await bumpTally(a.did, { attendedConfirmed: -1 })
-      tallyDelta--
-    }
-    if (a.participated) recorded++
-  }
-  // `recorded` is who is on the sheet as having taken part (stable across re-saves);
-  // `tallyChanged` is what this particular save actually moved.
-  return c.json({ ok: true, recorded, tallyChanged: tallyDelta })
+  const { recorded, tallyChanged } = await recordAttendance({
+    eventUri: uri,
+    hostDid: viewer.did,
+    attendees: parsed.data.attendees,
+    eventStartsAt: loaded.event.startsAt ? new Date(loaded.event.startsAt) : null,
+  })
+  return c.json({ ok: true, recorded, tallyChanged })
 })
 
 /** Counts, for the host's own view. Never a list of DIDs. */
@@ -429,19 +397,23 @@ export interface LoadedEvent {
   inputs: { listings: EventListing[]; configs: EventConfig[] }
   listed: boolean
   skillLevels: Array<{ skill: string; level: number; prerequisites?: string }>
+  /** The series sidecar, when this event is the series' own FIRST event. */
   series?: { rrule?: string; exdates?: string[] }
-  extra: { materials: string[]; suppliesNote?: string }
+  /** The series this event is a materialized OCCURRENCE of, when it is one. */
+  occurrenceOf?: string
+  extra: EventExtra
 }
 
 export async function loadEvent(uri: string): Promise<LoadedEvent | null> {
   const indexer = await getIndexer()
   const row = await getRecordByUri(indexer, 'event', uri)
   if (!row) return null
-  const [listings, configs, skills, seriesRows, extra] = await Promise.all([
+  const [listings, configs, skills, seriesRows, occurrenceOf, extra] = await Promise.all([
     sidecarsForEvent<EventListing>(indexer, 'eventListing', uri),
     sidecarsForEvent<EventConfig>(indexer, 'eventConfig', uri),
     sidecarsForEvent<{ skill: string; level: number; prerequisites?: string }>(indexer, 'skillLevel', uri),
     sidecarsForEvent<{ rrule?: string; exdates?: string[] }>(indexer, 'series', uri, 'firstEvent.uri'),
+    seriesUriForOccurrence(uri),
     getEventExtra(uri),
   ])
   const inputs = { listings: listings.map((l) => l.value), configs: configs.map((x) => x.value) }
@@ -449,7 +421,7 @@ export async function loadEvent(uri: string): Promise<LoadedEvent | null> {
   // series author. Everything downstream of `LoadedEvent.hostDid` — the roster gate, the
   // attendance gate, `viewerRelation`, the raw-visibility field, the feedback notification
   // — therefore gets the right person for free.
-  const hostDid = await resolveHostDid(uri, row.did)
+  const hostDid = hostOfSeries(occurrenceOf, row.did)
   return {
     hostDid,
     event: toCalendarEvent(uri, hostDid, row.value),
@@ -457,6 +429,7 @@ export async function loadEvent(uri: string): Promise<LoadedEvent | null> {
     listed: isListed(inputs),
     skillLevels: skills.map((s) => s.value),
     ...(seriesRows[0] ? { series: seriesRows[0].value } : {}),
+    ...(occurrenceOf ? { occurrenceOf } : {}),
     extra,
   }
 }

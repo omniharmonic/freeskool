@@ -50,6 +50,7 @@ const stewardMe = {
   role: 40,
   isCustodial: true,
   emailVerified: true,
+  onboarded: true,
 };
 
 function renderScreen() {

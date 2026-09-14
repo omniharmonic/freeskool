@@ -76,7 +76,21 @@ One database, two kinds of tables. **Indexed** (rebuildable from repos; contrail
 ### 3.1 Records (public unless noted)
 Base: `community.lexicon.calendar.event` (class or occurrence), `.rsvp` (opt-in only), `community.lexicon.location.*`. Coop: `event.config`, `event.detail` (space), `event.listing`, `membership` (space/app-side), `evaluation`, `invite`/`share` (app-side v1). Ours (`freeschool.draft.*`, 17): `skill`, `skillClaim`, `skillAttestation` (double opt-in), `skillLevel`, `series`, `occurrence`, `attendance` (space/app-side), `hostFeedback` (space/app-side), `request`, `claim`, `resource`, `course`, `policy`, `moderationAction` (space/app-side), `approval`, `appeal` (space), `school`.
 
-Authorship: hosts write their own events into **their own repo** via OAuth (or via the school when custodial and the policy says so); the school writes listings, policy, roles, moderation, and materialized occurrences **through the actor port**. Skill references are at-uri; event references are strongRef.
+Authorship: hosts write their own events into **their own repo** via OAuth (or via the school when custodial and the policy says so); the school writes listings, policy, roles, moderation, and materialized occurrences **through the actor port**. Skill references are at-uri; event references are strongRef — **both fields**, `{uri, cid}`: a `coop.lexicon.event.listing` written with the uri alone is invalid `com.atproto.repo.strongRef` and a validating peer drops it, which for a moderation removal means the class stays listed on their calendar (interop audit gap 3).
+
+#### The role integer ladder (`coop.lexicon.membership#role`)
+
+A peer reading `role: 20` in one of our opt-in membership claims has to know our ladder, so here it is (`packages/shared/src/roles.ts`, matching `coop.lexicon.membership`'s open integer registry):
+
+| Value | Name | What it means here | How it is reached |
+|---|---|---|---|
+| 0 | Visitor | anyone reading the calendar; not a claim we ever publish | default, no evidence |
+| 10 | Member | belongs to this school | a profile plus the policy's `memberRequires` gate (`none`, an invite/vouch, or one confirmed attendance) |
+| 20 | Host | has taught here | member, plus `hostMinAttended` confirmed attendances (0 by default: "if you say you're part of Free School, you're part of Free School") |
+| 30 | Facilitator | carries the school's rhythm | `facilitatorMinHosted` hosted classes that actually happened (3 by default) **and** no upheld negative feedback |
+| 40 | Steward | holds the school DID's custody decisions | appointed during bootstrap, or elected afterwards; never derived from counts alone |
+
+Three things follow, and are the whole reason the ladder is safe to publish. Roles are **derived, never minted**: `deriveRole(evidence, thresholds)` is a pure function re-evaluated from records and policy every time, so there is no token to trade, revoke or forge. Only **≥ 20 (Host)** ever reaches the protocol, and only when all three gates hold — the policy's `publishRoles` is on, the subject opted in, and the derived role qualifies (`apps/appview/src/lib/membership-claims.ts`) — with retraction deleting the record at a deterministic rkey. And the thresholds themselves are **per-school policy** (`freeschool.draft.policy#thresholds`, public), so a peer reading `role: 30` should read our policy record rather than assume its own school's bar. Open question for Lucian: whether `coop.lexicon.membership` has a canonical registry we should be matching instead (interop audit gap 8).
 
 ### 3.2 Derived (never stored as truth)
 Skill taxonomy: 525 `freeschool.draft.skill` records seeded under the taxonomy authority DID (`infra/seed/skills`), `rkey = slug`, Tier A/B flag held app-side until Lucian decides whether it belongs on the record. Events may carry zero `skillLevel` sidecars; an event with no `locations` is the "venue needed" state (R7). Role (`deriveRole` over evidence: profile, invite/vouch, confirmed attendance, hosted events, upheld negative feedback, steward appointment), badges, per-skill practitioner directory, skill pages, guild suggestions, feedback aggregates (`aggregateFeedback`, k=3 numeric / 5 text).

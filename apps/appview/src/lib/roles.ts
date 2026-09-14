@@ -18,7 +18,7 @@
 import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm'
 import { deriveRole, Role, type Evidence } from '@freeschool/shared'
 import { getDb } from '../db/index.js'
-import { attendanceTally, custodialAccount, invite, member, moderationQueue, steward } from '../db/schema.js'
+import { attendanceTally, attestation, custodialAccount, invite, member, moderationQueue, steward } from '../db/schema.js'
 import { getThresholds } from './policy.js'
 import { config } from '../config.js'
 import { getIndexer } from '../index/indexer.js'
@@ -65,7 +65,7 @@ export async function isOwnMemberSet(dids: string[]): Promise<Set<string>> {
 export async function evidenceFor(did: string, schoolDid = config().SCHOOL_DID): Promise<Evidence> {
   const db = getDb()
 
-  const [custodial, invited, tally, upheld, stewardRow] = await Promise.all([
+  const [custodial, invited, vouched, tally, upheld, stewardRow] = await Promise.all([
     db.select({ did: custodialAccount.did }).from(custodialAccount).where(eq(custodialAccount.did, did)).limit(1),
     db
       .select({ code: invite.code })
@@ -77,6 +77,10 @@ export async function evidenceFor(did: string, schoolDid = config().SCHOOL_DID):
         ),
       )
       .limit(1),
+    db
+      .select({ n: sql<number>`count(*)::int` })
+      .from(attestation)
+      .where(eq(attestation.subjectDid, did)),
     db.select().from(attendanceTally).where(eq(attendanceTally.did, did)).limit(1),
     db
       .select({ n: sql<number>`count(*)::int` })
@@ -99,7 +103,9 @@ export async function evidenceFor(did: string, schoolDid = config().SCHOOL_DID):
 
   return {
     hasProfile,
-    inviteOrVouch: invited.length > 0,
+    // A member with zero indexed invites can still satisfy the gate by having received
+    // at least one skill vouch (`fs_attestation`, app-side per R9).
+    inviteOrVouch: invited.length > 0 || (vouched[0]?.n ?? 0) > 0,
     attendedConfirmed: tally[0]?.attendedConfirmed ?? 0,
     hostedEvents: tally[0]?.hostedEvents ?? 0,
     upheldNegativeFeedback: upheld[0]?.n ?? 0,

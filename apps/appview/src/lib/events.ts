@@ -24,7 +24,7 @@
 import { normalizeImage, type ImageInput } from './images.js'
 import { getPresentation, savePresentation, type PublicOverview } from './event-presentation.js'
 import type { Agent } from '@atproto/api'
-import type { Did } from '@freeschool/school-actor'
+import type { Did, SchoolAction } from '@freeschool/school-actor'
 import { NSID } from '../lexicons/nsids.js'
 import { tid } from './ids.js'
 import { schoolActor, schoolDid } from './school-actor.js'
@@ -40,9 +40,12 @@ import { isListed } from '../http/visibility.js'
 import type { EventConfig, EventListing } from '../lexicons/coop.js'
 import { getEventExtra, setEventExtra } from './event-extra.js'
 import { Role } from '@freeschool/shared'
-import { inArray, eq } from 'drizzle-orm'
+import { and, gte, inArray, eq } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { seriesOccurrence } from '../db/schema.js'
+import { rsvpRoster } from './rsvp.js'
+import { enqueueNotification } from '../notifications/dispatch.js'
+import { normalizeInstant } from './crypto.js'
 
 /**
  * WHO IS THE HUMAN HOST OF THIS EVENT? (A8)
@@ -64,12 +67,25 @@ import { seriesOccurrence } from '../db/schema.js'
  * else's repo.
  */
 export async function resolveHostDid(eventUri: string, recordAuthorDid: string): Promise<string> {
+  return hostOfSeries(await seriesUriForOccurrence(eventUri), recordAuthorDid)
+}
+
+/**
+ * The series this event is a materialized occurrence OF, or `undefined` for an ordinary
+ * class (and for the series' own first event, which is the host's own record and finds
+ * its series through the `firstEvent` sidecar instead).
+ */
+export async function seriesUriForOccurrence(eventUri: string): Promise<string | undefined> {
   const rows = await getDb()
     .select({ seriesUri: seriesOccurrence.seriesUri })
     .from(seriesOccurrence)
     .where(eq(seriesOccurrence.eventUri, eventUri))
     .limit(1)
-  const seriesUri = rows[0]?.seriesUri
+  return rows[0]?.seriesUri ?? undefined
+}
+
+/** A series lives in the same repo as the first event it points at — one parse, no I/O. */
+export function hostOfSeries(seriesUri: string | undefined, recordAuthorDid: string): string {
   if (!seriesUri) return recordAuthorDid
   return parseAtUri(seriesUri)?.did ?? recordAuthorDid
 }
@@ -96,17 +112,38 @@ export async function resolveHostDids(
 }
 
 export interface CreateEventInput {
+  /**
+   * The PUBLIC invitation. Its `description` is written into the event record's own
+   * `description` field (task 19c) — that is what a peer AppView, a calendar client or
+   * anyone reading the host's repo sees, and it is the only free text of ours that goes
+   * there. `audience` / `accessibility` stay app-side (`lib/event-presentation.ts`),
+   * because the borrowed record has nowhere to put them and we never extend it.
+   */
   publicOverview?: PublicOverview
   cover?: ImageInput | null
   venueNeeded?: boolean
   name: string
+  /**
+   * Notes for people who RSVP'd ("come to the side door"). App-side, `fs_event_extra`
+   * — NEVER the record. See `lib/event-extra.ts`.
+   */
+  attendeeNotes?: string
+  /** The Zoom/Meet/Jitsi link. App-side too, same reason, same gate. */
+  meetingLink?: string
+  /**
+   * @deprecated Pre-19c names for `attendeeNotes` / `meetingLink`. The class form
+   * labelled them "shown after RSVP" and then wrote them into the host's PUBLIC record;
+   * `attendeeFields()` below maps them onto the app-side fields so older clients (and
+   * the seed scripts) keep working. Neither is ever written to a record again.
+   */
   description?: string
+  /** @deprecated see `description` — only `uris[0].uri` is read, as the meeting link. */
+  uris?: Array<{ uri: string; name?: string }>
   startsAt: string
   endsAt?: string
   /** `community.lexicon.calendar.event#inperson` etc. Defaults to in-person. */
   mode?: string
   locations?: unknown[]
-  uris?: Array<{ uri: string; name?: string }>
   /** coop.lexicon.event.config */
   timezone?: string
   capacity?: number
@@ -195,6 +232,15 @@ export interface RouteListingInput {
    * array to keep a unit test hermetic (no network, no warning log).
    */
   schoolTags?: string[]
+  /**
+   * The audited `SchoolAction` this listing belongs to. Defaults to `publish-event` (a
+   * host publishing a class); the series job passes `materialize-occurrence` so the
+   * audit row says which job wrote it — the ROUTING RULE is identical either way, which
+   * is the entire point of routing occurrences through here (interop gap 2).
+   */
+  action?: SchoolAction
+  /** Audit reason override; defaults to `host published "<name>"`. */
+  auditReason?: string
 }
 
 /** Writes the school's curation listing, as the school, only when tags + visibility route. */
@@ -206,7 +252,7 @@ export async function routeListing(input: RouteListingInput): Promise<{ uri: str
     schoolDid: schoolDid(),
     callerDid: input.callerDid,
     scope: NSID.eventListing,
-    action: 'publish-event',
+    action: input.action ?? 'publish-event',
     collection: NSID.eventListing,
     rkey: tid(),
     record: {
@@ -217,7 +263,7 @@ export async function routeListing(input: RouteListingInput): Promise<{ uri: str
       tags: input.tags,
       createdAt: new Date().toISOString(),
     },
-    audit: { reason: `host published "${input.name}"` },
+    audit: { reason: input.auditReason ?? `host published "${input.name}"` },
   })
   return { uri: res.uri, cid: res.cid }
 }
@@ -253,6 +299,33 @@ export function canViewRoster(hostDid: string, viewerDid: string, viewerRole: nu
   return hostDid === viewerDid || viewerRole >= Role.Steward
 }
 
+/**
+ * The one place the deprecated `description` / `uris` inputs are folded onto the app-side
+ * `attendeeNotes` / `meetingLink` (task 19c). `undefined` still means "leave alone" on an
+ * update, so the distinction between an ABSENT key and an explicitly empty one survives
+ * the mapping: `uris: []` is a deliberate "clear the link" and resolves to `''`, while an
+ * omitted `uris` resolves to `undefined`.
+ */
+export function attendeeFields(input: Pick<CreateEventInput, 'attendeeNotes' | 'meetingLink' | 'description' | 'uris'>): {
+  attendeeNotes?: string
+  meetingLink?: string
+} {
+  const attendeeNotes = input.attendeeNotes !== undefined ? input.attendeeNotes : input.description
+  const meetingLink =
+    input.meetingLink !== undefined
+      ? input.meetingLink
+      : input.uris !== undefined
+        ? input.uris[0]?.uri ?? ''
+        : undefined
+  return { ...(attendeeNotes !== undefined ? { attendeeNotes } : {}), ...(meetingLink !== undefined ? { meetingLink } : {}) }
+}
+
+/** Empty string and whitespace both mean "not set" for an app-side text field. */
+function text(value?: string): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : undefined
+}
+
 export async function createEventAsHost(viewer: Viewer, input: CreateEventInput): Promise<CreatedEvent> {
   const cover = input.cover ? await normalizeImage(input.cover) : undefined
   const agent = await actorAgent(viewer)
@@ -261,18 +334,26 @@ export async function createEventAsHost(viewer: Viewer, input: CreateEventInput)
   // above). It still appears on our own calendar by authorship, not by this array.
   const tags = input.tags ?? []
 
+  const attendee = attendeeFields(input)
+
+  // THE RECORD'S `description` IS THE PUBLIC OVERVIEW, and nothing else (task 19c). The
+  // attendee notes and the meeting link that used to land here — under a form that said
+  // "shown after RSVP" — are app-side now: `community.lexicon.calendar.event` is
+  // world-readable in the host's own repo, so the old promise was never true, while the
+  // text the host actually wrote FOR the public was not on the record at all and peers
+  // saw a class with no description. No `uris` either: the only thing that ever
+  // populated them was the host's meeting link.
   const eventRkey = tid()
   const event = await put(agent, viewer.did, NSID.event, eventRkey, {
     $type: NSID.event,
     name: input.name,
-    ...(input.description ? { description: input.description } : {}),
+    ...(text(input.publicOverview?.description) ? { description: input.publicOverview!.description.trim() } : {}),
     createdAt: now,
     startsAt: input.startsAt,
     ...(input.endsAt ? { endsAt: input.endsAt } : {}),
     mode: input.mode ?? `${NSID.event}#inperson`,
     status: `${NSID.event}#scheduled`,
     ...(input.locations?.length ? { locations: input.locations } : {}),
-    ...(input.uris?.length ? { uris: input.uris } : {}),
     rsvpExpected: input.rsvpRequired ?? true,
   })
 
@@ -335,7 +416,12 @@ export async function createEventAsHost(viewer: Viewer, input: CreateEventInput)
     callerDid: viewer.did as Did,
   })
 
-  await setEventExtra(event.uri, input.materials ?? [], input.suppliesNote)
+  await setEventExtra(event.uri, {
+    materials: input.materials ?? [],
+    ...(text(input.suppliesNote) ? { suppliesNote: input.suppliesNote!.trim() } : {}),
+    ...(text(attendee.attendeeNotes) ? { attendeeNotes: attendee.attendeeNotes!.trim() } : {}),
+    ...(text(attendee.meetingLink) ? { meetingLink: attendee.meetingLink!.trim() } : {}),
+  })
   await savePresentation(event.uri, { cover, venueNeeded: input.venueNeeded, publicOverview: input.publicOverview })
 
   await bumpTally(viewer.did, { hostedEvents: 1 })
@@ -433,15 +519,23 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
   }
   const agent = await actorAgent(viewer)
 
+  // Task 19c. The record's `description` is ALWAYS the resolved public overview — never
+  // merged from `current.value`, because on a class published before 19c that field holds
+  // the host's attendee notes, and re-writing it from the app-side overview is what
+  // repairs the leak on the next edit. `uris` is dropped for the same reason: nothing in
+  // this codebase writes them any more, so whatever is there is a legacy meeting link the
+  // host was told only attendees would see. (`scripts/migrate-event-notes.ts` is the
+  // one-off that moves the old values somewhere safe rather than merely dropping them.)
+  const newOverview = input.publicOverview !== undefined ? input.publicOverview : oldPresentation.publicOverview
+  const { uris: _legacyUris, description: _legacyDescription, ...carried } = current.value as Record<string, unknown>
   const mergedEvent: Record<string, unknown> = {
-    ...current.value,
+    ...carried,
+    ...(text(newOverview?.description) ? { description: newOverview!.description.trim() } : {}),
     ...(input.name !== undefined ? { name: input.name } : {}),
-    ...(input.description !== undefined ? { description: input.description } : {}),
     ...(input.startsAt !== undefined ? { startsAt: input.startsAt } : {}),
     ...(input.endsAt !== undefined ? { endsAt: input.endsAt } : {}),
     ...(input.mode !== undefined ? { mode: input.mode } : {}),
     ...(input.locations !== undefined ? { locations: input.locations } : {}),
-    ...(input.uris !== undefined ? { uris: input.uris } : {}),
     ...(input.rsvpRequired !== undefined ? { rsvpExpected: input.rsvpRequired } : {}),
   }
   const event = await put(agent, viewer.did, NSID.event, parts.rkey, mergedEvent)
@@ -472,9 +566,26 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
 
   // Same "omit means leave alone" convention as `tags`/`visibility` above.
   const existingExtra = await getEventExtra(eventUri)
-  const newMaterials = input.materials !== undefined ? input.materials : existingExtra.materials
-  const newSuppliesNote = input.suppliesNote !== undefined ? input.suppliesNote : existingExtra.suppliesNote
-  await setEventExtra(event.uri, newMaterials, newSuppliesNote)
+  const attendee = attendeeFields(input)
+  await setEventExtra(event.uri, {
+    materials: input.materials !== undefined ? input.materials : existingExtra.materials,
+    ...(() => {
+      const v = text(input.suppliesNote !== undefined ? input.suppliesNote : existingExtra.suppliesNote)
+      return v ? { suppliesNote: v } : {}
+    })(),
+    ...(() => {
+      const v = text(attendee.attendeeNotes !== undefined ? attendee.attendeeNotes : existingExtra.attendeeNotes)
+      return v ? { attendeeNotes: v } : {}
+    })(),
+    ...(() => {
+      const v = text(attendee.meetingLink !== undefined ? attendee.meetingLink : existingExtra.meetingLink)
+      return v ? { meetingLink: v } : {}
+    })(),
+    // `setEventExtra` clears anything absent, and a cancellation reason is not the edit
+    // form's to forget: editing a cancelled class must not silently erase why it was
+    // called off (`cancelEventAsHost` is the only writer).
+    ...(existingExtra.cancelReason ? { cancelReason: existingExtra.cancelReason } : {}),
+  })
   await savePresentation(event.uri, { ...oldPresentation, cover, ...(input.publicOverview !== undefined ? { publicOverview: input.publicOverview } : {}), ...(input.venueNeeded !== undefined ? { venueNeeded: input.venueNeeded } : {}) })
 
   // Replace the skill sidecars entirely when `skills` is present; leave them alone
@@ -541,30 +652,11 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
       callerDid: viewer.did as Did,
     })
   } else if (action === 'remove') {
-    try {
-      await schoolActor().putRecordAsSchool({
-        schoolDid: schoolDid(),
-        callerDid: viewer.did as Did,
-        scope: NSID.eventListing,
-        action: 'remove-listing',
-        collection: NSID.eventListing,
-        rkey: tid(),
-        record: {
-          $type: NSID.eventListing,
-          event: { uri: event.uri, cid: event.cid },
-          school: schoolDid(),
-          status: 'removed',
-          createdAt: new Date().toISOString(),
-        },
-        audit: { reason: `host retagged "${String(mergedEvent.name ?? '')}" away from a routed tag` },
-      })
-      unlisted = true
-    } catch (err) {
-      // Removing a listing is moderation (Steward-gated). A host who is not a steward
-      // cannot unilaterally unlist their own class; it stays listed until one does.
-      log.warn('could not auto-remove the school listing on retag; a steward must remove it', { detail: describeError(err) })
-      unlisted = false
-    }
+    unlisted = await withdrawListing({
+      event: { uri: event.uri, cid: event.cid },
+      callerDid: viewer.did as Did,
+      reason: `host retagged "${String(mergedEvent.name ?? '')}" away from a routed tag`,
+    })
   }
 
   await indexer
@@ -586,6 +678,366 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
     ...(listing ? { listing } : {}),
     ...(unlisted !== undefined ? { unlisted } : {}),
   }
+}
+
+
+/* ─────────────────────────────── cancelling a class ─────────────────────────────── */
+
+/**
+ * CANCELLING IS A STATUS, NEVER A DELETE.
+ *
+ * `community.lexicon.calendar.event` already has a `status` field and `#cancelled` is one
+ * of its values, so a cancellation needs no new field on a borrowed record and no new
+ * lexicon at all — which is the whole test for "compose, don't extend". The record STAYS:
+ * someone who RSVP'd has the class in their calendar and on this page, and deleting it
+ * would leave them standing outside a locked door wondering. `icsStatus` already turns
+ * `#cancelled` into `STATUS:CANCELLED`, so a subscribed calendar client learns it too.
+ *
+ * WHAT DOES NOT GO ON THE RECORD: the reason. "I have Covid" is not a fact a host owes the
+ * whole network, and R9 says the default is app-side — so it is a `fs_event_extra` column,
+ * released to anyone who can already see the class and to nobody else.
+ */
+export const CANCELLED_STATUS = `${NSID.event}#cancelled`
+
+/** True for any spelling of the cancelled token (ours, or a peer's own NSID prefix). */
+export function isCancelledStatus(status?: unknown): boolean {
+  return typeof status === 'string' && status.endsWith('#cancelled')
+}
+
+/** `scope: 'following'` on a class that is not part of a series at all. */
+export class NotRecurringError extends Error {
+  constructor() {
+    super('this class is not part of a recurring series, so there is nothing following it')
+    this.name = 'NotRecurringError'
+  }
+}
+
+export interface CancelEventInput {
+  /** App-side only. Never written to any record. */
+  reason?: string
+  /** `'following'` also ends the series here; only meaningful for a recurring class. */
+  scope?: 'this' | 'following'
+}
+
+export interface CancelledEvent {
+  event: { uri: string; cid: string }
+  status: string
+  scope: 'this' | 'following'
+  /**
+   * True when the school's curation listing was withdrawn, FALSE when withdrawing it
+   * needs a steward (removing a listing is moderation — see `withdrawListing`), and
+   * absent when there was no listing of ours to withdraw.
+   */
+  unlisted?: boolean
+  /** Later occurrences of the series that were cancelled too (`scope: 'following'`). */
+  alsoCancelled: string[]
+  /** Instants added to the series' `exdates` so they are never materialized again. */
+  exdatesAdded: number
+  /** People who had RSVP'd and were told. */
+  notified: number
+}
+
+/**
+ * Withdraw the school's curation listing for an event, as the school.
+ *
+ * Steward-gated and destructive by policy (`remove-listing`), on purpose: a listing is the
+ * SCHOOL's statement that a class is on its calendar, and taking one down is moderation.
+ * A host who is not a steward therefore gets `false` back and the listing stays until one
+ * acts — the class still reads as cancelled everywhere, because that lives on the host's
+ * own record, which the host always controls. Never throws: losing the listing race must
+ * not cost the host the cancellation itself.
+ */
+async function withdrawListing(input: { event: { uri: string; cid: string }; callerDid: Did; reason: string }): Promise<boolean> {
+  try {
+    await schoolActor().putRecordAsSchool({
+      schoolDid: schoolDid(),
+      callerDid: input.callerDid,
+      scope: NSID.eventListing,
+      action: 'remove-listing',
+      collection: NSID.eventListing,
+      rkey: tid(),
+      record: {
+        $type: NSID.eventListing,
+        event: input.event,
+        school: schoolDid(),
+        status: 'removed',
+        createdAt: new Date().toISOString(),
+      },
+      audit: { reason: input.reason },
+    })
+    return true
+  } catch (err) {
+    log.warn('could not withdraw the school listing; a steward must remove it', { detail: describeError(err) })
+    return false
+  }
+}
+
+/**
+ * Stamp `status: #cancelled` on an event record, in WHOSEVER repo it lives in.
+ *
+ * An ordinary class is the host's own record and goes through their own credential. A
+ * materialized occurrence is the SCHOOL's record (A8) — the host cannot write it, and
+ * `updateEventAsHost` rightly refuses to try (`OccurrenceNotEditableError`, which would
+ * otherwise fork a copy into the host's repo) — so it goes back through the same
+ * `materialize-occurrence` action that created it: the school's scheduling artifact,
+ * changed at the request of the person whose class it is.
+ */
+async function writeCancelledStatus(
+  viewer: Viewer,
+  record: { did: string; value: Record<string, unknown> },
+  rkey: string,
+  auditReason: string,
+): Promise<{ uri: string; cid: string }> {
+  const merged = { ...record.value, status: CANCELLED_STATUS }
+  if (record.did === viewer.did) {
+    const agent = await actorAgent(viewer)
+    return put(agent, viewer.did, NSID.event, rkey, merged)
+  }
+  const res = await schoolActor().putRecordAsSchool({
+    schoolDid: schoolDid(),
+    callerDid: viewer.did as Did,
+    scope: NSID.event,
+    action: 'materialize-occurrence',
+    collection: NSID.event,
+    rkey,
+    record: merged,
+    audit: { reason: auditReason },
+  })
+  return { uri: res.uri, cid: res.cid }
+}
+
+/** Everyone who said they were coming, told once (the dedup ledger enforces the "once"). */
+async function notifyCancelled(eventUri: string, name: string, reason?: string): Promise<number> {
+  let notified = 0
+  for (const r of await rsvpRoster(eventUri)) {
+    const res = await enqueueNotification({
+      did: r.did,
+      category: 'event.cancelled',
+      dedupKey: `event.cancelled:${eventUri}:${r.did}`,
+      title: `"${name}" has been cancelled`,
+      ...(reason ? { body: reason } : {}),
+      navigate: `/events/${encodeURIComponent(eventUri)}`,
+    }).catch(() => ({ claimed: false }))
+    if (res.claimed) notified++
+  }
+  return notified
+}
+
+/** Does the school currently list this event? (Nothing to withdraw if it never did.) */
+async function isListedByUs(eventUri: string): Promise<boolean> {
+  const indexer = await getIndexer()
+  const rows = await sidecarsForEvent<EventListing>(indexer, 'eventListing', eventUri)
+  const ours = rows.map((r) => r.value).filter((l) => l.school === schoolDid())
+  return ours.length > 0 && isListed({ listings: ours, configs: [] })
+}
+
+/**
+ * The host calls a class off.
+ *
+ * `scope: 'this'` cancels one date. `scope: 'following'` cancels this date and every one
+ * after it in the series, which means three things at once: the series sidecar gets an
+ * `until` (so the materializer stops planning past this date — `plannedOccurrences`
+ * honours it) AND `exdates` for the dates it has already planned (so a consumer reading
+ * only the recurrence rule agrees), and every occurrence already materialized from here
+ * on is stamped cancelled in the school's repo.
+ *
+ * Idempotent: cancelling an already-cancelled class re-notifies nobody (the dedup ledger)
+ * and does not debit the host's hosted-class tally twice.
+ */
+export async function cancelEventAsHost(
+  viewer: Viewer,
+  eventUri: string,
+  input: CancelEventInput = {},
+): Promise<CancelledEvent> {
+  const scope = input.scope ?? 'this'
+  const indexer = await getIndexer()
+  const current = await getRecordByUri(indexer, 'event', eventUri)
+  if (!current) throw new EventNotFoundError(eventUri)
+  // A8 again: for an occurrence the record's author is the school and the HOST is the
+  // series author. Only the host may cancel; a steward acts through moderation instead
+  // (`remove-listing` in `http/routes/admin.ts`), which takes the class off OUR calendar
+  // without reaching into somebody else's repo to declare their class cancelled.
+  const hostDid = await resolveHostDid(eventUri, current.did)
+  if (hostDid !== viewer.did) throw new EventPermissionError()
+  const parts = parseAtUri(eventUri)
+  if (!parts) throw new EventNotFoundError(eventUri)
+
+  const name = String(current.value.name ?? 'this class')
+  const alreadyCancelled = isCancelledStatus(current.value.status)
+  const reason = text(input.reason)
+
+  const seriesLink = scope === 'following' ? await resolveSeriesLink(viewer, eventUri, current) : undefined
+  if (scope === 'following' && !seriesLink) throw new NotRecurringError()
+
+  const event = await writeCancelledStatus(viewer, current, parts.rkey, `host cancelled "${name}"`)
+
+  // The reason, app-side, merged onto whatever else the class already carries.
+  const existingExtra = await getEventExtra(eventUri)
+  await setEventExtra(eventUri, { ...existingExtra, ...(reason ? { cancelReason: reason } : {}) })
+
+  const unlisted = (await isListedByUs(eventUri))
+    ? await withdrawListing({
+        event: { uri: event.uri, cid: event.cid },
+        callerDid: viewer.did as Did,
+        reason: `host cancelled "${name}"`,
+      })
+    : undefined
+
+  // A class that did not happen is not a class hosted. Only ever debited for a record the
+  // host wrote themselves — materialized occurrences never credited the tally in the
+  // first place (`jobs/materialize-series.ts` does not call `bumpTally`).
+  if (!alreadyCancelled && current.did === viewer.did) await bumpTally(viewer.did, { hostedEvents: -1 })
+
+  const notified = alreadyCancelled ? 0 : await notifyCancelled(eventUri, name, reason)
+
+  const touched = [event.uri]
+  const alsoCancelled: string[] = []
+  let exdatesAdded = 0
+
+  if (seriesLink) {
+    exdatesAdded = await endSeriesAt(viewer, seriesLink, touched)
+    for (const later of await laterOccurrences(seriesLink.seriesUri, seriesLink.cutoff, eventUri)) {
+      const row = await getRecordByUri(indexer, 'event', later)
+      if (!row) continue
+      const laterParts = parseAtUri(later)
+      if (!laterParts) continue
+      const laterName = String(row.value.name ?? name)
+      const wasCancelled = isCancelledStatus(row.value.status)
+      const written = await writeCancelledStatus(viewer, row, laterParts.rkey, `host cancelled "${laterName}" and everything after it`)
+      if (await isListedByUs(later)) {
+        await withdrawListing({
+          event: { uri: written.uri, cid: written.cid },
+          callerDid: viewer.did as Did,
+          reason: `host cancelled "${laterName}" and everything after it`,
+        })
+      }
+      if (!wasCancelled) await notifyCancelled(later, laterName, reason)
+      alsoCancelled.push(later)
+      touched.push(written.uri)
+    }
+  }
+
+  await indexer.notify(touched).catch(() => {
+    /* the periodic backfill will pick it up */
+  })
+
+  return {
+    event,
+    status: CANCELLED_STATUS,
+    scope,
+    ...(unlisted !== undefined ? { unlisted } : {}),
+    alsoCancelled,
+    exdatesAdded,
+    notified,
+  }
+}
+
+interface SeriesLink {
+  seriesUri: string
+  seriesRkey: string
+  series: Record<string, unknown>
+  /** Occurrences at or after this instant are the ones "and following" means. */
+  cutoff: Date
+}
+
+/**
+ * Which series does this date belong to, and from when does "and following" start?
+ *
+ * Two ways in: the date is a materialized occurrence (`fs_series_occurrence` knows its
+ * series and its original instant), or the date IS the series' first event (the template
+ * the host actually wrote, whose `freeschool.draft.series` sidecar points back at it).
+ * The series record always lives in the HOST's own repo — if it does not, this is not a
+ * series this viewer can end.
+ */
+async function resolveSeriesLink(
+  viewer: Viewer,
+  eventUri: string,
+  current: { value: Record<string, unknown> },
+): Promise<SeriesLink | undefined> {
+  const indexer = await getIndexer()
+  const occ = await getDb()
+    .select({ seriesUri: seriesOccurrence.seriesUri, originalStartsAt: seriesOccurrence.originalStartsAt })
+    .from(seriesOccurrence)
+    .where(eq(seriesOccurrence.eventUri, eventUri))
+    .limit(1)
+
+  let seriesUri = occ[0]?.seriesUri
+  let cutoff = occ[0]?.originalStartsAt
+  if (!seriesUri) {
+    const own = await sidecarsForEvent<Record<string, unknown>>(indexer, 'series', eventUri, 'firstEvent.uri')
+    if (!own[0]) return undefined
+    seriesUri = own[0].uri
+    cutoff = new Date(String(current.value.startsAt ?? ''))
+  }
+  if (!cutoff || Number.isNaN(cutoff.getTime())) return undefined
+  const parts = parseAtUri(seriesUri)
+  if (!parts || parts.did !== viewer.did) return undefined
+  const record = await getRecordByUri<Record<string, unknown>>(indexer, 'series', seriesUri)
+  if (!record) return undefined
+  return { seriesUri, seriesRkey: parts.rkey, series: record.value, cutoff }
+}
+
+/**
+ * End the series at the cutoff, in the host's own repo. Returns how many instants were
+ * added to `exdates`.
+ *
+ * `until` is the durable stop — `plannedOccurrences` filters on it, so nothing past the
+ * cutoff is ever planned again, however far the window later moves. The `exdates` are for
+ * everyone else: a consumer that reads only the recurrence rule (and our own expansion,
+ * which honours both) sees the same dates removed. `count` is dropped if it was set: RFC
+ * 5545 allows one of `until`/`count`, never both.
+ */
+async function endSeriesAt(viewer: Viewer, link: SeriesLink, touched: string[]): Promise<number> {
+  const { plannedOccurrences } = await import('../jobs/materialize-series.js')
+  const indexer = await getIndexer()
+  const series = link.series as {
+    rrule?: string
+    exdates?: string[]
+    timezone?: string
+    materializeAhead?: number
+    firstEvent?: { uri: string }
+    count?: number
+  }
+  const existing = new Set((series.exdates ?? []).filter((d): d is string => typeof d === 'string'))
+  const before = existing.size
+
+  const firstUri = series.firstEvent?.uri
+  const first = firstUri ? await getRecordByUri(indexer, 'event', firstUri) : null
+  const dtstart = first ? new Date(String(first.value.startsAt ?? '')) : new Date(Number.NaN)
+  if (series.rrule && series.timezone && !Number.isNaN(dtstart.getTime())) {
+    try {
+      const planned = plannedOccurrences(
+        { rrule: series.rrule, timezone: series.timezone, ...(series.exdates ? { exdates: series.exdates } : {}), ...(series.materializeAhead ? { materializeAhead: series.materializeAhead } : {}) },
+        dtstart,
+      )
+      for (const instant of planned) {
+        if (instant.getTime() >= link.cutoff.getTime()) existing.add(normalizeInstant(instant.toISOString()))
+      }
+    } catch (err) {
+      // A rule we cannot expand still gets its `until`, which is the binding half.
+      log.warn('could not expand the series to add exdates on cancel', { detail: describeError(err) })
+    }
+  }
+
+  const { count: _dropped, ...carried } = series
+  const agent = await actorAgent(viewer)
+  const written = await put(agent, viewer.did, NSID.series, link.seriesRkey, {
+    ...carried,
+    $type: NSID.series,
+    until: link.cutoff.toISOString(),
+    exdates: [...existing],
+  })
+  touched.push(written.uri)
+  return existing.size - before
+}
+
+/** Already-materialized occurrences of this series at or after the cutoff. */
+async function laterOccurrences(seriesUri: string, cutoff: Date, exceptUri: string): Promise<string[]> {
+  const rows = await getDb()
+    .select({ eventUri: seriesOccurrence.eventUri })
+    .from(seriesOccurrence)
+    .where(and(eq(seriesOccurrence.seriesUri, seriesUri), gte(seriesOccurrence.originalStartsAt, cutoff)))
+  return rows.map((r) => r.eventUri).filter((u): u is string => Boolean(u) && u !== exceptUri)
 }
 
 async function put(

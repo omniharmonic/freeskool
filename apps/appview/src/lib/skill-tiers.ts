@@ -30,7 +30,22 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const DEFAULT_TAXONOMY_PATH = path.resolve(here, '../../../../infra/seed/skills/skills-seed.jsonl')
 
 /** Matches a label that itself names a sensitive/high-risk topic. */
-const SENSITIVE_LABEL_RE = /police|ICE|legal|medic|security|encrypt|doxx|squat|prison|jail|raid/i
+export const SENSITIVE_LABEL_RE = /police|ICE|legal|medic|security|encrypt|doxx|squat|prison|jail|raid/i
+
+/** Does this label itself name a sensitive/high-risk topic? Used by `POST /api/skills`
+ * (`http/routes/skills.ts`) to set a member-proposed skill to Tier B immediately, rather
+ * than waiting on a steward to notice and re-tier it by hand. */
+export function isSensitiveLabel(label: string): boolean {
+  return SENSITIVE_LABEL_RE.test(label)
+}
+
+/** Upsert one skill's tier — the same shape `seedSkillTiers` writes, for a single id. */
+export async function setTier(skillId: string, tier: SkillTierValue, reason = 'member proposal: sensitive label'): Promise<void> {
+  await getDb()
+    .insert(skillTier)
+    .values({ skillId, tier, reason, updatedAt: new Date() })
+    .onConflictDoUpdate({ target: skillTier.skillId, set: { tier, reason, updatedAt: new Date() } })
+}
 
 export async function tierOf(skillId: string): Promise<SkillTierValue> {
   const rows = await getDb().select({ tier: skillTier.tier }).from(skillTier).where(eq(skillTier.skillId, skillId)).limit(1)

@@ -2,11 +2,12 @@ import { KnowledgeShelf, PractitionerShelf } from '../components/KnowledgeShelf'
 import { ApiError } from '../lib/api';
 import { Link, useParams } from '@tanstack/react-router';
 import { Screen } from '../components/Screen';
-import { Button, SkillChip, ThresholdRule } from '../components/bits';
+import { Button, MemberAvatar, SkillChip, ThresholdRule, claimLevelLabel } from '../components/bits';
 import { useEvent, useRequests, useSkill } from '../lib/queries';
 import { ContentCard } from '../components/ContentCard';
 import { FieldGlyph } from '../components/FieldGlyph';
 import { LoadingState, PageState } from '../components/PageState';
+import type { SkillPeople } from '../lib/types';
 
 /**
  * TIER: `GET /api/skills/:id` now carries `tier` (Task 12) — a "Sensitive"
@@ -56,9 +57,10 @@ export function SkillScreen() {
       <div className="safe-x">
         <nav className="breadcrumbs" aria-label="Skill ancestry"><Link to="/skills">Skills</Link>{skill.ancestors?.map(a => <span key={a.uri}> / <Link to="/skills/$skillId" params={{skillId:a.uri}}>{a.label}</Link></span>)}</nav>
         <div className="skill-detail-intro"><FieldGlyph seed={skill.id} /><div>
-        {skill.tier === 'B' ? (
-          <div className="mb-3">
-            <SkillChip ink="pink">Sensitive — kept off public listings by default</SkillChip>
+        {skill.tier === 'B' || skill.status === 'proposed' ? (
+          <div className="mb-3 flex flex-wrap gap-2">
+            {skill.tier === 'B' ? <SkillChip ink="pink">Sensitive — kept off public listings by default</SkillChip> : null}
+            {skill.status === 'proposed' ? <SkillChip ink="ink">proposed</SkillChip> : null}
           </div>
         ) : null}
         {skill.description ? <p className="max-w-[60ch] text-body">{skill.description}</p> : <p className="text-body">Learn it together. Pass it on.</p>}</div></div>
@@ -111,8 +113,78 @@ export function SkillScreen() {
           </div>
         </>
       ) : null}
-      <div className="safe-x"><KnowledgeShelf skill={skill.uri}/><PractitionerShelf skill={skill.uri}/></div>
+      <div className="safe-x">
+        <KnowledgeShelf skill={skill.uri}/>
+        {/* `people` is present only for a signed-in viewer (R9: the roster is
+            never public), so its absence — not a separate `useMe()` — is what
+            decides which of these two the reader gets. */}
+        {skill.people ? (
+          <PeopleWithSkill people={skill.people} />
+        ) : (
+          <>
+            <PractitionerShelf skill={skill.uri}/>
+            <div className="library-empty mt-3">
+              <p>Sign in to see members who know this skill, and to vouch for what someone can do.</p>
+              <a href="/signin" className="context-link">Sign in ↗</a>
+            </div>
+          </>
+        )}
+      </div>
     </Screen>
+  );
+}
+
+/**
+ * Who at this school holds this skill. Members-only, capped server-side at 50
+ * with `count` still carrying the full visible total — so a big skill reads
+ * "24 people know this" and shows as many as the page can hold. A member who
+ * has hidden themselves from the directory is absent here too.
+ */
+function PeopleWithSkill({ people }: { people: SkillPeople }) {
+  return (
+    <section className="knowledge-shelf">
+      <div className="section-title-row">
+        <div>
+          <p className="eyebrow">Learning is a social thing</p>
+          <h2>People with this skill</h2>
+        </div>
+        <Link to="/people" className="context-link">All the people ↗</Link>
+      </div>
+      {people.members.length === 0 ? (
+        <div className="library-empty">
+          <p>Nobody has put this on their own page yet.</p>
+          <p>If you know some of it, add it in your notebook — that is how the next person finds you.</p>
+        </div>
+      ) : (
+        <>
+          <p className="section-caption">
+            {people.count} {people.count === 1 ? 'person knows' : 'people know'} this.
+          </p>
+          <ul className="member-grid">
+            {people.members.map((member) => {
+              const name = member.displayName || member.handle || 'A member';
+              return (
+                <li key={member.did}>
+                  <Link to="/people/$did" params={{ did: member.did }} className="member-card">
+                    <MemberAvatar src={member.avatarUrl} name={name} />
+                    <div className="min-w-0 flex-1">
+                      <p className="member-card-name">{name}</p>
+                      <p className="member-card-meta">
+                        {claimLevelLabel(member.level)}
+                        {member.vouchCount > 0
+                          ? ` · ${member.vouchCount} ${member.vouchCount === 1 ? 'vouch' : 'vouches'}`
+                          : ''}
+                      </p>
+                    </div>
+                    <span aria-hidden="true" className="text-ink-faint">↗</span>
+                  </Link>
+                </li>
+              );
+            })}
+          </ul>
+        </>
+      )}
+    </section>
   );
 }
 

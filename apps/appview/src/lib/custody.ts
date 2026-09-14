@@ -11,19 +11,22 @@
  *
  * The handle is `<word><word><NNN>.<domain>` and is NEVER derived from the email (R9).
  */
-import { and, desc, eq, gt, isNull } from 'drizzle-orm'
+import { and, desc, eq, gt, isNull, or, sql } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { custodialAccount, emailVerification, invite, ownershipReveal } from '../db/schema.js'
 import { config } from '../config.js'
 import { generateHandle } from './handles.js'
 import { hashToken, newToken, randomPassword, unwrapSecret, wrapSecret } from './crypto.js'
-import { createAccount, createInviteCode, PdsError, updateAccountPassword } from './pds.js'
+import { createAccount, createInviteCode, PdsError, searchAccountByEmail, updateAccountPassword } from './pds.js'
 import { sendMail } from './mail.js'
 import { registerEmailTarget } from '../notifications/dispatch.js'
 import { subscribe } from './newsletter-subscriptions.js'
 import { log } from './logging.js'
 
 export const VERIFY_TTL_MS = 24 * 3_600_000
+
+/** The PDS's various phrasings of "this email already belongs to an account". */
+const EMAIL_TAKEN_RE = /email.*(taken|already)/i
 
 export class SignupError extends Error {
   constructor(
@@ -43,6 +46,11 @@ export interface SignupResult {
   verifyUrl?: string
 }
 
+/** What the locked section below resolved to, for the caller to react to afterward. */
+type SignupOutcome =
+  | { kind: 'resend'; did: string; handle: string }
+  | { kind: 'created' | 'adopted'; did: string; handle: string }
+
 export async function signup(input: { email: string; inviterDid?: string; newsletter?: boolean }): Promise<SignupResult> {
   const c = config()
   const email = input.email.trim().toLowerCase()
@@ -50,70 +58,166 @@ export async function signup(input: { email: string; inviterDid?: string; newsle
     throw new SignupError('that does not look like an email address', 400, 'InvalidEmail')
   }
 
-  // A returning member uses the same email door. Minting another PDS account
-  // fails on its unique email constraint and would lose the member's history.
-  const [existing] = await getDb().select().from(custodialAccount)
-    .where(eq(custodialAccount.email, email)).limit(1)
-  if (existing) {
-    if (!existing.isCustodial) {
-      throw new SignupError('You own this account now. Sign in with your existing AT Protocol account below.', 409, 'AccountOwned')
+  // REVIEW ROUND 1 (blocking): two concurrent signups for the same BRAND-NEW email used
+  // to race — both could pass the "no existing row" check, both call `createAccount`,
+  // and the loser would either crash on the unique-DID insert or (worse) land in
+  // `adoptOrphanedAccount` and rotate the WINNER's freshly-minted password out from
+  // under it. `pg_advisory_xact_lock(hashtext(email))` serializes the whole
+  // check -> mint-or-adopt -> insert sequence per email: the second request simply
+  // waits for the lock, then sees the first request's now-committed row and takes the
+  // ordinary resend path below. The lock is released automatically at transaction end.
+  const outcome = await getDb().transaction(async (tx): Promise<SignupOutcome> => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${email}))`)
+
+    // A returning member uses the same email door. Minting another PDS account
+    // fails on its unique email constraint and would lose the member's history. This
+    // is ALSO exactly what a second, now-serialized concurrent signup for the same
+    // brand-new email sees once the first one has committed its row.
+    const [existing] = await tx.select().from(custodialAccount).where(eq(custodialAccount.email, email)).limit(1)
+    if (existing) {
+      if (!existing.isCustodial) {
+        throw new SignupError('You own this account now. Sign in with your existing AT Protocol account below.', 409, 'AccountOwned')
+      }
+      return { kind: 'resend', did: existing.did, handle: existing.handle }
     }
-    const { url } = await sendVerificationEmail(existing.did, existing.email)
-    return { did: existing.did, handle: existing.handle, ...(c.SMTP_URL ? {} : { verifyUrl: url }) }
+
+    const code = await createInviteCode(1)
+    const password = randomPassword(32)
+
+    // The PDS rejects a handle that is taken or that trips its slur filter; both are
+    // cheap to retry past, and the handle space is ~360k so collisions are rare.
+    let account: { did: string; handle: string } | undefined
+    let adopted = false
+    let lastError: unknown
+    for (let attempt = 0; attempt < 5 && !account; attempt++) {
+      const handle = generateHandle(c.handleDomain)
+      try {
+        account = await createAccount({ email, handle, password, inviteCode: code })
+      } catch (err) {
+        lastError = err
+        if (err instanceof PdsError && err.code === 'HandleNotAvailable') continue
+        if (err instanceof PdsError && err.code === 'InvalidHandle') continue
+        // Orphan self-heal: the PDS already has an account under this email — almost
+        // certainly one whose earlier signup minted it and then lost the mail send (or
+        // crashed) before we ever recorded a row. Adopt it rather than fail forever.
+        if (err instanceof PdsError && EMAIL_TAKEN_RE.test(err.message)) {
+          const adoption = await adoptOrphanedAccount(tx, email, password)
+          // REVIEW ROUND 1 (blocking, part c): re-checked by did AND by email, under
+          // the same lock, right before rotating anything — if a row already exists
+          // either way, someone else's signup already won this email; do NOT rotate
+          // their account's password out from under them, just resend their link.
+          if (adoption.kind === 'existing') return { kind: 'resend', did: adoption.did, handle: adoption.handle }
+          account = { did: adoption.did, handle: adoption.handle }
+          adopted = true
+          break
+        }
+        throw err
+      }
+    }
+    if (!account) {
+      throw new SignupError(
+        `could not mint an account on the PDS: ${lastError instanceof Error ? lastError.message : 'unknown'}`,
+        502,
+        'PdsRejected',
+      )
+    }
+
+    const wrapped = wrapSecret(password)
+    // REVIEW ROUND 1 (blocking, part b): a defense-in-depth backstop, not the primary
+    // guard (the advisory lock above is) — `onConflictDoNothing` means a uniqueness
+    // violation on either `did` or the new `fs_custodial_account_email_idx` never
+    // throws an unhandled error; `.returning()` coming back empty is how we detect it.
+    const inserted = await tx
+      .insert(custodialAccount)
+      .values({
+        did: account.did,
+        handle: account.handle,
+        email,
+        isCustodial: true,
+        keyVersion: wrapped.keyVersion,
+        wrappedPassword: wrapped.blob,
+      })
+      .onConflictDoNothing()
+      .returning()
+    if (inserted.length === 0) {
+      const [raced] = await tx.select().from(custodialAccount).where(eq(custodialAccount.email, email)).limit(1)
+      if (raced) return { kind: 'resend', did: raced.did, handle: raced.handle }
+      // Conflicted but nothing found (deleted concurrently, or a did-only collision
+      // with a different email) — fail loudly rather than silently drop the account.
+      throw new SignupError('could not create the account', 502, 'PdsRejected')
+    }
+    // The invite code was never actually consumed by the PDS for an adopted account
+    // (`createAccount` failed before that could happen) — nothing to record as used.
+    if (!adopted) {
+      await tx.insert(invite).values({
+        code,
+        inviterDid: input.inviterDid ?? null,
+        usedByDid: account.did,
+        usedAt: new Date(),
+      })
+    }
+    return { kind: adopted ? 'adopted' : 'created', did: account.did, handle: account.handle }
+  })
+
+  if (outcome.kind === 'resend') {
+    const { url } = await sendVerificationEmail(outcome.did, email)
+    return { did: outcome.did, handle: outcome.handle, ...(c.SMTP_URL ? {} : { verifyUrl: url }) }
   }
 
-  const code = await createInviteCode(1)
-  const password = randomPassword(32)
+  await registerEmailTarget(outcome.did, email)
+  // Default false: only the signup form's own checkbox, ticked, subscribes.
+  if (input.newsletter === true) await subscribe(outcome.did, email)
 
-  // The PDS rejects a handle that is taken or that trips its slur filter; both are
-  // cheap to retry past, and the handle space is ~360k so collisions are rare.
-  let account: { did: string; handle: string } | undefined
-  let lastError: unknown
-  for (let attempt = 0; attempt < 5 && !account; attempt++) {
-    const handle = generateHandle(c.handleDomain)
-    try {
-      account = await createAccount({ email, handle, password, inviteCode: code })
-    } catch (err) {
-      lastError = err
-      if (err instanceof PdsError && err.code === 'HandleNotAvailable') continue
-      if (err instanceof PdsError && err.code === 'InvalidHandle') continue
-      throw err
-    }
+  const { url } = await sendVerificationEmail(outcome.did, email)
+  if (outcome.kind === 'adopted') {
+    log.info('custodial account adopted')
+  } else {
+    log.info('custodial account minted', { handleDomain: c.handleDomain })
   }
-  if (!account) {
+  return {
+    did: outcome.did,
+    handle: outcome.handle,
+    ...(config().SMTP_URL ? {} : { verifyUrl: url }),
+  }
+}
+
+/** A transaction handle, as passed into `getDb().transaction(async (tx) => ...)`. */
+type Tx = Parameters<Parameters<ReturnType<typeof getDb>['transaction']>[0]>[0]
+
+/**
+ * Looks up a stranded PDS account by email (admin-side) and re-homes it: a fresh random
+ * password (we never learn or reuse the one from this signup attempt's failed
+ * `createAccount` call — it was never accepted by the PDS), rotated admin-side exactly
+ * like `takeOwnership`'s step 2. Throws (502, surfaced the same way as any other PDS
+ * rejection) if the PDS reports the email taken but no matching account can be found —
+ * an inconsistency worth failing loudly on rather than silently retrying forever.
+ *
+ * REVIEW ROUND 1 (blocking, part c): before rotating anything, re-queries — inside the
+ * SAME locked transaction as the caller — for a custodial row by the PDS-returned did OR
+ * by this email. If either already exists, some other request already won this email
+ * (or this very did) and we must not touch its password; the caller resends instead.
+ */
+async function adoptOrphanedAccount(
+  tx: Tx,
+  email: string,
+  password: string,
+): Promise<{ kind: 'adopted' | 'existing'; did: string; handle: string }> {
+  const found = await searchAccountByEmail(email)
+  if (!found) {
     throw new SignupError(
-      `could not mint an account on the PDS: ${lastError instanceof Error ? lastError.message : 'unknown'}`,
+      'could not mint an account on the PDS: email already taken, but no matching account was found',
       502,
       'PdsRejected',
     )
   }
-
-  const wrapped = wrapSecret(password)
-  await getDb().insert(custodialAccount).values({
-    did: account.did,
-    handle: account.handle,
-    email,
-    isCustodial: true,
-    keyVersion: wrapped.keyVersion,
-    wrappedPassword: wrapped.blob,
-  })
-  await getDb().insert(invite).values({
-    code,
-    inviterDid: input.inviterDid ?? null,
-    usedByDid: account.did,
-    usedAt: new Date(),
-  })
-  await registerEmailTarget(account.did, email)
-  // Default false: only the signup form's own checkbox, ticked, subscribes.
-  if (input.newsletter === true) await subscribe(account.did, email)
-
-  const { url } = await sendVerificationEmail(account.did, email)
-  log.info('custodial account minted', { handleDomain: c.handleDomain })
-  return {
-    did: account.did,
-    handle: account.handle,
-    ...(config().SMTP_URL ? {} : { verifyUrl: url }),
-  }
+  const [already] = await tx
+    .select()
+    .from(custodialAccount)
+    .where(or(eq(custodialAccount.did, found.did), eq(custodialAccount.email, email)))
+    .limit(1)
+  if (already) return { kind: 'existing', did: already.did, handle: already.handle }
+  await updateAccountPassword(found.did, password)
+  return { kind: 'adopted', did: found.did, handle: found.handle }
 }
 
 export async function sendVerificationEmail(did: string, email: string): Promise<{ url: string }> {

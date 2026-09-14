@@ -25,7 +25,7 @@ vi.mock('../lib/api', () => {
       this.code = code;
     }
   }
-  return { api: { auth: { signup: vi.fn() } }, ApiError };
+  return { api: { auth: { signin: vi.fn(), signup: vi.fn() } }, ApiError };
 });
 
 const { api, ApiError } = await import('../lib/api');
@@ -33,11 +33,11 @@ const { SignInScreen } = await import('./SignInScreen');
 
 describe('SignInScreen', () => {
   beforeEach(() => {
-    vi.mocked(api.auth.signup).mockReset();
+    vi.mocked(api.auth.signin).mockReset();
   });
 
-  it('posts the email to signup and shows the check-your-email state', async () => {
-    vi.mocked(api.auth.signup).mockResolvedValueOnce({
+  it('posts the email to signin (new or returning, one door) and shows the check-your-email state', async () => {
+    vi.mocked(api.auth.signin).mockResolvedValueOnce({
       did: 'did:plc:wren',
       handle: 'wren123.fs.test',
       verifyUrl: 'http://localhost:4000/verify?token=abc',
@@ -45,23 +45,28 @@ describe('SignInScreen', () => {
 
     render(<SignInScreen />);
     fireEvent.change(screen.getByLabelText(/your email/i), { target: { value: 'wren@example.com' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create a new Free School identity (recommended)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue with email' }));
 
-    await waitFor(() => expect(api.auth.signup).toHaveBeenCalledWith({ email: 'wren@example.com' }));
+    await waitFor(() => expect(api.auth.signin).toHaveBeenCalledWith({ email: 'wren@example.com' }));
     expect(await screen.findByText(/check your email/i)).toBeInTheDocument();
   });
 
-  it('shows the server error message when signup fails', async () => {
+  it('shows the helper text under the email field', () => {
+    render(<SignInScreen />);
+    expect(screen.getByText('New here or coming back, this is the door.')).toBeInTheDocument();
+  });
+
+  it('shows the server error message when signin fails', async () => {
     // A well-formed address, rejected server-side (rate limit, bad PDS state,
     // etc.) — an *invalid* address never reaches the handler at all, because
     // `<input type="email" required>` blocks that submission natively.
-    vi.mocked(api.auth.signup).mockRejectedValueOnce(
+    vi.mocked(api.auth.signin).mockRejectedValueOnce(
       new ApiError(502, 'SignupFailed', 'could not create the account'),
     );
 
     render(<SignInScreen />);
     fireEvent.change(screen.getByLabelText(/your email/i), { target: { value: 'wren@example.com' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Create a new Free School identity (recommended)' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Continue with email' }));
 
     expect(await screen.findByText('could not create the account')).toBeInTheDocument();
     expect(screen.queryByText(/check your email/i)).not.toBeInTheDocument();

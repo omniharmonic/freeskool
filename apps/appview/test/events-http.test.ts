@@ -100,7 +100,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   if (!available) return
-  await truncate('fs_rsvp', 'fs_custodial_account', 'fs_app_meta', 'fs_session', 'fs_member', 'fs_notification_feed', 'fs_notification_sent', 'fs_notification_outbox')
+  await truncate('fs_rsvp', 'fs_custodial_account', 'fs_app_meta', 'fs_event_extra', 'fs_session', 'fs_member', 'fs_notification_feed', 'fs_notification_sent', 'fs_notification_outbox')
   fixtureListed = false
   eventRecord = {
     $type: 'community.lexicon.calendar.event',
@@ -250,23 +250,88 @@ describe('image privacy', () => {
 
 
 describe('public class overview', () => {
-  it('serves the public invitation without disclosing legacy attendee details or exact locations', async () => {
+  /**
+   * INTEROP GAP 5, as ruled in task 19c: what the API serves an anonymous viewer is the
+   * host's PUBLIC OVERVIEW, which since 19c is what the record's own `description` field
+   * holds. The fixture below is the exact shape of the old bug — the class form labelled
+   * two fields "shown after RSVP" and then wrote them into a world-readable record — and
+   * this test is now the assertion that it cannot come back: the entry code lives in
+   * `fs_event_extra`, never in the record, never in an anonymous response, and shows up
+   * only once the viewer has RSVP'd.
+   */
+  it('serves the public overview to a stranger, and never the attendee notes, link or exact location', async () => {
     if (!available) return
     fixtureListed = true
-    eventRecord.description = 'Private entry code 1234'
+    // Post-19c: the record carries the PUBLIC text, and nothing else of ours.
+    eventRecord.description = 'Learn to grow mushrooms'
     eventRecord.locations = [{ street: '123 Secret Lane' }]
-    eventRecord.uris = [{ uri: 'https://example.com/private-meeting' }]
     const { savePresentation } = await import('../src/lib/event-presentation.js')
+    const { setEventExtra } = await import('../src/lib/event-extra.js')
     await savePresentation(EVENT_URI, { publicOverview: { description: 'Learn to grow mushrooms', audience: 'Beginners', accessibility: 'Seating available' } })
+    await setEventExtra(EVENT_URI, {
+      materials: [],
+      attendeeNotes: 'Private entry code 1234',
+      meetingLink: 'https://example.com/private-meeting',
+    })
+
     const res = await createApp().request(`/api/events/${encodeURIComponent(EVENT_URI)}`)
     expect(res.status).toBe(200)
     const body = await res.json()
     expect(body.publicOverview).toEqual({ description: 'Learn to grow mushrooms', audience: 'Beginners', accessibility: 'Seating available' })
+    expect(body.description).toBe('Learn to grow mushrooms')
     expect(body.locationRedacted).toBe(true)
-    expect(body.description).toBeUndefined()
-    expect(body.locations).toBeUndefined()
+    // The whole point of 19c: neither of these is public, on the record or off it.
+    expect(body.attendeeNotes).toBeUndefined()
+    expect(body.meetingLink).toBeUndefined()
     expect(body.uris).toBeUndefined()
+    expect(body.locations).toBeUndefined()
+    expect(JSON.stringify(body)).not.toContain('Private entry code 1234')
+    expect(JSON.stringify(body)).not.toContain('private-meeting')
+    expect(JSON.stringify(body)).not.toContain('Secret Lane')
+
+    // ...and a member who has RSVP'd gets both, through the same gate as the address.
+    const viewerDid = 'did:plc:events-http-rsvpd'
+    const cookie = await cookieFor(viewerDid)
+    await testDb().insert(rsvpTable).values({ id: 'r19c-1', eventUri: EVENT_URI, did: viewerDid, status: 'going' })
+    const seen = await (await createApp().request(`/api/events/${encodeURIComponent(EVENT_URI)}`, { headers: { Cookie: cookie } })).json()
+    expect(seen.viewerRelation).toBe('rsvp')
+    expect(seen.attendeeNotes).toBe('Private entry code 1234')
+    expect(seen.meetingLink).toBe('https://example.com/private-meeting')
+    expect(seen.description).toBe('Learn to grow mushrooms')
+
     fixtureListed = false
     expect((await createApp().request(`/api/events/${encodeURIComponent(EVENT_URI)}`)).status).toBe(404)
+  })
+
+  it('the .ics carries the public overview and never the attendee notes or the link', async () => {
+    if (!available) return
+    fixtureListed = true
+    eventRecord.description = 'Learn to grow mushrooms'
+    const { savePresentation } = await import('../src/lib/event-presentation.js')
+    const { setEventExtra } = await import('../src/lib/event-extra.js')
+    await savePresentation(EVENT_URI, { publicOverview: { description: 'Learn to grow mushrooms' } })
+    await setEventExtra(EVENT_URI, { materials: [], attendeeNotes: 'Private entry code 1234', meetingLink: 'https://example.com/private-meeting' })
+
+    const res = await createApp().request(`/api/events/${encodeURIComponent(EVENT_URI)}.ics`)
+    expect(res.status).toBe(200)
+    const body = await res.text()
+    // An .ics file gets forwarded and re-shared; only the public text may travel in one.
+    expect(body).toContain('Learn to grow mushrooms')
+    expect(body).not.toContain('Private entry code 1234')
+    expect(body).not.toContain('private-meeting')
+    fixtureListed = false
+  })
+
+  it('a legacy record\u2019s leftover `uris` are withheld from a stranger too (pre-19c classes)', async () => {
+    if (!available) return
+    fixtureListed = true
+    eventRecord.description = 'Learn to grow mushrooms'
+    eventRecord.uris = [{ uri: 'https://example.com/private-meeting' }]
+    const { savePresentation } = await import('../src/lib/event-presentation.js')
+    await savePresentation(EVENT_URI, { publicOverview: { description: 'Learn to grow mushrooms' } })
+    const body = await (await createApp().request(`/api/events/${encodeURIComponent(EVENT_URI)}`)).json()
+    expect(body.uris).toBeUndefined()
+    expect(JSON.stringify(body)).not.toContain('private-meeting')
+    fixtureListed = false
   })
 })

@@ -44,19 +44,37 @@ vi.mock('../lib/api', () => {
 const { api } = await import('../lib/api');
 const { EventEditScreen } = await import('./EventEditScreen');
 
+function node(id: string, label: string) {
+  return {
+    uri: `at://did:plc:school/freeschool.draft.skill/${id}`,
+    id,
+    label,
+    status: 'canonical',
+    tier: 'A' as const,
+    alsoUnder: [],
+    children: [],
+  };
+}
+
+const BREAD = 'at://did:plc:school/freeschool.draft.skill/bread';
+const FERMENT = 'at://did:plc:school/freeschool.draft.skill/ferment';
+const WORKSHOP = 'at://did:plc:school/freeschool.draft.skill/workshop';
+const REPAIR = 'at://did:plc:school/freeschool.draft.skill/repair';
+
 const skillTree = {
   skills: [
-    {
-      uri: 'at://did:plc:school/freeschool.draft.skill/bread',
-      id: 'bread',
-      label: 'Bread baking',
-      status: 'canonical',
-      tier: 'A' as const,
-      alsoUnder: [],
-      children: [],
-    },
+    node('bread', 'Bread baking'),
+    node('ferment', 'Ferment vegetables'),
+    node('workshop', 'Run a community workshop'),
+    node('repair', 'Repair a bicycle'),
   ],
 };
+
+/** Type into the class editor's skill combobox and take the offered match. */
+function pickSkill(typed: string, label: string) {
+  fireEvent.change(screen.getByRole('combobox', { name: /skill/i }), { target: { value: typed } });
+  fireEvent.click(screen.getByRole('option', { name: new RegExp(label) }));
+}
 
 function renderScreen() {
   const queryClient = new QueryClient();
@@ -78,6 +96,7 @@ describe('EventEditScreen', () => {
       role: 20,
       isCustodial: true,
       emailVerified: true,
+      onboarded: true,
     });
     vi.mocked(api.events.create)
       .mockReset()
@@ -209,7 +228,11 @@ describe('EventEditScreen', () => {
     fireEvent.change(screen.getByLabelText(/Meeting link/),{target:{value:'https://example.org/class'}});
     fireEvent.click(screen.getByRole('button',{name:/post this class/i}));
     await waitFor(()=>expect(api.events.create).toHaveBeenCalled());
-    expect(vi.mocked(api.events.create).mock.calls[0]![0]).toMatchObject({mode:'community.lexicon.calendar.event#virtual',venueNeeded:false,uris:[{uri:'https://example.org/class',name:'Class meeting link'}]});
+    // TASK 19c: the link is an app-side `meetingLink`, never a `uris` entry on the
+    // host's public record — the form promises only RSVPs see it.
+    const posted = vi.mocked(api.events.create).mock.calls[0]![0];
+    expect(posted).toMatchObject({mode:'community.lexicon.calendar.event#virtual',venueNeeded:false,meetingLink:'https://example.org/class'});
+    expect('uris' in posted).toBe(false);
   });
 
   it('builds a weekly series and sends it only on create', async () => {
@@ -359,7 +382,7 @@ describe('EventEditScreen', () => {
     renderScreen();
     await screen.findByRole('heading', { name: 'Edit class' });
     expect(await screen.findByText('Bread baking')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Change' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Bread baking' }));
     fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
 
     await waitFor(() => expect(api.events.update).toHaveBeenCalled());
@@ -400,7 +423,7 @@ describe('EventEditScreen', () => {
     fireEvent.change(screen.getByLabelText('About this class'), { target: { value: 'Learn to bake a loaf together.' } });
     fireEvent.change(screen.getByLabelText('Who it’s for'), { target: { value: 'Beginners welcome.' } });
     fireEvent.change(screen.getByLabelText('Access & comfort'), { target: { value: 'Seated work.' } });
-    fireEvent.change(screen.getByLabelText(/additional attendee details/i), { target: { value: 'Bring your own starter.' } });
+    fireEvent.change(screen.getByLabelText(/notes for attendees/i), { target: { value: 'Bring your own starter.' } });
     fireEvent.click(screen.getByLabelText(/venue needed/i));
 
     fireEvent.change(screen.getByPlaceholderText('A mixing bowl'), { target: { value: 'A mixing bowl' } });
@@ -414,8 +437,53 @@ describe('EventEditScreen', () => {
     expect(body.materials).toEqual(['A mixing bowl']);
     expect(body.suppliesNote).toBe('Flour provided.');
     // Never composed into the description — that was the old workaround.
-    expect(body.description).toBe('Bring your own starter.');
+    // TASK 19c: the attendee notes go to their own app-side field; the PUBLIC
+    // overview is the only free text that reaches the event record.
+    expect(body.attendeeNotes).toBe('Bring your own starter.');
+    expect('description' in body).toBe(false);
     expect(body.publicOverview).toEqual({ description: 'Learn to bake a loaf together.', audience: 'Beginners welcome.', accessibility: 'Seated work.' });
+  });
+
+  it('edit: prefills the attendee notes and the meeting link from their app-side fields (task 19c)', async () => {
+    paramsReturn = { id: EVENT_URI };
+    vi.mocked(api.events.get).mockResolvedValue({
+      uri: EVENT_URI,
+      name: 'Sourdough basics',
+      startsAt: '2026-10-01T18:00:00-06:00',
+      locationRedacted: false,
+      hostDid: 'did:plc:host1',
+      venueNeeded: true,
+      tags: [],
+      listed: true,
+      skills: [],
+      materials: [],
+      // The record's own `description` is the PUBLIC overview now; it must never be
+      // prefilled into the attendee-notes box.
+      description: 'Public invitation',
+      publicOverview: { description: 'Public invitation' },
+      attendeeNotes: 'Come to the side door.',
+      meetingLink: 'https://example.org/class',
+      rsvps: { going: 0, interested: 0 },
+      viewerRelation: 'host' as const,
+    });
+    vi.mocked(api.events.update).mockResolvedValue({
+      event: { uri: EVENT_URI, cid: 'cid9' },
+      config: { uri: 'at://did:plc:host1/coop.lexicon.event.config/cfg1', cid: 'cid2' },
+    });
+
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Edit class' });
+    expect(screen.getByLabelText(/notes for attendees/i)).toHaveValue('Come to the side door.');
+    expect(screen.getByLabelText(/meeting link/i)).toHaveValue('https://example.org/class');
+    expect(screen.getByLabelText('About this class')).toHaveValue('Public invitation');
+
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(api.events.update).toHaveBeenCalled());
+    const [, body] = vi.mocked(api.events.update).mock.calls[0]!;
+    expect(body.attendeeNotes).toBe('Come to the side door.');
+    expect(body.meetingLink).toBe('https://example.org/class');
+    expect('description' in body).toBe(false);
+    expect('uris' in body).toBe(false);
   });
 
   it('edit: prefills materials, suppliesNote, and the raw visibility enum from the host view', async () => {
@@ -476,6 +544,118 @@ describe('EventEditScreen', () => {
     expect(api.events.create).toHaveBeenCalledTimes(1);
     expect(api.requests.claim).toHaveBeenCalledTimes(2);
     expect(api.requests.claim).toHaveBeenLastCalledWith(requestUri, { eventUri: EVENT_URI });
+  });
+
+  it('a class can share two skills, each with its own depth', async () => {
+    renderScreen();
+
+    fireEvent.change(await screen.findByLabelText(/class title/i), { target: { value: 'Sourdough basics' } });
+    fireEvent.change(screen.getByLabelText(/^starts$/i), { target: { value: '2026-10-01T18:00' } });
+    fireEvent.click(screen.getByLabelText(/venue needed/i));
+
+    pickSkill('bread', 'Bread baking');
+    pickSkill('ferment', 'Ferment vegetables');
+
+    // Each chosen skill carries its own depth control.
+    fireEvent.click(screen.getByRole('button', { name: 'Level 1 for Bread baking' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Level 3 for Ferment vegetables' }));
+
+    fireEvent.click(screen.getByRole('button', { name: /post this class/i }));
+
+    await waitFor(() => expect(api.events.create).toHaveBeenCalled());
+    const body = vi.mocked(api.events.create).mock.calls[0]![0];
+    expect(body.skills).toEqual([
+      { skill: BREAD, level: 1 },
+      { skill: FERMENT, level: 3 },
+    ]);
+  });
+
+  it('a class with no skill at all is still postable (a reading group, a social)', async () => {
+    renderScreen();
+
+    fireEvent.change(await screen.findByLabelText(/class title/i), { target: { value: 'Reading group' } });
+    fireEvent.change(screen.getByLabelText(/^starts$/i), { target: { value: '2026-10-01T18:00' } });
+    fireEvent.click(screen.getByLabelText(/venue needed/i));
+    fireEvent.click(screen.getByRole('button', { name: /post this class/i }));
+
+    await waitFor(() => expect(api.events.create).toHaveBeenCalled());
+    const body = vi.mocked(api.events.create).mock.calls[0]![0];
+    expect('skills' in body).toBe(false);
+  });
+
+  it('a fourth skill cannot be added — three is the ceiling', async () => {
+    renderScreen();
+
+    fireEvent.change(await screen.findByLabelText(/class title/i), { target: { value: 'Everything at once' } });
+    fireEvent.change(screen.getByLabelText(/^starts$/i), { target: { value: '2026-10-01T18:00' } });
+    fireEvent.click(screen.getByLabelText(/venue needed/i));
+
+    pickSkill('bread', 'Bread baking');
+    pickSkill('ferment', 'Ferment vegetables');
+    pickSkill('workshop', 'Run a community workshop');
+    expect(screen.getByText(/three skills is the most/i)).toBeInTheDocument();
+    // A fourth is refused rather than silently replacing one of the three.
+    pickSkill('repair', 'Repair a bicycle');
+    expect(screen.queryByText('Repair a bicycle')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /post this class/i }));
+
+    await waitFor(() => expect(api.events.create).toHaveBeenCalled());
+    const body = vi.mocked(api.events.create).mock.calls[0]![0];
+    expect(body.skills).toEqual([
+      { skill: BREAD, level: 2 },
+      { skill: FERMENT, level: 2 },
+      { skill: WORKSHOP, level: 2 },
+    ]);
+  });
+
+  it('edit: shows every skill the class already carries, and removing one sends the rest', async () => {
+    paramsReturn = { id: EVENT_URI };
+    vi.mocked(api.events.get).mockResolvedValue({
+      uri: EVENT_URI,
+      name: 'Bike clinic',
+      startsAt: '2026-10-01T18:00:00-06:00',
+      locationRedacted: false,
+      hostDid: 'did:plc:host1',
+      venueNeeded: true,
+      tags: [],
+      listed: true,
+      skills: [
+        { skill: REPAIR, level: 2 as const, prerequisites: 'Bring the bike that makes the noise.' },
+        { skill: WORKSHOP, level: 3 as const },
+      ],
+      materials: [],
+      rsvps: { going: 0, interested: 0 },
+      viewerRelation: 'host' as const,
+    });
+    vi.mocked(api.events.update).mockResolvedValue({
+      event: { uri: EVENT_URI, cid: 'cid9' },
+      config: { uri: 'at://did:plc:host1/coop.lexicon.event.config/cfg1', cid: 'cid2' },
+    });
+
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Edit class' });
+
+    // Both skills are shown, each with its own depth already selected.
+    expect(await screen.findByText('Repair a bicycle')).toBeInTheDocument();
+    expect(screen.getByText('Run a community workshop')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Level 2 for Repair a bicycle' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.getByRole('button', { name: 'Level 3 for Run a community workshop' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Run a community workshop' }));
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+
+    await waitFor(() => expect(api.events.update).toHaveBeenCalled());
+    const [, body] = vi.mocked(api.events.update).mock.calls[0]!;
+    expect(body.skills).toEqual([
+      { skill: REPAIR, level: 2, prerequisites: 'Bring the bike that makes the noise.' },
+    ]);
   });
 
   it('shows an explanation that a waitlist forms once capacity fills', async () => {

@@ -20,6 +20,13 @@
  */
 import type {
   KnowledgeResource, PublicProfile,
+  AttestationCreated,
+  AttestationInput,
+  ImportBskyProfileResult,
+  MemberProfileResponse,
+  MembersQuery,
+  MembersResponse,
+  MyAttestationsResponse,
   AdminPolicyInput,
   AdminPolicyResponse,
   AdminPolicyWriteResult,
@@ -29,6 +36,8 @@ import type {
   AuthMe,
   CalendarResponse,
   CreateEventInput,
+  CancelEventInput,
+  CancelEventResult,
   CreateEventResult,
   CreateRequestInput,
   EventDetail,
@@ -74,7 +83,14 @@ import type {
   SkillClaimsResponse,
   SkillClaimsSetInput,
   SkillClaimsSetResult,
+  SkillDeprecateInput,
+  SkillDeprecateResult,
   SkillDetail,
+  SkillMoveInput,
+  SkillMoveResult,
+  SkillProposalsResponse,
+  SkillProposeInput,
+  SkillProposeResult,
   SkillTreeResponse,
   TakeOwnershipResult,
   UpdateEventResult,
@@ -84,6 +100,9 @@ import type {
   VisibilityDefaults,
   ZineMonthResponse,
   MeResponse,
+  HandleCheckResult,
+  SetHandleResult,
+  OnboardedResult,
 } from './types';
 
 export class ApiError extends Error {
@@ -167,6 +186,13 @@ export const api = {
   },
   auth: {
     signup: (body: { email: string; inviterDid?: string }) => post<SignupResult>('/api/auth/signup', body),
+    /**
+     * "Continue with email" — the one door for a new AND a returning member
+     * (`SignInScreen`). Same handler as `signup` on the AppView
+     * (`apps/appview/src/http/routes/auth.ts`), same response shape; kept as its own
+     * named call here so the screen's copy and its API call agree on what this is.
+     */
+    signin: (body: { email: string; inviterDid?: string }) => post<SignupResult>('/api/auth/signin', body),
     verify: (token: string) =>
       get<VerifyResult>('/api/auth/verify', { token }, { accept: 'application/json' }),
     me: () => get<AuthMe>('/api/auth/me'),
@@ -197,6 +223,14 @@ export const api = {
      * `SeriesEditNotSupported` (see `EventEditScreen.tsx`'s doc comment). */
     update: (id: string, body: Omit<Partial<CreateEventInput>, 'series'>) =>
       put<UpdateEventResult>(`/api/events/${encodeURIComponent(id)}`, body),
+    /**
+     * The host calls a class off. The class is never deleted — the record keeps
+     * `status: …#cancelled` so anyone who RSVP'd still finds it and learns why
+     * — and `reason` stays app-side on the AppView, never on a record.
+     * `scope: 'following'` also ends the series from this date on.
+     */
+    cancel: (id: string, body: CancelEventInput = {}) =>
+      post<CancelEventResult>(`/api/events/${encodeURIComponent(id)}/cancel`, body),
     icsHref: (id: string): string => `/api/events/${encodeURIComponent(id)}.ics`,
     /** Host-or-steward-only roster (`GET /api/events/:id/rsvps`) — 403s for
      * anyone else. The route returns the array directly, not wrapped. */
@@ -229,6 +263,30 @@ export const api = {
   skills: {
     tree: () => get<SkillTreeResponse>('/api/skills'),
     get: (id: string) => get<SkillDetail>(`/api/skills/${encodeURIComponent(id)}`),
+    /**
+     * Propose a skill the taxonomy is missing. 409 `SkillExists` carries the
+     * node that already covers it (`SkillExistsBody` on `ApiError.body`); 503
+     * `AuthorityUnavailable` means this school has no curation authority set
+     * up yet. Both are real answers, not transient failures — see
+     * `useProposeSkillMutation`.
+     */
+    propose: (body: SkillProposeInput) => post<SkillProposeResult>('/api/skills', body),
+  },
+
+  /**
+   * The members-only people directory (R9: this roster is never public). Every
+   * call here 401s for a signed-out viewer — that is the intended answer, not a
+   * failure to retry past.
+   */
+  members: {
+    list: (query: MembersQuery = {}) => get<MembersResponse>('/api/members', query),
+    /** 404 when the member has hidden themselves from the directory. */
+    get: (did: string) => get<MemberProfileResponse>(`/api/members/${encodeURIComponent(did)}`),
+  },
+
+  attestations: {
+    create: (body: AttestationInput) => post<AttestationCreated>('/api/attestations', body),
+    remove: (id: string) => del<void>(`/api/attestations/${encodeURIComponent(id)}`),
   },
 
   me: {
@@ -236,10 +294,24 @@ export const api = {
     setSkillClaims: (body: SkillClaimsSetInput) => put<SkillClaimsSetResult>('/api/me/skill-claims', body),
     profile: () => get<MeResponse>('/api/me'),
     updateProfile: (body: UpdateProfileInput) => put<UpdateProfileResult>('/api/me', body),
+    /** The vouches I've given and the ones I've received. App-side only. */
+    attestations: () => get<MyAttestationsResponse>('/api/me/attestations'),
+    /** On-demand re-import; always overwrites, because asking for it means it. */
+    importBskyProfile: () => post<ImportBskyProfileResult>('/api/me/import-bsky-profile'),
     badges: () => get<MeBadgesResponse>('/api/me/badges'),
     visibilityDefaults: () => get<VisibilityDefaults>('/api/me/visibility-defaults'),
     publicRole: () => get<PublicRoleResponse>('/api/me/public-role'),
     setPublicRole: (body: SetPublicRoleInput) => put<PublicRoleResponse>('/api/me/public-role', body),
+    /**
+     * Task 6/11: the handle a member chooses for themselves. Both calls take
+     * the PREFIX alone (`wren`), not the whole handle — the school's domain is
+     * the server's to append, and `check` refuses anything that already carries
+     * one. `setHandle` answers with the full handle it became.
+     */
+    checkHandle: (prefix: string) => get<HandleCheckResult>('/api/me/handle/check', { handle: prefix }),
+    setHandle: (prefix: string) => put<SetHandleResult>('/api/me/handle', { handle: prefix }),
+    /** Finishes `/welcome`. Safe to call twice; the first time is the one recorded. */
+    onboarded: () => post<OnboardedResult>('/api/me/onboarded'),
     newsletter: () => get<NewsletterSubscriptionResult>('/api/me/newsletter'),
     setNewsletter: (body: SetNewsletterInput) => put<NewsletterSubscriptionResult>('/api/me/newsletter', body),
   },
@@ -283,6 +355,16 @@ export const api = {
     peers: (opts: { probe?: boolean } = {}) =>
       get<PeersResponse>('/api/admin/peers', opts.probe ? { probe: 1 } : undefined),
     setPeers: (p: PeersInput) => put<PeersResponse>('/api/admin/peers', p),
+    /** A steward's two levers over `freeschool.draft.skill` (R-6: proposals
+     * publish immediately, so there is no approve step — only deprecate and
+     * move). `:id` is the skill's own rkey, exactly as `proposals()` returns it. */
+    skills: {
+      proposals: () => get<SkillProposalsResponse>('/api/admin/skills/proposals'),
+      deprecate: (id: string, body: SkillDeprecateInput = {}) =>
+        post<SkillDeprecateResult>(`/api/admin/skills/${encodeURIComponent(id)}/deprecate`, body),
+      move: (id: string, body: SkillMoveInput) =>
+        post<SkillMoveResult>(`/api/admin/skills/${encodeURIComponent(id)}/move`, body),
+    },
     newsletter: {
       /** `period` defaults server-side to the current month (`YYYY-MM`). */
       compose: (period?: string) => request<NewsletterDraft>('/api/admin/newsletter', { method: 'POST', query: period ? { period } : undefined }),

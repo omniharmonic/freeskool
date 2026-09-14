@@ -62,10 +62,12 @@ vi.mock('../lib/api', () => {
     api: {
       events: {
         get: vi.fn(),
+        cancel: vi.fn(),
         icsHref: (id: string) => `/api/events/${encodeURIComponent(id)}.ics`,
       },
       auth: { me: vi.fn() },
       skills: {get:vi.fn()},
+      members: { get: vi.fn() },
       rsvp: { get: vi.fn(), set: vi.fn(), clear: vi.fn() },
       invites: { mint: vi.fn() },
       push: { vapidKey: vi.fn(), subscribe: vi.fn() },
@@ -75,7 +77,7 @@ vi.mock('../lib/api', () => {
 });
 
 const { useInstallFlow } = await import('../components/InstallNudge');
-const { api } = await import('../lib/api');
+const { api, ApiError } = await import('../lib/api');
 const { EventScreen } = await import('./EventScreen');
 
 const baseEvent = {
@@ -121,12 +123,50 @@ describe('EventScreen', () => {
       role: 1,
       isCustodial: true,
       emailVerified: true,
+      onboarded: true,
     });
     vi.mocked(api.rsvp.get).mockReset().mockResolvedValue({ rsvp: null, counts: { going: 2, interested: 1 } });
     vi.mocked(api.rsvp.set)
       .mockReset()
       .mockResolvedValue({ ok: true, status: 'going', alsoPublicRecord: false, counts: { going: 3, interested: 1 } });
     vi.mocked(api.rsvp.clear).mockReset().mockResolvedValue({ ok: true, counts: { going: 1, interested: 1 } });
+    vi.mocked(api.members.get).mockReset().mockRejectedValue(new ApiError(404, 'NotFound', 'not in the directory'));
+    vi.mocked(api.events.cancel).mockReset().mockResolvedValue({
+      event: { uri: EVENT_URI, cid: 'bafycancelled' },
+      status: 'community.lexicon.calendar.event#cancelled',
+      scope: 'this',
+      alsoCancelled: [],
+      exdatesAdded: 0,
+      notified: 1,
+    });
+  });
+
+  it('names the host and links to their profile for a signed-in member', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, hostDid: 'did:plc:host1' });
+    vi.mocked(api.members.get).mockResolvedValue({
+      did: 'did:plc:host1',
+      handle: 'amir.test',
+      displayName: 'Amir',
+      role: 20,
+      roleLabel: 'Hosts classes here',
+      claimCount: 2,
+      vouchCount: 2,
+      lastSeenAt: '2026-09-13T12:00:00Z',
+      claims: [],
+      badges: { counts: { hosted: 3, attended: 0, vouched: 2 }, role: 20, badges: [] },
+      hosting: [],
+      resources: [],
+    });
+    renderScreen();
+    const link = await screen.findByRole('link', { name: 'Amir' });
+    expect(link).toHaveAttribute('href', '/people/did:plc:host1');
+  });
+
+  it('says nothing about the host when the directory has no answer (hidden member, or signed out)', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, hostDid: 'did:plc:host1' });
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+    await waitFor(() => expect(screen.queryByText("Who's teaching")).not.toBeInTheDocument());
   });
 
   it('hides the exact address when the viewer has not RSVP\'d (locationRedacted: true)', async () => {
@@ -254,6 +294,20 @@ describe('EventScreen', () => {
     expect(screen.queryByText('Listed from another school')).not.toBeInTheDocument();
   });
 
+  it('hides machine routing tags but keeps any tag a host actually wrote', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({
+      ...baseEvent,
+      tags: ['skillshare', 'free-school', 'demo', 'outdoor'],
+    });
+    renderScreen();
+
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+    expect(screen.getByText('outdoor')).toBeInTheDocument();
+    expect(screen.queryByText('skillshare')).not.toBeInTheDocument();
+    expect(screen.queryByText('free-school')).not.toBeInTheDocument();
+    expect(screen.queryByText('demo')).not.toBeInTheDocument();
+  });
+
   it('gates "Remind me" on install state: not installed opens the install sheet instead of requesting push', async () => {
     vi.mocked(useInstallFlow).mockReturnValue({
       surface: 'ios-safari',
@@ -353,7 +407,10 @@ describe('EventScreen', () => {
     vi.mocked(api.auth.me).mockRejectedValue(new Error('Not signed in'));
     vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent,
       publicOverview: { description: 'Learn to grow oyster mushrooms.', audience: 'No experience needed.', accessibility: 'Seated work available.' },
-      description: 'Enter through the private kitchen door.',
+      // TASK 19c: the notes and the link are app-side and arrive only for a viewer
+      // who has RSVP'd. A payload that carried them anyway must still not render.
+      attendeeNotes: 'Enter through the private kitchen door.',
+      meetingLink: 'https://example.org/private-meeting',
       materials: ['A notebook'], suppliesNote: 'Starter kits provided.',
     });
     renderScreen();
@@ -363,6 +420,21 @@ describe('EventScreen', () => {
     expect(screen.getByText('A notebook')).toBeVisible();
     expect(screen.getByText('Starter kits provided.')).toBeVisible();
     expect(screen.queryByText('Enter through the private kitchen door.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /join the class/i })).not.toBeInTheDocument();
+  });
+
+  it('shows the attendee notes and the meeting link once the viewer is past the RSVP gate', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent,
+      locationRedacted: false,
+      viewerRelation: 'rsvp' as const,
+      mode: 'community.lexicon.calendar.event#virtual',
+      publicOverview: { description: 'Learn to grow oyster mushrooms.' },
+      attendeeNotes: 'Enter through the private kitchen door.',
+      meetingLink: 'https://example.org/private-meeting',
+    });
+    renderScreen();
+    expect(await screen.findByText('Enter through the private kitchen door.')).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Join the class ↗' })).toHaveAttribute('href', 'https://example.org/private-meeting');
   });
 
   it('shows skill depth, prerequisites and safe meeting links only to eligible viewers', async () => {
@@ -376,10 +448,11 @@ describe('EventScreen', () => {
     expect(screen.queryByRole('link',{name:'Unsafe link ↗'})).not.toBeInTheDocument();
   });
   it('withholds meeting links before RSVP even if an accidental payload includes them', async () => {
-    vi.mocked(api.events.get).mockResolvedValue({...baseEvent,mode:'community.lexicon.calendar.event#virtual',uris:[{uri:'https://example.org/private-meeting',name:'Join the class'}]});
+    vi.mocked(api.events.get).mockResolvedValue({...baseEvent,mode:'community.lexicon.calendar.event#virtual',meetingLink:'https://example.org/private-meeting',uris:[{uri:'https://example.org/legacy-meeting',name:'Join the class'}]});
     renderScreen();
     expect(await screen.findByText('Online. RSVP to see the meeting link.')).toBeVisible();
     expect(screen.queryByRole('link',{name:'Join the class ↗'})).not.toBeInTheDocument();
+    expect(screen.queryByText(/legacy-meeting/)).not.toBeInTheDocument();
   });
 
   it('shows recovery when an RSVP fails and does not trigger a success nudge', async () => {
@@ -389,6 +462,99 @@ describe('EventScreen', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not save your RSVP');
     expect(vi.mocked(useInstallFlow).mock.results[0]!.value.afterRsvp).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: "I'll be there" })).toBeEnabled();
+  });
+
+  /**
+   * UX audit finding 5. The edit screen tells hosts "to reshape a series, cancel it
+   * and post a new one" and there was no cancel control anywhere — so a host whose
+   * class was snowed out could only edit it forever.
+   */
+  describe('cancelling a class', () => {
+    it('offers the host a cancel action, and nobody else', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host' });
+      renderScreen();
+      expect(await screen.findByRole('button', { name: 'Cancel this class' })).toBeInTheDocument();
+    });
+
+    it('shows no cancel action to an ordinary viewer', async () => {
+      renderScreen();
+      await screen.findByRole('heading', { name: 'Sourdough basics' });
+      expect(screen.queryByRole('button', { name: 'Cancel this class' })).not.toBeInTheDocument();
+    });
+
+    it('confirms first, then calls the API with the reason the host typed', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host' });
+      renderScreen();
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel this class' }));
+      expect(api.events.cancel).not.toHaveBeenCalled();
+
+      fireEvent.change(screen.getByLabelText(/why, in a sentence/i), { target: { value: 'Snowed out.' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel the class' }));
+
+      await waitFor(() =>
+        expect(api.events.cancel).toHaveBeenCalledWith(EVENT_URI, { reason: 'Snowed out.' }),
+      );
+    });
+
+    it('sends no reason when the host does not write one', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host' });
+      renderScreen();
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel this class' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel the class' }));
+      await waitFor(() => expect(api.events.cancel).toHaveBeenCalledWith(EVENT_URI, {}));
+    });
+
+    it('asks "this one, or this and the ones after it?" only for a recurring class', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host', recurring: true });
+      renderScreen();
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel this class' }));
+
+      fireEvent.click(screen.getByLabelText('This date and every one after it'));
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel the class' }));
+
+      await waitFor(() => expect(api.events.cancel).toHaveBeenCalledWith(EVENT_URI, { scope: 'following' }));
+    });
+
+    it('does not offer the scope choice for a one-off class', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host' });
+      renderScreen();
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel this class' }));
+      expect(screen.queryByLabelText('This date and every one after it')).not.toBeInTheDocument();
+    });
+
+    it('keeps the host on the page with a way back when the cancel fails', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host' });
+      vi.mocked(api.events.cancel).mockRejectedValueOnce(new Error('offline'));
+      renderScreen();
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel this class' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel the class' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not cancel this class');
+    });
+
+    it('shows the cancelled banner with the host\'s reason, and disables the RSVP buttons', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({
+        ...baseEvent,
+        status: 'community.lexicon.calendar.event#cancelled',
+        cancelledReason: 'The host has the flu.',
+      });
+      renderScreen();
+      expect(await screen.findByText(/this class has been cancelled/i)).toBeVisible();
+      expect(screen.getByText('From the host: The host has the flu.')).toBeVisible();
+      expect(await screen.findByRole('button', { name: "I'll be there" })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Interested' })).toBeDisabled();
+    });
+
+    it('offers no cancel action on a class that is already cancelled', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({
+        ...baseEvent,
+        viewerRelation: 'host',
+        status: 'community.lexicon.calendar.event#cancelled',
+      });
+      renderScreen();
+      await screen.findByText(/this class has been cancelled/i);
+      expect(screen.queryByRole('button', { name: 'Cancel this class' })).not.toBeInTheDocument();
+    });
   });
 
 });

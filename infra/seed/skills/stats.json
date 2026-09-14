@@ -1,104 +1,104 @@
 {
- "generatedAt": "2026-09-12T00:00:00.000Z",
+ "generatedAt": "2026-09-13T00:00:00.000Z",
  "lexicon": "freeschool.draft.skill",
  "totals": {
-  "nodes": 525,
+  "nodes": 745,
   "domains": 8,
-  "areas": 52,
-  "skills": 465,
+  "areas": 54,
+  "skills": 683,
   "withEsco": 159,
   "withWikidata": 417,
   "withBoth": 146,
-  "withNeither": 95,
+  "withNeither": 315,
   "statusCanonical": 219,
-  "statusProposed": 306
+  "statusProposed": 526
  },
  "coverage": {
-  "pctNodesWithEsco": 30.3,
-  "pctNodesWithWikidata": 79.4,
-  "pctLeafSkillsWithEsco": 34.2,
-  "pctLeafSkillsWithWikidata": 88.4
+  "pctNodesWithEsco": 21.3,
+  "pctNodesWithWikidata": 56,
+  "pctLeafSkillsWithEsco": 23.3,
+  "pctLeafSkillsWithWikidata": 60.2
  },
  "byDomain": {
   "practical-trades": {
-   "nodes": 102,
+   "nodes": 122,
    "areas": 9,
-   "skills": 92,
+   "skills": 112,
    "withEsco": 55,
    "withWikidata": 85,
-   "proposed": 37,
-   "pctEsco": 53.9,
-   "pctWikidata": 83.3
+   "proposed": 57,
+   "pctEsco": 45.1,
+   "pctWikidata": 69.7
   },
   "food": {
-   "nodes": 60,
+   "nodes": 90,
    "areas": 6,
-   "skills": 53,
+   "skills": 83,
    "withEsco": 12,
    "withWikidata": 47,
-   "proposed": 41,
-   "pctEsco": 20.0,
-   "pctWikidata": 78.3
+   "proposed": 71,
+   "pctEsco": 13.3,
+   "pctWikidata": 52.2
   },
   "land": {
-   "nodes": 60,
-   "areas": 6,
-   "skills": 53,
+   "nodes": 96,
+   "areas": 7,
+   "skills": 88,
    "withEsco": 17,
    "withWikidata": 49,
-   "proposed": 36,
-   "pctEsco": 28.3,
-   "pctWikidata": 81.7
+   "proposed": 72,
+   "pctEsco": 17.7,
+   "pctWikidata": 51
   },
   "repair": {
-   "nodes": 44,
+   "nodes": 66,
    "areas": 5,
-   "skills": 38,
+   "skills": 60,
    "withEsco": 11,
    "withWikidata": 33,
-   "proposed": 27,
-   "pctEsco": 25.0,
-   "pctWikidata": 75.0
+   "proposed": 49,
+   "pctEsco": 16.7,
+   "pctWikidata": 50
   },
   "care": {
-   "nodes": 75,
-   "areas": 8,
-   "skills": 66,
+   "nodes": 113,
+   "areas": 9,
+   "skills": 103,
    "withEsco": 20,
    "withWikidata": 59,
-   "proposed": 46,
-   "pctEsco": 26.7,
-   "pctWikidata": 78.7
+   "proposed": 84,
+   "pctEsco": 17.7,
+   "pctWikidata": 52.2
   },
   "arts": {
-   "nodes": 66,
+   "nodes": 98,
    "areas": 6,
-   "skills": 59,
+   "skills": 91,
    "withEsco": 20,
    "withWikidata": 57,
-   "proposed": 39,
-   "pctEsco": 30.3,
-   "pctWikidata": 86.4
+   "proposed": 71,
+   "pctEsco": 20.4,
+   "pctWikidata": 58.2
   },
   "organizing": {
-   "nodes": 74,
+   "nodes": 98,
    "areas": 7,
-   "skills": 66,
+   "skills": 90,
    "withEsco": 11,
    "withWikidata": 57,
-   "proposed": 55,
-   "pctEsco": 14.9,
-   "pctWikidata": 77.0
+   "proposed": 79,
+   "pctEsco": 11.2,
+   "pctWikidata": 58.2
   },
   "tech-digital": {
-   "nodes": 44,
+   "nodes": 62,
    "areas": 5,
-   "skills": 38,
+   "skills": 56,
    "withEsco": 13,
    "withWikidata": 30,
-   "proposed": 25,
-   "pctEsco": 29.5,
-   "pctWikidata": 68.2
+   "proposed": 43,
+   "pctEsco": 21,
+   "pctWikidata": 48.4
   }
  },
  "escoMatchMethods": {
@@ -131,9 +131,9 @@
   "information and communication technologies (icts)": 1
  },
  "descriptionSources": {
-  "authored": 60,
-  "placeholder-needs-authoring": 49,
   "wikidata-cc0": 400,
+  "authored": 280,
+  "placeholder-needs-authoring": 49,
   "esco-aligned-template": 16
  },
  "hypothesisCheck": {
@@ -141,5 +141,6 @@
   "expectedMissing_andWas": 223,
   "expectedMissing_butEscoHadIt": 34,
   "expectedPresent_butEscoLacked": 83
- }
+ },
+ "note": "Counts recomputed from skills-seed.jsonl after the 2026-09-13 community expansion (+218 skills, +2 areas, all status proposed with authored descriptions). escoTopLevelGroupsHit and hypothesisCheck still describe the 2026-09-12 ESCO matching run and are unchanged."
 }

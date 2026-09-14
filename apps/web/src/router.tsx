@@ -1,5 +1,7 @@
 
+import { useEffect } from 'react';
 import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet, useRouterState } from '@tanstack/react-router';
+import { useMe } from './lib/queries';
 import { FlowFrame } from './components/FlowFrame';
 import { Button } from './components/bits';
 import { TabBar } from './components/TabBar';
@@ -13,7 +15,9 @@ const ResourceScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen
 const NewResourceScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'NewResourceScreen');
 const EditResourceScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'EditResourceScreen');
 const PublicProfileScreen = lazyRouteComponent(() => import('./routes/KnowledgeScreen'), 'PublicProfileScreen');
-const EventRedirect = lazyRouteComponent(() => import('./routes/EventScreen'), 'EventRedirect');
+// Its own module, not `EventScreen`'s: resolving a short id needs the calendar,
+// and this route should not pull the whole class screen in to do it.
+const EventRedirect = lazyRouteComponent(() => import('./routes/EventRedirect'), 'EventRedirect');
 const EventScreen = lazyRouteComponent(() => import('./routes/EventScreen'), 'EventScreen');
 const EventEditScreen = lazyRouteComponent(() => import('./routes/EventEditScreen'), 'EventEditScreen');
 const AttendanceScreen = lazyRouteComponent(() => import('./routes/AttendanceScreen'), 'AttendanceScreen');
@@ -22,10 +26,13 @@ const FeedbackSummaryScreen = lazyRouteComponent(() => import('./routes/Feedback
 const SkillsScreen = lazyRouteComponent(() => import('./routes/SkillsScreen'), 'SkillsScreen');
 const SkillScreen = lazyRouteComponent(() => import('./routes/SkillScreen'), 'SkillScreen');
 const RequestsScreen = lazyRouteComponent(() => import('./routes/RequestsScreen'), 'RequestsScreen');
+const PeopleScreen = lazyRouteComponent(() => import('./routes/PeopleScreen'), 'PeopleScreen');
+const MemberProfileScreen = lazyRouteComponent(() => import('./routes/MemberProfileScreen'), 'MemberProfileScreen');
 const MeScreen = lazyRouteComponent(() => import('./routes/MeScreen'), 'MeScreen');
 const NotificationSettingsScreen = lazyRouteComponent(() => import('./routes/NotificationSettingsScreen'), 'NotificationSettingsScreen');
 const SignInScreen = lazyRouteComponent(() => import('./routes/SignInScreen'), 'SignInScreen');
 const VerifyScreen = lazyRouteComponent(() => import('./routes/VerifyScreen'), 'VerifyScreen');
+const WelcomeScreen = lazyRouteComponent(() => import('./routes/WelcomeScreen'), 'WelcomeScreen');
 const OAuthConfirmScreen = lazyRouteComponent(() => import('./routes/OAuthConfirmScreen'), 'OAuthConfirmScreen');
 const ZineScreen = lazyRouteComponent(() => import('./routes/ZineScreen'), 'ZineScreen');
 const InviteScreen = lazyRouteComponent(() => import('./routes/InviteScreen'), 'InviteScreen');
@@ -35,13 +42,14 @@ const AdminOverviewScreen = lazyRouteComponent(() => import('./routes/admin/Admi
 const PolicyScreen = lazyRouteComponent(() => import('./routes/admin/PolicyScreen'), 'PolicyScreen');
 const ModerationScreen = lazyRouteComponent(() => import('./routes/admin/ModerationScreen'), 'ModerationScreen');
 const PeersScreen = lazyRouteComponent(() => import('./routes/admin/PeersScreen'), 'PeersScreen');
+const SkillsAdminScreen = lazyRouteComponent(() => import('./routes/admin/SkillsAdminScreen'), 'SkillsAdminScreen');
 const NewsletterScreen = lazyRouteComponent(() => import('./routes/admin/NewsletterScreen'), 'NewsletterScreen');
 const HandoffScreen = lazyRouteComponent(() => import('./routes/admin/HandoffScreen'), 'HandoffScreen');
 const HandoffAcceptScreen = lazyRouteComponent(() => import('./routes/admin/HandoffAcceptScreen'), 'HandoffAcceptScreen');
 
 /** The zine and the sign-in flow (both doors plus the verify landing) are the
  * places without tabs. */
-const CHROMELESS = ['/zine', '/signin', '/verify', '/oauth/confirm'];
+const CHROMELESS = ['/zine', '/signin', '/verify', '/oauth/confirm', '/welcome'];
 
 function Shell() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -56,6 +64,30 @@ function Shell() {
   );
 }
 
+/**
+ * `/people/$did` is two pages behind one address. A signed-in member gets the
+ * members-only directory profile (skills, vouches, what they host); everyone
+ * else gets the opt-in public notebook, which only exists for a member who
+ * asked for it. Nothing about a member is disclosed by the choice itself:
+ * both sides 404 politely when there is nothing to show.
+ */
+function PersonProfileRoute() {
+  const { isPending, data } = useMe();
+  // BOTH halves are fetched while the session is still resolving, and neither is
+  // rendered until it has. This route is the one place in the app where which lazy
+  // component renders depends on a query: letting the loser mount and suspend means
+  // React sees a component that called `use()` replaced mid-suspension by a different
+  // one ("called use() to suspend in a previous render but did not call use() when it
+  // finished"), which it logs as an error on every member profile. Warming both chunks
+  // first makes the eventual render synchronous, so there is no suspension to replace.
+  useEffect(() => {
+    void MemberProfileScreen.preload?.();
+    void PublicProfileScreen.preload?.();
+  }, []);
+  if (isPending) return <FlowFrame title="Opening this page" description="Just a moment…">{null}</FlowFrame>;
+  return data ? <MemberProfileScreen /> : <PublicProfileScreen />;
+}
+
 const rootRoute = createRootRoute({
   component: Shell,
   notFoundComponent: () => <FlowFrame title="This page wandered off" description="The link may be old, or the address may have a typo."><Button href="/">Find a class</Button></FlowFrame>,
@@ -67,10 +99,11 @@ const routes = [
   createRoute({getParentRoute:()=>rootRoute,path:'/knowledge/new',component:NewResourceScreen}),
   createRoute({getParentRoute:()=>rootRoute,path:'/knowledge/$id',component:ResourceScreen}),
   createRoute({getParentRoute:()=>rootRoute,path:'/knowledge/$id/edit',component:EditResourceScreen}),
-  createRoute({getParentRoute:()=>rootRoute,path:'/people/$did',component:PublicProfileScreen}),
+  createRoute({getParentRoute:()=>rootRoute,path:'/people',component:PeopleScreen}),
+  createRoute({getParentRoute:()=>rootRoute,path:'/people/$did',component:PersonProfileRoute}),
   createRoute({ getParentRoute: () => rootRoute, path: '/', component: CalendarScreen }),
-  // Pre-Task-4 path, kept working: it forwards to `/events/$id` (see
-  // `EventRedirect`'s doc comment in `EventScreen.tsx`).
+  // Pre-Task-4 path, kept working: it resolves the short id against the public
+  // calendar and forwards to `/events/$id` (see `EventRedirect.tsx`).
   createRoute({ getParentRoute: () => rootRoute, path: '/event/$eventId', component: EventRedirect }),
   createRoute({ getParentRoute: () => rootRoute, path: '/events/$id', component: EventScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/skills', component: SkillsScreen }),
@@ -82,6 +115,8 @@ const routes = [
 
   createRoute({ getParentRoute: () => rootRoute, path: '/verify', component: VerifyScreen }), // Task 3
   createRoute({ getParentRoute: () => rootRoute, path: '/oauth/confirm', component: OAuthConfirmScreen }), // Task 3
+  // Where `/verify` sends a brand-new custodial member, once (Task 11).
+  createRoute({ getParentRoute: () => rootRoute, path: '/welcome', component: WelcomeScreen }),
 
   // Registered here as placeholders; each is replaced by its real screen in
   // the task named in the plan (`.superpowers/sdd/mvp-plan/task-*-brief.md`).
@@ -100,6 +135,7 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/policy', component: PolicyScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/moderation', component: ModerationScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/peers', component: PeersScreen }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/skills', component: SkillsAdminScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/newsletter', component: NewsletterScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/handoff', component: HandoffScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/handoff/accept/$token', component: HandoffAcceptScreen }),

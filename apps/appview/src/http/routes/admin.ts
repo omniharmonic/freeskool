@@ -16,12 +16,13 @@
  */
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, desc, eq, isNull } from 'drizzle-orm'
+import { and, desc, eq, isNull, ne } from 'drizzle-orm'
 import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireRole, requireViewer } from '../session.js'
+import { config } from '../../config.js'
 import { getDb } from '../../db/index.js'
-import { appMeta, attendance, moderationQueue, newsletterIssue } from '../../db/schema.js'
+import { appMeta, attendance, moderationQueue, newsletterIssue, skillProposal } from '../../db/schema.js'
 import { rowId, tid } from '../../lib/ids.js'
 import { bumpTally } from '../../lib/roles.js'
 import { schoolActor, schoolDid } from '../../lib/school-actor.js'
@@ -29,9 +30,18 @@ import { SchoolActError, type Approval, type SchoolAction } from '@freeschool/sc
 import { NSID } from '../../lexicons/nsids.js'
 import { currentPolicyUri, getThresholds, refreshPolicyCache } from '../../lib/policy.js'
 import { getRecord } from '../../lib/pds.js'
+import { getRecordByUri, parseAtUri } from '../../index/queries.js'
+import { resolvePdsEndpoint } from '../../lib/identity.js'
 import { addPeer, disablePeer, listPeers, probePeer } from '../../index/peers.js'
 import { getIndexer, resetIndexer } from '../../index/indexer.js'
 import { composeNewsletterIssue, sendNewsletterIssue } from '../../jobs/newsletter.js'
+import { authorityClient } from '../../lib/authority.js'
+import { skillRecords } from './skills.js'
+// `handlesForDids` lives in `me.ts` (DID -> handle, custodial account first, then the
+// index's `identities` table); `lib/members.ts` imports it from there rather than
+// duplicating it, and so do we.
+import { handlesForDids } from './me.js'
+import { describeError, log } from '../../lib/logging.js'
 
 export const admin = new Hono<AppEnv>()
 
@@ -264,6 +274,31 @@ admin.post('/moderation/:id/execute', async (c) => {
   if (row.status !== 'open') return c.json({ error: 'AlreadyResolved', status: row.status }, 409)
 
   if ((row.action === 'remove-resource' || row.action === 'restore-resource') && !row.subjectUri?.includes(`/${NSID.resource}/`)) return c.json({error:'InvalidRequest',message:'Choose a resource record to moderate.'},400)
+
+  /**
+   * INTEROP GAP 3. A `coop.lexicon.event.listing`'s `event` is a
+   * `com.atproto.repo.strongRef`, which requires BOTH `uri` and `cid`. We used to write
+   * the uri alone, so a peer that validates the record dropped it — and a dropped
+   * removal leaves a moderated class listed on someone else's calendar, the worst
+   * possible direction for a moderation failure.
+   *
+   * The ref is resolved BEFORE anything is written (index first, the host's PDS second)
+   * and the whole action is refused if neither answers: a decision record whose effect
+   * cannot be published is worse than an item that stays open and can be retried.
+   */
+  let eventRef: { uri: string; cid: string } | undefined
+  if ((row.action === 'remove-listing' || row.action === 'restore-listing') && row.subjectUri) {
+    const cid = await resolveEventCid(row.subjectUri)
+    if (!cid)
+      return c.json(
+        {
+          error: 'UnresolvableSubject',
+          message: 'Could not read the current version of that class record, so the listing would be invalid. Try again once it is reachable.',
+        },
+        409,
+      )
+    eventRef = { uri: row.subjectUri, cid }
+  }
   const approvals = asApprovals(row.approvals)
   try {
     const result = await schoolActor().putRecordAsSchool({
@@ -290,7 +325,7 @@ admin.post('/moderation/:id/execute', async (c) => {
     // `restore-listing` are the same write with a different `status` — and because
     // `isListed` takes the NEWEST listing (`http/visibility.ts`), appending a `listed`
     // record genuinely un-hides the class.
-    if ((row.action === 'remove-listing' || row.action === 'restore-listing') && row.subjectUri) {
+    if (eventRef && (row.action === 'remove-listing' || row.action === 'restore-listing')) {
       const status = row.action === 'remove-listing' ? 'removed' : 'listed'
       const listing = await schoolActor()
         .putRecordAsSchool({
@@ -302,7 +337,7 @@ admin.post('/moderation/:id/execute', async (c) => {
           rkey: tid(),
           record: {
             $type: NSID.eventListing,
-            event: { uri: row.subjectUri },
+            event: eventRef,
             school: schoolDid(),
             status,
             createdAt: new Date().toISOString(),
@@ -391,6 +426,136 @@ admin.post('/newsletter/:id/send', async (c) => {
   return c.json({ ok: true, recipientCount: result.recipientCount })
 })
 
+/* skill taxonomy (R-6: proposals publish immediately; a steward's only levers are
+ * deprecate and move) */
+
+/** `false` when the authority credential this router needs isn't configured — the
+ * same 503 shape `POST /api/skills` uses, so a steward sees the same story a member does. */
+function authorityUnconfigured(): boolean {
+  const c = config()
+  return !c.AUTHORITY_DID || !c.AUTHORITY_HANDLE || !c.AUTHORITY_PASSWORD
+}
+
+/** The path from the taxonomy root to this skill, as labels — same ancestor walk
+ * `GET /api/skills/:id` does, over the SAME already-fetched record set (one query, not
+ * one per row of the proposal queue). */
+function pathFor(byUri: Map<string, { uri: string; value: { label: string; broader?: string[] } }>, uri: string): string[] {
+  const labels: string[] = []
+  const seen = new Set<string>()
+  let cursor = byUri.get(uri)
+  while (cursor && !seen.has(cursor.uri)) {
+    labels.unshift(cursor.value.label)
+    seen.add(cursor.uri)
+    const parentUri = cursor.value.broader?.[0]
+    cursor = parentUri ? byUri.get(parentUri) : undefined
+  }
+  return labels
+}
+
+/**
+ * The proposal queue. Every `fs_skill_proposal` row, joined against the indexed record
+ * for its current label/status/path (a proposal can be deprecated or moved after the
+ * fact, and the record — not the row written at proposal time — is the truth for that).
+ * The proposer is shown as a HANDLE, never a bare DID (R9's spirit: this is a steward
+ * surface, not a public one, but there is no reason to show more than a handle here).
+ *
+ * `'failed'` rows are excluded (review round 1, blocking #2): those are proposals whose
+ * authority write never actually happened — nothing for a steward to act on. A
+ * `'pending'` row (the authority write succeeded but the follow-up bookkeeping didn't)
+ * DOES still show, since its skill record is genuinely live.
+ */
+admin.get('/skills/proposals', async (c) => {
+  const rows = await getDb()
+    .select()
+    .from(skillProposal)
+    .where(ne(skillProposal.status, 'failed'))
+    .orderBy(desc(skillProposal.createdAt))
+    .limit(200)
+  const indexer = await getIndexer()
+  const records = await skillRecords(indexer)
+  const byUri = new Map(records.map((r) => [r.uri, r]))
+  const handles = await handlesForDids(rows.map((r) => r.proposerDid))
+
+  return c.json({
+    proposals: rows.map((r) => {
+      const record = byUri.get(r.skillUri)
+      return {
+        // The web-facing id is the skill's OWN rkey (not the app-side proposal row id) —
+        // `POST /skills/:id/deprecate` and `/move` below take the same id.
+        id: record?.value.id ?? r.skillUri.split('/').pop(),
+        skillUri: r.skillUri,
+        label: record?.value.label,
+        status: record?.value.status ?? r.status,
+        path: pathFor(byUri, r.skillUri),
+        proposerHandle: handles[r.proposerDid],
+        proposedAt: r.createdAt,
+      }
+    }),
+  })
+})
+
+const deprecateBody = z.object({ replacedBy: z.string().startsWith('at://').optional() })
+
+/** `:id` is the SKILL's rkey (e.g. `bike-repair`), not the `fs_skill_proposal` row id —
+ * the proposal record above already gives the web picker that rkey as `id`. */
+admin.post('/skills/:id/deprecate', async (c) => {
+  if (authorityUnconfigured()) return c.json({ error: 'AuthorityUnavailable' }, 503)
+  const parsed = deprecateBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
+
+  const uri = `at://${config().AUTHORITY_DID}/${NSID.skill}/${c.req.param('id')}`
+
+  // review round 1, should-fix #4: the authority call and its follow-up (the DB row and
+  // the indexer notify) are separate failure domains and must not be reported the same
+  // way — once `deprecateSkill` returns, the record IS deprecated, so a follow-up
+  // failure is bookkeeping, never an `AuthorityError`.
+  let result: { uri: string; cid: string }
+  try {
+    result = await authorityClient().deprecateSkill(uri, parsed.data.replacedBy)
+  } catch (err) {
+    log.warn('admin: skill deprecate failed at the authority', { code: describeError(err) })
+    return c.json({ error: 'AuthorityError' }, 502)
+  }
+
+  try {
+    await getDb().update(skillProposal).set({ status: 'deprecated' }).where(eq(skillProposal.skillUri, result.uri))
+    const indexer = await getIndexer()
+    await indexer.notify(result.uri)
+  } catch (err) {
+    log.warn('admin: skill deprecate follow-up failed', { code: describeError(err) })
+  }
+
+  return c.json({ uri: result.uri, status: 'deprecated' })
+})
+
+const moveBody = z.object({ parentUri: z.string().startsWith('at://') })
+
+admin.post('/skills/:id/move', async (c) => {
+  if (authorityUnconfigured()) return c.json({ error: 'AuthorityUnavailable' }, 503)
+  const parsed = moveBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
+
+  const uri = `at://${config().AUTHORITY_DID}/${NSID.skill}/${c.req.param('id')}`
+
+  // Same separation as `/deprecate` above: the move itself vs. the notify follow-up.
+  let result: { uri: string; cid: string }
+  try {
+    result = await authorityClient().moveSkill(uri, parsed.data.parentUri)
+  } catch (err) {
+    log.warn('admin: skill move failed at the authority', { code: describeError(err) })
+    return c.json({ error: 'AuthorityError' }, 502)
+  }
+
+  try {
+    const indexer = await getIndexer()
+    await indexer.notify(result.uri)
+  } catch (err) {
+    log.warn('admin: skill move follow-up failed', { code: describeError(err) })
+  }
+
+  return c.json({ uri: result.uri, broader: [parsed.data.parentUri] })
+})
+
 /**
  * The PUBLIC projection of a moderation decision (F0).
  *
@@ -472,4 +637,27 @@ function asApprovals(raw: unknown): Approval[] {
       },
     ]
   })
+}
+
+/**
+ * The current cid of an event record: the indexed copy first (no network), the host's
+ * own PDS second. `null` means we cannot build a valid strongRef for it — see the
+ * refusal in `POST /moderation/:id/execute`.
+ */
+async function resolveEventCid(uri: string): Promise<string | null> {
+  try {
+    const indexed = await getRecordByUri(await getIndexer(), 'event', uri)
+    if (indexed?.cid) return indexed.cid
+  } catch {
+    /* the index is not the only source; fall through to the PDS */
+  }
+  try {
+    const parts = parseAtUri(uri)
+    if (!parts) return null
+    const endpoint = await resolvePdsEndpoint(parts.did)
+    if (!endpoint) return null
+    return (await getRecord(parts.did, parts.collection, parts.rkey, endpoint))?.cid ?? null
+  } catch {
+    return null
+  }
 }

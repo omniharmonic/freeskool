@@ -23,16 +23,15 @@
  * `CUSTODY_KEYS`, …) — the README's run sheet does exactly that.
  */
 import { execFile } from 'node:child_process';
-import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { expect, test, type Browser, type Page } from '@playwright/test';
+// The dev-mail-sink reader is shared with the persona helper (Task 14) — one implementation.
+import { magicLinkUrl } from './personas';
 
 const exec = promisify(execFile);
 
 const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
-/** Where `apps/appview/src/lib/mail.ts` appends mail while `SMTP_URL` is unset. */
-const MAIL_LOG = process.env.DEV_MAIL_LOG || fileURLToPath(new URL('../../appview/.dev-mail.log', import.meta.url));
 
 /** Unique per run, so a re-run never reads the previous run's magic link. */
 const TEST_IMAGE = { name: 'test-poster.png', mimeType: 'image/png', buffer: Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAIAAAAlC+aJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAAoElEQVRoge2SQQkAQRDDaikyKmL92zgR9wgDhQhIQ8PraaIbsAHVK7IL9S7RDdiA6hXZhXqX6AZsQPWK7EK9S3QDNqB6RXah3iW6ARtQvSK7UO8S3YANqF6RXah3iW7ABlSvyC7Uu0Q3YAOqV2QX6l2iG7AB1SuyC/Uu0Q3YgOoV2YV6l+gGbED1iuxCvUt0AzagekV2od4lugEbUL3iHz6v8XDEtGAjnQAAAABJRU5ErkJggg==", "base64") };
@@ -45,53 +44,24 @@ interface Member {
   address: string;
 }
 
-/**
- * The magic link URL, from the dev mail sink, exactly as the mail body wrote it — no
- * extracting the token and rebuilding a URL around it (B4). The mail body currently carries
- * `${APPVIEW_PUBLIC_URL}/api/auth/verify?token=…`; once the backend change lands it will
- * carry `${WEB_PUBLIC_URL}/verify?token=…` (the web app's own `/verify` route) instead — this
- * only has to find whatever URL is actually there and hand it back verbatim. Polled rather
- * than slept on: the signup response returns before the file write has necessarily landed.
- */
-async function magicLinkUrl(to: string, timeoutMs = 20_000): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const text = await readFile(MAIL_LOG, 'utf8').catch(() => '');
-    // Newest first: a re-verification for the same address supersedes the older link.
-    for (const line of text.split('\n').reverse()) {
-      if (!line.trim()) continue;
-      let mail: { to?: string; body?: string };
-      try {
-        mail = JSON.parse(line) as { to?: string; body?: string };
-      } catch {
-        continue;
-      }
-      if (mail.to !== to) continue;
-      const url = /(\S+\/verify\?token=\S+)/.exec(mail.body ?? '')?.[1];
-      if (url) return url;
-    }
-    if (Date.now() > deadline) {
-      throw new Error(
-        `no magic link for this run's address in ${MAIL_LOG} after ${timeoutMs}ms — ` +
-          'is the AppView running with SMTP_URL unset?',
-      );
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-}
-
 /** The primary door, through the UI: email → magic link → verified session on Requests. */
 async function signUp(browser: Browser, who: string): Promise<Member> {
   const page = await browser.newPage();
   const address = addressFor(who);
   await page.goto('/signin');
   await page.getByLabel('Your email').fill(address);
-  await page.getByRole('button', { name: /Create a new Free School identity/ }).click();
+  await page.getByRole('button', { name: /Continue with email/ }).click();
   await expect(page.getByText('Check your email')).toBeVisible();
 
   const verifyUrl = await magicLinkUrl(address);
   await page.goto(verifyUrl);
-  // PRD §13 constraint 2: verification lands on the needs board, not the calendar.
+  // Task 11: a brand-new member meets `/welcome` once — the handle they were
+  // given, a name, a first skill. Every card is skippable, and "Finish" is the
+  // way past all three; the verify screen wears the same title for a moment
+  // while it signs them in, so the button is what this actually waits on.
+  await expect(page.getByRole('heading', { name: 'Welcome to Free School', level: 1 })).toBeVisible();
+  await page.getByRole('button', { name: 'Finish' }).click();
+  // PRD §13 constraint 2: onboarding lands on the needs board, not the calendar.
   await expect(page.getByRole('heading', { name: 'Requests', level: 1 })).toBeVisible();
 
   const me = (await (await page.request.get('/api/auth/me')).json()) as { did: string };
@@ -178,7 +148,7 @@ test('the MVP loop: sign up, ask, post, RSVP, attest, feedback, zine, policy', a
     await host.page.getByRole('button', { name: 'Sign out', exact: true }).click();
     await host.page.goto('/signin');
     await host.page.getByLabel('Your email').fill(host.address);
-    await host.page.getByRole('button', { name: /Create a new Free School identity/ }).click();
+    await host.page.getByRole('button', { name: /Continue with email/ }).click();
     await expect(host.page.getByText('Check your email')).toBeVisible();
     await host.page.goto(await magicLinkUrl(host.address));
     await expect(host.page.getByRole('heading', { name: 'Requests', level: 1 })).toBeVisible();

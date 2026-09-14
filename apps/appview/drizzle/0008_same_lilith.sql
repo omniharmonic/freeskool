@@ -1,0 +1,1 @@
+CREATE UNIQUE INDEX "fs_custodial_account_email_idx" ON "fs_custodial_account" USING btree ("email");

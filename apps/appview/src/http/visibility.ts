@@ -10,10 +10,15 @@
  *      status WINS over the host's own config: that is what moderation means, and it is
  *      also what makes `restore-listing` work at all.
  *
- *   2. HOW MUCH OF IT?  Everyone sees title / time / neighborhood. The full location —
- *      street address, venue name, coordinates, join URL — is only ever sent to a viewer
- *      who is the host, has RSVP'd, has confirmed attendance, or is a steward. Someone's
- *      living room is not public information just because the class is.
+ *   2. HOW MUCH OF IT?  For a LISTED class everyone sees what the host's own public
+ *      record says — title, time, mode, public description, host — plus a neighborhood.
+ *      The precise LOCATION (street address, venue name, coordinates) is only ever sent
+ *      to a viewer who is the host, has RSVP'd, has confirmed attendance, or is a
+ *      steward, and so — since task 19c — are the host's ATTENDEE NOTES and MEETING LINK,
+ *      which are app-side (`lib/event-extra.ts`) precisely so that gate can be honoured.
+ *      Someone's living room is not public information just because the class is; a class
+ *      description, published by its host into a world-readable repo, already is (see
+ *      `publicRecordFields` and `attendeeOnlyFields`).
  */
 import type { EventConfig, EventListing } from '../lexicons/coop.js'
 
@@ -158,13 +163,71 @@ export interface FullCalendarEntry extends PublicCalendarEntry {
   description?: string
   locations?: unknown[]
   uris?: Array<{ uri: string; name?: string }>
+  /** App-side, attendee-only (task 19c). Never on any record. */
+  attendeeNotes?: string
+  meetingLink?: string
   hostDid: string
+}
+
+/**
+ * The fields that are ALREADY PUBLIC in the `community.lexicon.calendar.event` record
+ * itself, and so are not ours to withhold from a listed class (interop gap 5).
+ *
+ * Why this is not a privacy regression: the event lives in the HOST'S OWN REPO and is
+ * world-readable over `com.atproto.repo.listRecords` by anyone who knows the PDS — the
+ * host published it, deliberately, as a public record. Hiding `description` and `hostDid`
+ * from our own API therefore protected nothing (one `listRecords` away) while making
+ * every site syndicating our calendar show titles with no descriptions.
+ *
+ * TASK 19c narrowed what `description` MEANS rather than what we release: the record's
+ * `description` is now the host's PUBLIC overview and only that (`lib/events.ts`). The
+ * attendee notes and the meeting link that used to sit in `description` / `uris` — under
+ * a form that told the host "shown after RSVP" — are app-side (`lib/event-extra.ts`) and
+ * are released by `attendeeOnlyFields` below, through the same gate as the address.
+ * `uris` therefore left this function: nothing writes them any more, so a record that
+ * still has them is a class published before 19c whose host was promised the link was
+ * private, and serving it to strangers would break that promise a second time.
+ *
+ * `locations` is the other exception and stays gated: the street address is the R9 harm —
+ * someone's living room is not public information just because the class is — and it is
+ * coarsened to a neighborhood rather than omitted. `hostDid` is already inside the
+ * event's own AT-URI, so naming it adds no identity the record did not carry.
+ *
+ * These fields are released only for a class that is actually LISTED. An unlisted,
+ * private or moderated-away event tells a stranger nothing beyond what the calendar
+ * routes already refuse to show them.
+ */
+function publicRecordFields(event: CalendarEvent) {
+  return {
+    hostDid: event.hostDid,
+    ...(event.description ? { description: event.description } : {}),
+  }
+}
+
+/**
+ * What the host wrote FOR THE PEOPLE WHO ARE COMING — app-side, and released by exactly
+ * the predicate that releases the street address (`seesFullLocation`: host, steward,
+ * RSVP'd, attended). `uris` rides here too; see `publicRecordFields`.
+ */
+export interface AttendeeOnlyFields {
+  attendeeNotes?: string
+  meetingLink?: string
+}
+
+function attendeeOnlyFields(event: CalendarEvent, extra?: AttendeeOnlyFields) {
+  return {
+    ...(extra?.attendeeNotes ? { attendeeNotes: extra.attendeeNotes } : {}),
+    ...(extra?.meetingLink ? { meetingLink: extra.meetingLink } : {}),
+    ...(event.uris ? { uris: event.uris } : {}),
+  }
 }
 
 export function projectEvent(
   event: CalendarEvent,
   inputs: ListingInputs,
   relation: ViewerRelation,
+  /** `fs_event_extra` for this class, when the caller has it (the event detail route). */
+  extra?: AttendeeOnlyFields,
 ): PublicCalendarEntry | FullCalendarEntry {
   const base: PublicCalendarEntry = {
     uri: event.uri,
@@ -181,14 +244,16 @@ export function projectEvent(
     venueNeeded: isVenueNeeded(event, inputs),
     tags: tagsOf(inputs),
   }
-  if (!seesFullLocation(relation)) return base
+  if (!seesFullLocation(relation)) {
+    // Listed and public: the record's own public fields, minus the precise location.
+    return isListed(inputs) ? { ...base, ...publicRecordFields(event) } : base
+  }
   return {
     ...base,
     locationRedacted: false,
-    hostDid: event.hostDid,
-    ...(event.description ? { description: event.description } : {}),
+    ...publicRecordFields(event),
+    ...attendeeOnlyFields(event, extra),
     ...(event.locations ? { locations: event.locations } : {}),
-    ...(event.uris ? { uris: event.uris } : {}),
   }
 }
 

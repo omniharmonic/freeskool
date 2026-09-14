@@ -41,6 +41,14 @@ const tierASkill = {
   tier: 'A' as const,
 };
 
+const proposedSkill = {
+  ...tierASkill,
+  uri: 'at://did:plc:school/freeschool.draft.skill/beekeeping',
+  id: 'beekeeping',
+  label: 'Beekeeping',
+  status: 'proposed' as const,
+};
+
 function renderScreen() {
   const queryClient = new QueryClient();
   return render(
@@ -67,5 +75,54 @@ describe('SkillScreen', () => {
 
     expect(await screen.findByRole('heading', { name: 'Bread baking' })).toBeInTheDocument();
     expect(screen.queryByText(/sensitive/i)).not.toBeInTheDocument();
+  });
+
+  it('shows a muted "proposed" marker for a proposed skill', async () => {
+    vi.mocked(api.skills.get).mockReset().mockResolvedValue(proposedSkill);
+    vi.mocked(api.requests.list).mockReset().mockResolvedValue({ requests: [] });
+    renderScreen();
+
+    expect(await screen.findByRole('heading', { name: 'Beekeeping' })).toBeInTheDocument();
+    expect(screen.getByText('proposed')).toBeInTheDocument();
+  });
+
+  it('shows no "proposed" marker for a canonical skill', async () => {
+    vi.mocked(api.skills.get).mockReset().mockResolvedValue(tierASkill);
+    vi.mocked(api.requests.list).mockReset().mockResolvedValue({ requests: [] });
+    renderScreen();
+
+    expect(await screen.findByRole('heading', { name: 'Bread baking' })).toBeInTheDocument();
+    expect(screen.queryByText('proposed')).not.toBeInTheDocument();
+  });
+
+  it('shows the members who hold this skill when someone is signed in', async () => {
+    vi.mocked(api.skills.get)
+      .mockReset()
+      .mockResolvedValue({
+        ...tierASkill,
+        people: {
+          count: 2,
+          members: [
+            { did: 'did:plc:wren', handle: 'wren.fs.boulder', displayName: 'Wren Halloway', level: 'teaching', vouchCount: 2 },
+            { did: 'did:plc:juno', handle: 'juno.fs.boulder', level: 'learning', vouchCount: 0 },
+          ],
+        },
+      });
+    vi.mocked(api.requests.list).mockReset().mockResolvedValue({ requests: [] });
+    renderScreen();
+
+    expect(await screen.findByRole('heading', { name: 'People with this skill' })).toBeInTheDocument();
+    expect(screen.getByText('Wren Halloway')).toBeInTheDocument();
+    expect(screen.getByText('juno.fs.boulder')).toBeInTheDocument();
+  });
+
+  it('nudges a signed-out reader to sign in instead of showing the roster', async () => {
+    vi.mocked(api.skills.get).mockReset().mockResolvedValue(tierASkill);
+    vi.mocked(api.requests.list).mockReset().mockResolvedValue({ requests: [] });
+    renderScreen();
+
+    expect(await screen.findByRole('heading', { name: 'Bread baking' })).toBeInTheDocument();
+    expect(screen.queryByRole('heading', { name: 'People with this skill' })).not.toBeInTheDocument();
+    expect(screen.getByText(/sign in to see members/i)).toBeInTheDocument();
   });
 });

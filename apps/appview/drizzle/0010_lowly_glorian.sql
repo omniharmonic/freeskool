@@ -1,0 +1,1 @@
+ALTER TABLE "fs_event_extra" ADD COLUMN "cancel_reason" text;

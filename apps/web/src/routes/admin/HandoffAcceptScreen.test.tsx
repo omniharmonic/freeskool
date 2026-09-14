@@ -49,6 +49,7 @@ describe('HandoffAcceptScreen', () => {
       role: 1,
       isCustodial: true,
       emailVerified: true,
+      onboarded: true,
     });
     vi.mocked(api.admin.handoff.accept).mockReset();
   });

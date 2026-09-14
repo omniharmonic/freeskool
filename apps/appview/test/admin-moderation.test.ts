@@ -14,8 +14,27 @@
  */
 process.env.SCHOOL_DID = 'did:plc:school'
 
-import { afterEach, beforeAll, beforeEach, afterAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, beforeEach, afterAll, describe, expect, it, vi } from 'vitest'
 import { AppCustodyAdapter, type Did } from '@freeschool/school-actor'
+
+/**
+ * Interop gap 3: the moderation listing's `event` strongRef must carry a REAL `cid`.
+ * The route resolves it from the index first and the host's PDS second; both are faked
+ * here so the suite makes no network call. `indexedCid.value = null` plus an
+ * unreachable PDS is the "cannot resolve" case, which must REFUSE rather than write an
+ * invalid ref.
+ */
+const indexedCid = vi.hoisted(() => ({ value: 'bafyeventcid' as string | null }))
+vi.mock('../src/index/indexer.js', () => ({ getIndexer: async () => ({}), resetIndexer: () => {} }))
+vi.mock('../src/index/queries.js', async () => ({
+  ...(await vi.importActual('../src/index/queries.js')),
+  getRecordByUri: async (_indexer: unknown, _short: string, uri: string) =>
+    indexedCid.value ? { uri, did: 'did:plc:some-host', collection: 'community.lexicon.calendar.event', rkey: 'x', cid: indexedCid.value, value: {} } : null,
+}))
+vi.mock('../src/lib/identity.js', async () => ({
+  ...(await vi.importActual('../src/lib/identity.js')),
+  resolvePdsEndpoint: async () => null,
+}))
 import { Role } from '@freeschool/shared'
 import type { Context } from 'hono'
 import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
@@ -58,6 +77,7 @@ beforeEach(async () => {
   await testDb()
     .insert(custodialAccount)
     .values({ did: STEWARD_A, handle: 'steward-a.test', email: 'steward-a@example.org', keyVersion: 'v1' })
+  indexedCid.value = 'bafyeventcid'
 })
 
 afterEach(() => setSchoolActor(undefined))
@@ -175,7 +195,7 @@ describe('POST /api/admin/moderation/:id/execute', () => {
     // The LISTING the school writes is a different record and DOES name the event — that
     // is the whole point of a curation listing, and the host published that event.
     const listing = captured[1] as { record: Record<string, unknown> } | undefined
-    expect((listing?.record.event as { uri: string }).uri).toBe(subjectUri)
+    expect(listing?.record.event).toEqual({ uri: subjectUri, cid: 'bafyeventcid' })
     expect(listing?.record.status).toBe('removed')
     expect('reason' in (listing?.record ?? {})).toBe(false)
   })
@@ -210,7 +230,10 @@ describe('POST /api/admin/moderation/:id/execute', () => {
     expect(captured.length).toBe(2)
     const listing = captured[1] as { record: Record<string, unknown> }
     expect(listing.record.status).toBe('listed')
-    expect((listing.record.event as { uri: string }).uri).toBe(subjectUri)
+    // A `coop.lexicon.event.listing`'s `event` is a `com.atproto.repo.strongRef`, which
+    // REQUIRES both fields: a peer validating the record drops a cid-less one, and a
+    // dropped removal is the worst possible direction for a moderation failure.
+    expect(listing.record.event).toEqual({ uri: subjectUri, cid: 'bafyeventcid' })
 
     // …and the restore genuinely un-hides the class, removal still sitting in the history.
     const ref = { uri: subjectUri, cid: 'bafy' }
@@ -308,6 +331,35 @@ describe('POST /api/admin/moderation/:id/execute', () => {
     const tally = await testDb().select().from(attendanceTally).where(eq(attendanceTally.did, subject))
     expect(tally[0]?.attendedConfirmed).toBe(0)
   })
+})
+
+it('refuses a listing change it cannot build a valid strongRef for, rather than writing a cid-less one', async () => {
+  if (!available) return
+  indexedCid.value = null // and `resolvePdsEndpoint` is mocked to null: nothing can resolve the cid
+  const captured: Array<Record<string, unknown>> = []
+  setSchoolActor(wirePort(captured))
+
+  const subjectUri = 'at://did:plc:some-host/community.lexicon.calendar.event/vanished'
+  const id = rowId()
+  await testDb().insert(moderationQueue).values({
+    id,
+    action: 'remove-listing',
+    subjectUri,
+    subjectDid: null,
+    reason: 'the event record cannot be resolved',
+    openedByDid: STEWARD_A,
+    approvals: [{ stewardDid: STEWARD_A, at: new Date().toISOString() }],
+  })
+
+  const app = createApp()
+  const res = await app.request(`/api/admin/moderation/${id}/execute`, { method: 'POST', headers: { Cookie: await cookieFor(STEWARD_A) } })
+  expect(res.status).toBe(409)
+  expect((await res.json()) as { error: string }).toMatchObject({ error: 'UnresolvableSubject' })
+  // Nothing at all was written — not the decision record, and certainly not a listing.
+  expect(captured).toEqual([])
+  // …and the item stays open, so a steward can retry once the record resolves.
+  const rows = await testDb().select().from(moderationQueue).where(eq(moderationQueue.id, id))
+  expect(rows[0]?.status).toBe('open')
 })
 
 it('requires the school approval threshold to hide knowledge, and supports audited restoration',async()=>{

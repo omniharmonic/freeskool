@@ -1,4 +1,4 @@
-process.env.DATABASE_URL ??= 'postgres://freeschool:freeschool@localhost:5434/freeschool_polish_test'
+process.env.DATABASE_URL ??= 'postgres://freeschool:freeschool@localhost:5434/freeschool'
 process.env.SESSION_SECRET ??= 'knowledge-test-session-secret'
 process.env.CUSTODY_KEYS ??= `v1:${Buffer.alloc(32, 5).toString('base64')}`
 process.env.FEEDBACK_BALLOT_PEPPER ??= 'knowledge-test-pepper'

@@ -9,6 +9,7 @@
  */
 import { AtpAgent, type AtpSessionData } from '@atproto/api'
 import { config } from '../config.js'
+import { log } from './logging.js'
 
 export class PdsError extends Error {
   constructor(
@@ -68,6 +69,59 @@ export async function updateAccountPassword(did: string, password: string): Prom
   await xrpc<{ success: boolean }>('com.atproto.admin.updateAccountPassword', { did, password }, { admin: true })
 }
 
+export interface AdminAccountSummary {
+  did: string
+  handle: string
+}
+
+/**
+ * `custody.ts#signup`'s orphan self-heal: `createAccount` failed because the PDS says
+ * the email is already taken, but we hold no `fs_custodial_account` row for it — a prior
+ * signup got as far as minting the PDS account and then lost the mail send (or crashed)
+ * before we ever recorded it. This is how we find that stranded account back by email,
+ * admin-side, so it can be adopted rather than leaving every future attempt 502ing
+ * forever against an account nobody can reach.
+ */
+export async function searchAccountByEmail(email: string): Promise<AdminAccountSummary | null> {
+  // `com.atproto.admin.searchAccounts` is guarded by the PDS's *moderator* verifier, which
+  // only accepts a service-auth Bearer from a configured mod service — never the Basic
+  // admin token we hold ("Unexpected authorization type", verified against pds 0.4).
+  // `getAccountInfos` DOES accept the admin token and returns each account's email, so we
+  // walk the repo list (public) and look the candidates up in batches. Fine for a school
+  // PDS with hundreds of accounts; revisit if it ever holds tens of thousands.
+  const wanted = email.trim().toLowerCase()
+  const base = config().PDS_URL.replace(/\/$/, '')
+  const matches: AdminAccountSummary[] = []
+  let cursor: string | undefined
+  do {
+    const listUrl = new URL('/xrpc/com.atproto.sync.listRepos', base)
+    listUrl.searchParams.set('limit', '500')
+    if (cursor) listUrl.searchParams.set('cursor', cursor)
+    const listRes = await fetch(listUrl)
+    const listJson = (await listRes.json().catch(() => ({}))) as { repos?: Array<{ did?: string }>; cursor?: string; error?: string; message?: string }
+    if (!listRes.ok) throw new PdsError(listJson.message ?? 'PDS com.atproto.sync.listRepos failed', listRes.status, listJson.error)
+    const dids = (listJson.repos ?? []).map((r) => r.did).filter((d): d is string => typeof d === 'string')
+    for (let i = 0; i < dids.length; i += 50) {
+      const infoUrl = new URL('/xrpc/com.atproto.admin.getAccountInfos', base)
+      for (const did of dids.slice(i, i + 50)) infoUrl.searchParams.append('dids', did)
+      const infoRes = await fetch(infoUrl, { headers: { authorization: adminAuth() } })
+      const infoJson = (await infoRes.json().catch(() => ({}))) as { infos?: Array<{ did?: string; handle?: string; email?: string }>; error?: string; message?: string }
+      if (!infoRes.ok) throw new PdsError(infoJson.message ?? 'PDS com.atproto.admin.getAccountInfos failed', infoRes.status, infoJson.error)
+      for (const info of infoJson.infos ?? []) {
+        if (info.email?.trim().toLowerCase() === wanted && info.did && info.handle) matches.push({ did: info.did, handle: info.handle })
+      }
+    }
+    cursor = listJson.cursor && (listJson.repos?.length ?? 0) > 0 ? listJson.cursor : undefined
+  } while (cursor)
+  // More than one match means we cannot safely say WHICH account this email's orphan
+  // self-heal should adopt — refuse rather than guess.
+  if (matches.length > 1) {
+    log.warn('admin account lookup returned more than one match for a signup email')
+    return null
+  }
+  return matches[0] ?? null
+}
+
 export interface CreatedAccount {
   did: string
   handle: string
@@ -84,12 +138,30 @@ export async function createAccount(input: {
   return xrpc<CreatedAccount>('com.atproto.server.createAccount', input)
 }
 
+/**
+ * `null` means "no such handle" — the ONLY thing a caller (e.g. `routes/me.ts`'s
+ * handle-availability check) may read as "available". Review round 1 (blocking): the
+ * previous version treated ANY non-ok response as "no such handle", so a PDS outage made
+ * `GET /api/me/handle/check` answer `available: true`. Now only the PDS's genuine
+ * not-found answer (400, in either spelling a real PDS uses) returns `null`; anything
+ * else non-2xx — a 5xx, a differently-shaped 400 — throws `PdsError` instead, so the
+ * caller can tell "not registered" apart from "could not ask".
+ */
 export async function resolveHandle(handle: string, base = config().PDS_URL): Promise<string | null> {
   const url = `${base.replace(/\/$/, '')}/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(handle)}`
   const res = await fetch(url)
-  if (!res.ok) return null
-  const json = (await res.json()) as { did?: string }
-  return json.did ?? null
+  if (res.ok) {
+    const json = (await res.json()) as { did?: string }
+    return json.did ?? null
+  }
+  const text = await res.text()
+  const json = text ? (JSON.parse(text) as Record<string, unknown>) : {}
+  const error = typeof json.error === 'string' ? json.error : undefined
+  const message = typeof json.message === 'string' ? json.message : undefined
+  if (res.status === 400 && (error === 'HandleNotFound' || (error === 'InvalidRequest' && message === 'Unable to resolve handle'))) {
+    return null
+  }
+  throw new PdsError(message ?? 'PDS com.atproto.identity.resolveHandle failed', res.status, error)
 }
 
 /** An authenticated agent for one actor. Callers must NOT cache the school's agent. */

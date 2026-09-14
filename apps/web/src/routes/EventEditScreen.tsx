@@ -7,6 +7,8 @@ import { LoadingState } from '../components/PageState';
 import { Screen } from '../components/Screen';
 import { Button, SectionHeading } from '../components/bits';
 import { SessionGate } from '../components/SessionGate';
+import { SkillMultiPicker } from '../components/SkillPicker';
+import { flattenSkills } from '../lib/skills';
 import { api } from '../lib/api';
 import { useEvent, useMe, useSkillTree, useCreateEventMutation, useUpdateEventMutation } from '../lib/queries';
 import {
@@ -19,7 +21,7 @@ import {
   type RecurrenceState,
   type WeekdayCode,
 } from '../lib/recurrence';
-import type { CreateEventInput, SkillNode } from '../lib/types';
+import type { CreateEventInput, SkillLevelRef } from '../lib/types';
 
 /**
  * `/events/new` (create) and `/events/$id/edit` (edit an existing class) — one
@@ -43,21 +45,20 @@ const labelText = 'block text-caption text-ink-soft';
 const chipButton = 'border-[1.5px] border-ink px-3 py-1.5 text-caption font-medium';
 
 const SUGGESTED_TAGS = ['skillshare', 'free-school'];
+/**
+ * A sourdough class is also a fermentation class; a bike clinic is also "run a
+ * community workshop". The API has always taken an array of
+ * `freeschool.draft.skillLevel` sidecars (`CreateEventInput.skills`) — this is
+ * the ceiling the EDITOR puts on it, so the "What you'll learn" shelf on a
+ * class stays a handful of real answers rather than a tag cloud.
+ */
+const MAX_SKILLS = 3;
+const DEPTH_LABEL = ['New to it', 'Some practice', 'Go deeper'] as const;
 const TAG_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const RECURRENCE_LOCKED_COPY =
   "Recurrence can't be changed after a class is published yet. To reshape a series, cancel it and post a new one.";
 
 const previewFormat = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-
-function flattenSkills(nodes: SkillNode[], trail: string[] = []): Array<{ uri: string; path: string }> {
-  const out: Array<{ uri: string; path: string }> = [];
-  for (const node of nodes) {
-    const path = [...trail, node.label];
-    out.push({ uri: node.uri, path: path.join(' › ') });
-    out.push(...flattenSkills(node.children, path));
-  }
-  return out;
-}
 
 /** `datetime-local`'s value has no offset — `new Date()` parses it as wall
  * time in the browser's own zone, which is exactly what we want to send. */
@@ -99,16 +100,15 @@ function EventEditForm() {
   const timezone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone, []);
 
   const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
+  const [attendeeNotes, setAttendeeNotes] = useState('');
   const [overview, setOverview] = useState('');
   const [audience, setAudience] = useState('');
   const [accessibility, setAccessibility] = useState('');
   const [materials, setMaterials] = useState<string[]>([]);
   const [materialDraft, setMaterialDraft] = useState('');
   const [suppliesNote, setSuppliesNote] = useState('');
-  const [skillUri, setSkillUri] = useState('');
-  const [skillSearch, setSkillSearch] = useState('');
-  const [level, setLevel] = useState<1 | 2 | 3>(2);
+  /** Up to `MAX_SKILLS`, each with its own depth. Order is the order chosen. */
+  const [skills, setSkills] = useState<Array<{ skill: string; level: 1 | 2 | 3 }>>([]);
   const [startLocal, setStartLocal] = useState('');
   const [endLocal, setEndLocal] = useState('');
   const [visibility, setVisibility] = useState<'listed' | 'unlisted' | 'private'>('listed');
@@ -156,7 +156,9 @@ function EventEditForm() {
   useEffect(() => {
     if (!prefillRequest) return;
     setName((prev) => prev || prefillRequest.title);
-    if (prefillRequest.skill) setSkillUri((prev) => prev || prefillRequest.skill!);
+    if (prefillRequest.skill) {
+      setSkills((prev) => (prev.length > 0 ? prev : [{ skill: prefillRequest.skill!, level: 2 }]));
+    }
   }, [prefillRequest]);
 
   // Prefill once the existing class loads. Only ever runs for the edit route
@@ -164,7 +166,7 @@ function EventEditForm() {
   useEffect(() => {
     if (!existing) return;
     setName(existing.name ?? '');
-    setDescription(existing.description ?? '');
+    setAttendeeNotes(existing.attendeeNotes ?? '');
     setOverview(existing.publicOverview?.description ?? '');
     setAudience(existing.publicOverview?.audience ?? '');
     setAccessibility(existing.publicOverview?.accessibility ?? '');
@@ -174,7 +176,7 @@ function EventEditForm() {
     setEndLocal(isoToLocal(existing.endsAt));
     setVenueNeeded(Boolean(existing.venueNeeded));
     setMode(existing.mode ?? 'community.lexicon.calendar.event#inperson');
-    setMeetingLink(existing.uris?.[0]?.uri ?? '');
+    setMeetingLink(existing.meetingLink ?? '');
     setNeighborhood(existing.neighborhood ?? '');
     setTags(existing.tags ?? []);
     // The raw enum (Task 12) — present only for the host/a steward, which an
@@ -190,12 +192,15 @@ function EventEditForm() {
       setRegion(typeof loc.region === 'string' ? loc.region : '');
       setPostalCode(typeof loc.postalCode === 'string' ? loc.postalCode : '');
     }
-    const firstSkill = existing.skills?.[0];
-    if (firstSkill) {
-      setSkillUri(firstSkill.skill);
-      setLevel(firstSkill.level);
-      setPrerequisites(firstSkill.prerequisites ?? '');
-    }
+    // `GET /api/events/:id` returns `skills` as the raw `freeschool.draft.skillLevel`
+    // sidecar values — `{ skill, level, prerequisites? }` each (`loadEvent` in
+    // `apps/appview/src/lib/events.ts`). A class written before this editor could
+    // attach more than one may already carry several; take them all, up to the
+    // editor's own ceiling.
+    setSkills((existing.skills ?? []).slice(0, MAX_SKILLS).map((s) => ({ skill: s.skill, level: s.level })));
+    // One shared "before learners come" note, kept on the FIRST skill — see
+    // `onSubmit`.
+    setPrerequisites(existing.skills?.find((s) => s.prerequisites)?.prerequisites ?? '');
   }, [existing]);
 
   const startsAtIso = localToIso(startLocal);
@@ -209,10 +214,25 @@ function EventEditForm() {
   }, [recurrence, startsAtIso, timezone]);
 
   const flatSkills = useMemo(() => flattenSkills(skillTree?.skills ?? []), [skillTree]);
-  const selectedSkill = flatSkills.find((s) => s.uri === skillUri);
-  const matchingSkills = skillSearch.trim()
-    ? flatSkills.filter((s) => s.path.toLowerCase().includes(skillSearch.trim().toLowerCase())).slice(0, 8)
-    : [];
+  const skillUris = useMemo(() => skills.map((s) => s.skill), [skills]);
+  const atSkillCeiling = skills.length >= MAX_SKILLS;
+
+  /** The multi-picker hands back the whole list; keep each row's own depth. */
+  const onSkillsChange = (uris: string[]) => {
+    setSkills((prev) =>
+      uris
+        .slice(0, MAX_SKILLS)
+        .map((uri) => prev.find((row) => row.skill === uri) ?? { skill: uri, level: 2 as const }),
+    );
+  };
+
+  const setSkillLevel = (uri: string, level: 1 | 2 | 3) => {
+    setSkills((prev) => prev.map((row) => (row.skill === uri ? { ...row, level } : row)));
+  };
+
+  /** The chip and the depth row name the same skill; the taxonomy label when
+   * we have it, the raw uri for a skill proposed this session. */
+  const labelFor = (uri: string) => flatSkills.find((s) => s.uri === uri)?.label ?? uri;
 
   // A host can be looking for a room in a known neighborhood. Clear the exact
   // address while preserving the public area; venueNeeded is stored explicitly.
@@ -291,9 +311,9 @@ function EventEditForm() {
 
     // `updateEventAsHost` (`apps/appview/src/lib/events.ts`) treats an ABSENT
     // key as "leave unchanged" but an EXPLICIT empty value as "clear it" —
-    // so on edit, `description`/`neighborhood`/`tags`/`skills`/`locations`/
-    // `materials`/`suppliesNote` must always be sent (even empty), or a host
-    // can never remove a description, neighbourhood, tag, skill, material, or
+    // so on edit, `attendeeNotes`/`meetingLink`/`neighborhood`/`tags`/`skills`/
+    // `locations`/`materials`/`suppliesNote` must always be sent (even empty),
+    // or a host can never remove a note, neighbourhood, tag, skill, material, or
     // flip a class to venue-needed. On create there is nothing to clear, so
     // the condition below reduces to exactly the old "only send it if it has
     // content" behaviour. `visibility` is the one exception — see
@@ -302,10 +322,10 @@ function EventEditForm() {
       name: name.trim(),
       venueNeeded: mode.endsWith('#virtual') ? false : venueNeeded,
       mode,
-      ...(isEdit || meetingLink.trim() ? {uris:[...(meetingLink.trim() ? [{uri:meetingLink.trim(),name:existing?.uris?.[0]?.name ?? 'Class meeting link'}] : []),...(existing?.uris?.slice(1)??[])]}:{}),
+      ...(isEdit || meetingLink.trim() ? { meetingLink: meetingLink.trim() } : {}),
       ...(cover !== undefined ? { cover } : {}),
       publicOverview: { description: overview.trim(), audience: audience.trim(), accessibility: accessibility.trim() },
-      ...(isEdit || description.trim() ? { description: description.trim() } : {}),
+      ...(isEdit || attendeeNotes.trim() ? { attendeeNotes: attendeeNotes.trim() } : {}),
       startsAt,
       ...(endsAt ? { endsAt } : {}),
       timezone,
@@ -313,7 +333,18 @@ function EventEditForm() {
       ...(!isEdit || visibilityTouched ? { visibility } : {}),
       ...(isEdit || neighborhood.trim() ? { neighborhood: neighborhood.trim() } : {}),
       ...(isEdit || tags.length > 0 ? { tags } : {}),
-      ...(isEdit || skillUri ? { skills: [...(skillUri ? [{ skill: skillUri, level, ...(prerequisites.trim()?{prerequisites:prerequisites.trim()}:{}) }] : []),...(existing?.skills?.slice(1)??[])] } : {}),
+      // One sidecar per chosen skill, in the order the host chose them. The
+      // shared "before learners come" note rides the FIRST one — the lexicon
+      // puts `prerequisites` on the skill level, but asking a host to write one
+      // per skill is more form than the note is worth.
+      ...(isEdit || skills.length > 0
+        ? {
+            skills: skills.map((row, i): SkillLevelRef => ({
+              ...row,
+              ...(i === 0 && prerequisites.trim() ? { prerequisites: prerequisites.trim() } : {}),
+            })),
+          }
+        : {}),
       ...(isEdit || locations ? { locations: locations ?? [] } : {}),
       ...(isEdit || materials.length > 0 ? { materials } : {}),
       ...(isEdit || suppliesNote.trim() ? { suppliesNote: suppliesNote.trim() } : {}),
@@ -388,7 +419,7 @@ function EventEditForm() {
               maxLength={300}
             />
           </label>
-          <p className="mt-5 text-caption text-ink-soft">The following overview is visible before someone signs in or RSVPs. Keep addresses and meeting links in the location fields.</p>
+          <p className="mt-5 text-caption text-ink-soft">The following overview is the class as the world sees it — it is published with the class and travels to other calendars. Keep addresses, door codes and meeting links out of it; there are attendee-only fields below for those.</p>
           <label className="mt-4 block"><span className={labelText}>About this class</span>
             <textarea className={`${field} min-h-[150px]`} value={overview} onChange={e => setOverview(e.target.value)} maxLength={6000} placeholder="What will you explore together? What will people learn, make, or take home?" />
           </label>
@@ -399,82 +430,66 @@ function EventEditForm() {
             <textarea className={field} value={accessibility} onChange={e => setAccessibility(e.target.value)} maxLength={1000} placeholder="Step-free access, seating, languages, noise, or sensory considerations. Share what you know." />
           </label>
           <label className="mt-4 block">
-            <span className={labelText}>Additional attendee details</span>
+            <span className={labelText}>Notes for attendees (optional)</span>
             <textarea
               className={`${field} min-h-[88px] resize-none`}
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Extra notes for people attending. Shown after RSVP on this school’s pages."
+              value={attendeeNotes}
+              onChange={(e) => setAttendeeNotes(e.target.value)}
+              placeholder="Come to the side door; the gate code is on the fence."
               maxLength={20000}
             />
+            <span className="text-caption text-ink-soft">Only people who RSVP see this.</span>
           </label>
         </div>
 
         <ImagePicker value={cover} existingUrl={existing?.cover?.url} onChange={setCover} />
 
         <div id="class-skill">
-          <SectionHeading>Skill</SectionHeading>
+          <SectionHeading>Skills</SectionHeading>
           <div className="safe-x -mx-4">
-            {selectedSkill ? (
-              <div className="flex items-center justify-between gap-3 border-[1.5px] border-ink bg-sheet px-3 py-2.5">
-                <span className="text-body">{selectedSkill.path}</span>
-                <button type="button" className="text-caption text-blue" onClick={() => setSkillUri('')}>
-                  Change
-                </button>
-              </div>
-            ) : (
-              <>
-                <input
-                  className={field}
-                  value={skillSearch}
-                  onChange={(e) => setSkillSearch(e.target.value)}
-                  placeholder="Search the skill taxonomy, or leave blank"
-                  aria-label="Search the skill taxonomy"
-                />
-                {matchingSkills.length > 0 ? (
-                  <ul className="mt-1.5 divide-y divide-rule border-[1.5px] border-ink">
-                    {matchingSkills.map((s) => (
-                      <li key={s.uri}>
-                        <button
-                          type="button"
-                          className="block w-full px-3 py-2 text-left text-body"
-                          onClick={() => {
-                            setSkillUri(s.uri);
-                            setSkillSearch('');
-                          }}
-                        >
-                          {s.path}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : null}
-                <p className="mt-1.5 text-caption text-ink-faint">No specific skill is fine — leave this blank.</p>
-              </>
-            )}
-            {selectedSkill ? (
-              <div className="mt-3">
-                <span className={labelText}>Depth</span>
-                <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                  {([1, 2, 3] as const).map((n) => (
-                    <button
-                      key={n}
-                      type="button"
-                      aria-pressed={level === n}
-                      aria-label={`Level ${n}`}
-                      onClick={() => setLevel(n)}
-                      className="level-choice border border-rule px-3 text-caption"
-                      style={{ background: n === level ? 'var(--c-ink)' : 'transparent', color: n === level ? 'var(--c-paper-2)' : 'var(--c-ink)' }}
-                    >{['New to it', 'Some practice', 'Go deeper'][n - 1]}</button>
-                  ))}
-                </div>
-              </div>
+            <span className={labelText}>Skills this class shares (up to {MAX_SKILLS})</span>
+            <p className="mb-2 mt-1 text-caption text-ink-soft">
+              Pick the closest ones. Depth is what a newcomer should expect.
+            </p>
+            <SkillMultiPicker
+              skills={flatSkills}
+              values={skillUris}
+              onChange={onSkillsChange}
+              allowPropose
+              placeholder="Start typing a skill, or leave blank"
+              hint="No specific skill is fine — leave this blank."
+            />
+            {atSkillCeiling ? (
+              <p className="mt-1.5 text-caption text-ink-faint">
+                Three skills is the most a class can carry — remove one to swap it.
+              </p>
             ) : null}
+            {skills.map((row) => {
+              const skillLabel = labelFor(row.skill);
+              return (
+                <div className="mt-3" key={row.skill}>
+                  <span className={labelText}>Depth — {skillLabel}</span>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                    {([1, 2, 3] as const).map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        aria-pressed={row.level === n}
+                        aria-label={`Level ${n} for ${skillLabel}`}
+                        onClick={() => setSkillLevel(row.skill, n)}
+                        className="level-choice border border-rule px-3 text-caption"
+                        style={{ background: n === row.level ? 'var(--c-ink)' : 'transparent', color: n === row.level ? 'var(--c-paper-2)' : 'var(--c-ink)' }}
+                      >{DEPTH_LABEL[n - 1]}</button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
 
         <div id="class-when">
-          <label className="block mb-6"><span className={labelText}>Before learners come (optional)</span><textarea className={field} maxLength={256} value={prerequisites} onChange={e=>setPrerequisites(e.target.value)} placeholder="Any prior experience, tools, or preparation for this skill"/><span className="text-caption text-ink-soft">Shown publicly alongside the selected skill.</span></label>
+          <label className="block mb-6"><span className={labelText}>Before learners come (optional)</span><textarea className={field} maxLength={256} value={prerequisites} onChange={e=>setPrerequisites(e.target.value)} placeholder="Any prior experience, tools, or preparation for this skill"/><span className="text-caption text-ink-soft">Shown publicly alongside the skills above.</span></label>
           <SectionHeading>When</SectionHeading>
           <div className="safe-x -mx-4 date-fields grid grid-cols-2 gap-3">
             <label className="block">
@@ -503,7 +518,7 @@ function EventEditForm() {
         <div id="class-where">
           <SectionHeading>Where</SectionHeading>
           <label className="block mb-4"><span className={labelText}>How we’ll meet</span><select aria-label="How we’ll meet" className={field} value={mode} onChange={e=>setMode(e.target.value)}><option value="community.lexicon.calendar.event#inperson">In person</option><option value="community.lexicon.calendar.event#virtual">Online</option><option value="community.lexicon.calendar.event#hybrid">In person + online</option></select></label>
-          <label className="block mb-5"><span className={labelText}>Meeting link (optional)</span><input type="url" pattern="https?://.*" className={field} value={meetingLink} onChange={e=>setMeetingLink(e.target.value)} placeholder="https://…"/><span className="text-caption text-ink-soft">Available to attendees after they RSVP.</span></label>
+          <label className="block mb-5"><span className={labelText}>Meeting link (optional)</span><input type="url" pattern="https?://.*" className={field} value={meetingLink} onChange={e=>setMeetingLink(e.target.value)} placeholder="https://…"/><span className="text-caption text-ink-soft">Only people who RSVP see this.</span></label>
           <div className="safe-x -mx-4">
             <label className="flex items-center gap-2.5" hidden={mode.endsWith('#virtual')}>
               <input

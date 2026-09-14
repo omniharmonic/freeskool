@@ -1,0 +1,13 @@
+{
+  "did": "did:plc:z72i7hdynmk6r22z27h6tvur",
+  "handle": "helper.bsky.social",
+  "displayName": "Helper Person",
+  "description": "Bike mechanic and community garden volunteer.",
+  "avatar": "https://cdn.bsky.app/img/avatar/plain/did:plc:z72i7hdynmk6r22z27h6tvur/bafyavatarcid@jpeg",
+  "banner": "https://cdn.bsky.app/img/banner/plain/did:plc:z72i7hdynmk6r22z27h6tvur/bafybannercid@jpeg",
+  "followersCount": 128,
+  "followsCount": 96,
+  "postsCount": 512,
+  "associated": { "lists": 0, "feedgens": 0, "starterPacks": 0, "labeler": false },
+  "indexedAt": "2026-01-01T00:00:00.000Z"
+}

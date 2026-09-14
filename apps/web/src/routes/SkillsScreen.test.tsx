@@ -59,6 +59,15 @@ const skillTree = {
           alsoUnder: [],
           children: [],
         },
+        {
+          uri: 'at://did:plc:school/freeschool.draft.skill/beekeeping',
+          id: 'beekeeping',
+          label: 'Beekeeping',
+          status: 'proposed' as const,
+          tier: 'A' as const,
+          alsoUnder: [],
+          children: [],
+        },
       ],
     },
   ],
@@ -86,6 +95,16 @@ describe('SkillsScreen', () => {
 
     expect(within(tierALink).queryByText('Sensitive')).not.toBeInTheDocument();
     expect(within(tierBLink).getByText('Sensitive')).toBeInTheDocument();
+  });
+  it('shows a muted "proposed" marker on a proposed skill, and not on a canonical one', async () => {
+    vi.mocked(api.skills.tree).mockReset().mockResolvedValue(skillTree);
+    renderScreen();
+
+    const canonicalLink = await screen.findByRole('link', { name: 'Basic first aid' });
+    const proposedLink = screen.getByRole('link', { name: /Beekeeping/ });
+
+    expect(within(canonicalLink).queryByText('proposed')).not.toBeInTheDocument();
+    expect(within(proposedLink).getByText('proposed')).toBeInTheDocument();
   });
   it('finds nested skills and shows a useful no-match state', async () => {
     vi.mocked(api.skills.tree).mockReset().mockResolvedValue(skillTree);
