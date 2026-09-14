@@ -44,13 +44,27 @@ const { repo, indexed, identities } = vi.hoisted(() => ({
   identities: new Map<string, string>(),
 }))
 
-vi.mock('../src/lib/pds.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../src/lib/pds.js')>()),
-  async getRecord(repoDid: string, collection: string, rkey: string) {
-    const value = repo.get(`${repoDid}/${collection}/${rkey}`)
-    return value ? { uri: `at://${repoDid}/${collection}/${rkey}`, value } : null
-  },
-}))
+/**
+ * The school's PDS. `readFails` is the review's blocking case: a read we did not GET
+ * (a 503, a dead socket) must never be taken for "this school has no record".
+ */
+const readFails = { on: false }
+
+vi.mock('../src/lib/pds.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/lib/pds.js')>()
+  return {
+    ...actual,
+    async getRecord(repoDid: string, collection: string, rkey: string) {
+      const value = repo.get(`${repoDid}/${collection}/${rkey}`)
+      return value ? { uri: `at://${repoDid}/${collection}/${rkey}`, value } : null
+    },
+    async readRecord(repoDid: string, collection: string, rkey: string) {
+      if (readFails.on) throw new actual.RecordReadError(503, 'UpstreamFailure', 'the PDS is unreachable')
+      const value = repo.get(`${repoDid}/${collection}/${rkey}`)
+      return value ? { found: true, uri: `at://${repoDid}/${collection}/${rkey}`, value } : { found: false }
+    },
+  }
+})
 
 /** No PLC, no network: the DIDs we know about resolve, everything else does not. */
 vi.mock('../src/lib/identity.js', async (importOriginal) => ({
@@ -119,6 +133,7 @@ import { signSessionId } from '../src/lib/crypto.js'
 import { custodialAccount, peer, steward } from '../src/db/schema.js'
 import { setSchoolActor } from '../src/lib/school-actor.js'
 import { peerSchools } from '../src/lib/peers.js'
+import { indexerPeerHosts } from '../src/index/peers.js'
 import { resetSchoolContextCache } from '../src/http/school-context.js'
 
 interface Written {
@@ -194,6 +209,7 @@ beforeEach(async () => {
   await truncate('fs_peer', 'fs_steward', 'fs_session', 'fs_custodial_account', 'fs_member', 'fs_audit', 'fs_policy_cache')
   resetSchoolContextCache()
   reloads.count = 0
+  readFails.on = false
 
   repo.clear()
   repo.set(`${SCHOOL}/freeschool.draft.school/self`, {
@@ -349,6 +365,95 @@ describe('PUT /api/admin/peers publishes the peer list in the school record', ()
       tags: ['skillshare', 'free-school'],
       uri: `at://${SCHOOL}/freeschool.draft.school/self`,
     })
+  })
+})
+
+describe('a failed READ of the school record never becomes a rewritten school record', () => {
+  it('does not call the actor, and leaves fs_peer untouched, when the record cannot be read', async () => {
+    if (!available) return
+    const written: Written[] = []
+    setSchoolActor(fakePort(written))
+    readFails.on = true
+
+    const res = await putPeers({ add: [DENVER_PDS] })
+    expect(res.status).toBe(502)
+    // THE POINT: not one write. A synthesized record would have dropped `policy`, and a
+    // school record with no policy pointer reads as the permissive default thresholds.
+    expect(written).toHaveLength(0)
+    expect(await testDb().select().from(peer)).toHaveLength(0)
+    expect(repo.get(`${SCHOOL}/freeschool.draft.school/self`)?.policy).toBe(`at://${SCHOOL}/freeschool.draft.policy/p1`)
+  })
+
+  it('DOES write a fresh record when the repo genuinely has none', async () => {
+    if (!available) return
+    const written: Written[] = []
+    setSchoolActor(fakePort(written))
+    repo.delete(`${SCHOOL}/freeschool.draft.school/self`)
+
+    const res = await putPeers({ add: [DENVER_PDS], tags: ['skillshare'] })
+    expect(res.status).toBe(200)
+    expect(written).toHaveLength(1)
+    expect(written[0]!.record).toMatchObject({
+      $type: 'freeschool.draft.school',
+      peers: [DENVER],
+      tags: ['skillshare'],
+    })
+    expect(written[0]!.record.createdAt).toEqual(expect.any(String))
+  })
+
+  it('drops a peer whose host is spelled with a trailing slash', async () => {
+    if (!available) return
+    const written: Written[] = []
+    setSchoolActor(fakePort(written))
+
+    expect((await putPeers({ add: [DENVER_PDS] })).status).toBe(200)
+    expect((await putPeers({ remove: [`${DENVER_PDS}/`] })).status).toBe(200)
+
+    expect(written[1]!.record.peers).toEqual([])
+    const rows = await testDb().select().from(peer)
+    expect(rows[0]?.disabledAt).toBeTruthy()
+  })
+})
+
+describe('only a steward of THIS school may edit the peer list', () => {
+  it('403s an ordinary member', async () => {
+    if (!available) return
+    const written: Written[] = []
+    setSchoolActor(fakePort(written))
+    await testDb().delete(steward)
+
+    const res = await putPeers({ add: [DENVER_PDS] })
+    expect(res.status).toBe(403)
+    expect(written).toHaveLength(0)
+    expect(await testDb().select().from(peer)).toHaveLength(0)
+  })
+
+  it('403s a steward of ANOTHER school', async () => {
+    if (!available) return
+    const written: Written[] = []
+    setSchoolActor(fakePort(written))
+    await testDb().delete(steward)
+    await testDb().insert(steward).values({ did: STEWARD, schoolDid: 'did:plc:some-other-school' })
+
+    const res = await putPeers({ add: [DENVER_PDS] })
+    expect(res.status).toBe(403)
+    expect(written).toHaveLength(0)
+    expect(await testDb().select().from(peer)).toHaveLength(0)
+  })
+})
+
+describe('the PEER_PDS_HOSTS seed applies only to a registry that was never written', () => {
+  it('falls back to the env seed when there is no row at all', async () => {
+    if (!available) return
+    expect(await indexerPeerHosts()).toEqual(['http://localhost:3000'])
+  })
+
+  it('follows NOTHING when every row is disabled — a steward emptied it on purpose', async () => {
+    if (!available) return
+    await testDb()
+      .insert(peer)
+      .values({ host: DENVER_PDS, source: 'admin', schoolDid: SCHOOL, disabledAt: new Date() })
+    expect(await indexerPeerHosts()).toEqual([])
   })
 })
 

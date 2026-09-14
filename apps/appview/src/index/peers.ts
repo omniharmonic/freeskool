@@ -97,7 +97,11 @@ export async function activePeerHosts(): Promise<string[]> {
  */
 export async function indexerPeerHosts(): Promise<string[]> {
   const rows = await activePeerHosts().catch(() => [] as string[])
-  const hosts = rows.length > 0 ? rows : config().PEER_PDS_HOSTS
+  // The env seed applies only to a registry that has never been written — NOT to one a
+  // steward has emptied. "No active peers" and "no peers at all" are different states,
+  // and resurrecting a host somebody deliberately disabled is the one thing this fallback
+  // must never do.
+  const hosts = rows.length > 0 || (await hasAnyPeerRow()) ? rows : config().PEER_PDS_HOSTS
   const out = new Set<string>()
   for (const host of hosts) {
     try {
@@ -107,6 +111,16 @@ export async function indexerPeerHosts(): Promise<string[]> {
     }
   }
   return [...out].sort()
+}
+
+/** Any row at all, disabled included: "has this registry ever been written?" */
+async function hasAnyPeerRow(): Promise<boolean> {
+  const rows = await getDb()
+    .select({ host: peer.host })
+    .from(peer)
+    .limit(1)
+    .catch(() => [] as Array<{ host: string }>)
+  return rows.length > 0
 }
 
 /**

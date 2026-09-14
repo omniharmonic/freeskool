@@ -30,7 +30,7 @@ import { indexerPeerHosts, listPeers } from '../index/peers.js'
 import { listCollection } from '../index/queries.js'
 import { normalizePeerHost } from '../sync/cursor-map.js'
 import { NSID } from '../lexicons/nsids.js'
-import { getRecord } from './pds.js'
+import { readRecord } from './pds.js'
 import { actorFor, asDid } from './school-actors.js'
 import { canonicalHostFor, listSchools, type School } from './schools.js'
 import { getDb } from '../db/index.js'
@@ -261,26 +261,44 @@ export interface PublishedPeerState {
   uri?: string
   cid?: string
   auditId?: string
+  /** The record could not be READ (not: does not exist). Display-only — see below. */
+  unreadable?: boolean
 }
 
-/** What the school record currently says. `{ peers: [], tags: [] }` when there is none. */
+/**
+ * What the school record currently says, for DISPLAY (`GET /api/admin/peers`).
+ *
+ * A read failure is reported as `unreadable` rather than thrown: a steward opening the
+ * peers screen while the PDS is having a bad minute should see "we could not read it",
+ * not a 500 — and, unlike the write path below, nothing is decided from this answer.
+ */
 export async function publishedPeerState(schoolDid: string): Promise<PublishedPeerState> {
-  const record = await readSchoolRecord(schoolDid)
-  return {
-    peers: stringArray(record?.peers),
-    tags: stringArray(record?.tags),
-    ...(record ? { uri: `at://${schoolDid}/${NSID.school}/self` } : {}),
+  try {
+    const record = await readSchoolRecord(schoolDid)
+    return {
+      peers: stringArray(record?.peers),
+      tags: stringArray(record?.tags),
+      ...(record ? { uri: `at://${schoolDid}/${NSID.school}/self` } : {}),
+    }
+  } catch (err) {
+    log.warn('could not read the school record for the peers screen', { detail: describeError(err) })
+    return { peers: [], tags: [], unreadable: true }
   }
 }
 
+/**
+ * The school's own record, or `null` when the repo genuinely has none.
+ *
+ * THROWS on a read we did not get (`RecordReadError`, a network failure). The difference
+ * is the whole point: `publishPeerState` synthesizes a record when there is none, and
+ * synthesizing one because the PDS was briefly unreachable would overwrite the real
+ * record's `policy` pointer, `handleDomain`, `description` and `website` — and a school
+ * record with no `policy` makes `refreshPolicyCache` fall back to the permissive default
+ * thresholds. A failed read must stop the write, not guess at it.
+ */
 async function readSchoolRecord(schoolDid: string): Promise<SchoolRecord | null> {
-  try {
-    const res = await getRecord(schoolDid, NSID.school, 'self')
-    return (res?.value as SchoolRecord | undefined) ?? null
-  } catch (err) {
-    log.warn('could not read the school record', { detail: describeError(err) })
-    return null
-  }
+  const res = await readRecord(schoolDid, NSID.school, 'self')
+  return res.found ? (res.value as SchoolRecord) : null
 }
 
 /**
@@ -298,8 +316,10 @@ async function readSchoolRecord(schoolDid: string): Promise<SchoolRecord | null>
  * discipline `PUT /api/admin/policy` uses on the same record, and the reason the two can
  * never clobber each other's field.
  *
- * THROWS on a failed write, deliberately: the caller writes the table only afterwards, so
- * a PDS that refuses leaves `fs_peer` exactly as it was.
+ * THROWS on a failed write — and on a failed READ, which is the same rule seen from the
+ * other end: the caller writes the table only afterwards, so a PDS that refuses (or that
+ * we could not reach to read) leaves `fs_peer` exactly as it was and the actor is never
+ * called. A record is synthesized ONLY when the repo really has none (`RecordNotFound`).
  */
 export async function publishPeerState(input: PublishPeerStateInput): Promise<PublishedPeerState> {
   const hosts = new Set(
@@ -313,7 +333,7 @@ export async function publishPeerState(input: PublishPeerStateInput): Promise<Pu
   )
   const existing = await readSchoolRecord(input.schoolDid)
 
-  const discovered = await indexedSchools({ ...input.deps, localSchools: input.deps?.localSchools })
+  const discovered = await indexedSchools(input.deps ?? {})
   const hostByDid = new Map(discovered.filter((s) => s.host).map((s) => [s.did, s.host!]))
 
   const peers = new Set<string>(stringArray(existing?.peers))

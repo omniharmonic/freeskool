@@ -37,6 +37,7 @@ import { getRecordByUri, parseAtUri } from '../../index/queries.js'
 import { resolvePdsEndpoint } from '../../lib/identity.js'
 import { addPeer, disablePeer, listPeers, probePeer } from '../../index/peers.js'
 import { peerHostsFor, publishedPeerState, publishPeerState, reloadIndexerForPeers } from '../../lib/peers.js'
+import { normalizePeerHost } from '../../sync/cursor-map.js'
 import { getIndexer } from '../../index/indexer.js'
 import { composeNewsletterIssue, sendNewsletterIssue } from '../../jobs/newsletter.js'
 import { authorityClient } from '../../lib/authority.js'
@@ -495,13 +496,27 @@ admin.put('/peers', async (c) => {
   return c.json({ peers: await listPeers(did), published })
 })
 
-/** A mixed list of hosts and DIDs, split; a DID's PDS endpoint becomes a host to follow. */
+/**
+ * A mixed list of hosts and DIDs, split; a DID's PDS endpoint becomes a host to follow.
+ *
+ * Every host is NORMALIZED here (`https://pds.example/` and `https://pds.example` are the
+ * same peer), because the add/remove sets are compared against the school's current hosts
+ * — which `peerHostsFor` normalizes — to decide what the record publishes. Without it a
+ * removal spelled with a trailing slash disabled the row and left the peer in the record.
+ */
 async function splitPeerRefs(refs: string[]): Promise<{ hosts: string[]; dids: string[] }> {
   const hosts = new Set<string>()
   const dids: string[] = []
+  const host = (raw: string) => {
+    try {
+      hosts.add(normalizePeerHost(raw))
+    } catch {
+      log.warn('ignoring a peer host that is not a URL')
+    }
+  }
   for (const ref of refs) {
     if (!ref.startsWith('did:')) {
-      hosts.add(ref)
+      host(ref)
       continue
     }
     dids.push(ref)
@@ -509,7 +524,7 @@ async function splitPeerRefs(refs: string[]): Promise<{ hosts: string[]; dids: s
     // Unresolvable: the affiliation is still published (the steward asserted it), we just
     // cannot follow that school's repo yet. The next backfill retries nothing — a steward
     // re-adding it once the DID resolves is the repair, and `GET /peers` shows the gap.
-    if (endpoint) hosts.add(endpoint)
+    if (endpoint) host(endpoint)
     else log.warn('a peer DID could not be resolved to a PDS endpoint; publishing it unfollowed')
   }
   return { hosts: [...hosts], dids }
