@@ -125,6 +125,25 @@ describe('SchoolSwitcher', () => {
     await waitFor(() => expect(assign).toHaveBeenCalledWith('http://denver.localhost:5173/'));
   });
 
+  /**
+   * A TWO-SCHOOL DEV STACK IS `*.localhost`, NOT `localhost`. Checking for the exact
+   * string sent a member standing on `boulder.localhost:5173` to `https://denver.localhost/`
+   * — nowhere — which is how the two-school e2e journey found it.
+   */
+  it('keeps the dev scheme and port on a *.localhost host too', async () => {
+    standingOn({ protocol: 'http:', hostname: 'boulder.localhost', port: '5173' });
+    vi.mocked(api.auth.switchSchool).mockResolvedValue({
+      school: { did: DENVER.did, label: DENVER.label, name: DENVER.name },
+      host: 'denver.localhost',
+    });
+    renderSwitcher(me([BOULDER, DENVER]));
+
+    fireEvent.click(screen.getByRole('button', { name: /Boulder Free School/ }));
+    fireEvent.click(screen.getByRole('option', { name: 'Denver Free School' }));
+
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('http://denver.localhost:5173/'));
+  });
+
   it('does not navigate when the member picks the school they are already in', async () => {
     renderSwitcher(me([BOULDER, DENVER]));
     fireEvent.click(screen.getByRole('button', { name: /Boulder Free School/ }));

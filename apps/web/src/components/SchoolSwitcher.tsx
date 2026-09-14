@@ -28,13 +28,29 @@ import { useSwitchSchoolMutation } from '../lib/queries';
  * over http must not be able to carry that downgrade into the next city.
  *
  * Development is the one exception, and it is recognised by the host rather than by a
- * build flag: on `localhost`/`127.0.0.1` the scheme and the port are kept, because that
- * is where the PWA is served from `:5173` over http and a hard-coded `https://host/`
- * would land nowhere. A host that already carries its own port keeps it.
+ * build flag: on a loopback host the scheme and the port are kept, because that is where
+ * the PWA is served from `:5173` over http and a hard-coded `https://host/` would land
+ * nowhere. A host that already carries its own port keeps it.
+ *
+ * `*.localhost` COUNTS AS LOOPBACK. It is how a two-school stack is run locally
+ * (`boulder.localhost:5173`, `denver.localhost:5173` — RFC 6761 reserves the name and
+ * every browser resolves it to loopback without touching `/etc/hosts`), and checking for
+ * the exact string `localhost` sent the switcher to `https://denver.localhost/` from
+ * `boulder.localhost:5173`, which is nowhere. Found by the two-school e2e journey.
  */
+function isLoopback(hostname: string): boolean {
+  return (
+    hostname === 'localhost' ||
+    hostname.endsWith('.localhost') ||
+    hostname === '127.0.0.1' ||
+    hostname === '[::1]' ||
+    hostname === '::1'
+  );
+}
+
 function urlForHost(host: string): string {
   const { hostname, protocol, port } = window.location;
-  if (hostname !== 'localhost' && hostname !== '127.0.0.1') return `https://${host}/`;
+  if (!isLoopback(hostname)) return `https://${host}/`;
   return `${protocol}//${host.includes(':') || !port ? host : `${host}:${port}`}/`;
 }
 
