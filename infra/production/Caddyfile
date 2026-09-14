@@ -152,6 +152,9 @@ http://127.0.0.1:9000 {
 	# took production down on 2026-09-14 until this short-circuit was hot-fixed in place.
 	@own query domain={$PDS_HOST}
 	respond @own 200
+	# The legacy PDS name during a hostname migration: DID documents still point at it.
+	@legacy query domain={$PDS_LEGACY_HOST:legacy-pds.invalid}
+	respond @legacy 200
 	@www query domain=www.{$WEB_HOST}
 	respond @www 200
 	reverse_proxy appview:4000
