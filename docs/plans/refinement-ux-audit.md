@@ -17,4 +17,63 @@ Source: the screenshot audit (`apps/web/e2e/audit.spec.ts`, 128 captures at 430�
 
 ## Findings from the persona journeys (e2e agent)
 
-_Appended from the Task 15 report once it lands._
+Numbered for the audit document. Only 1 and 2 are fixed; the rest are recorded, not touched.
+
+1. **`/events/$id` — the class did not say who was teaching it.** *(fixed, `56a083b`)* A learner
+   could read a whole class page and never learn the host's name, let alone reach their profile.
+2. **`/people/$did` — a console error on every view.** *(fixed, `f8b5900`)*
+3. **`/events/new`, `/events/$id/edit` — the class form takes exactly one skill.** Spec §4.4
+   called for `SkillMultiPicker` here; the record and `POST /api/events` carry many, and the form
+   even preserves `existing.skills.slice(1)` untouched while refusing to show or edit them. A
+   host teaching sourdough *and* fermentation can file the class under only one, and skill pages
+   lose the other. This is the one thing in §4.6 that cannot be driven as written.
+4. **`/events/$id` — "The host hasn't added a public overview yet."** shows on every seeded
+   class, while the calendar card and the school's listing show that same class's description.
+   The page reads only `publicOverview.description`; the legacy `description` input (which the
+   seed and any pre-19c class use) lands in attendee notes. A real member sees an apparently
+   empty class page for a class that has a description.
+5. **No way to cancel a class.** `EventEditScreen` tells a host "to reshape a series, cancel it
+   and post a new one", `EventScreen` renders a "This class has been cancelled" banner — and
+   there is no cancel or delete control anywhere in the UI, nor a client method for one. A host
+   who posts the wrong thing can only edit it forever.
+6. **`/event/$eventId` (the old short-id link) dead-ends.** `EventRedirect` forwards the raw
+   last path segment to `/events/$id`, which needs the full AT-URI, so an old link lands on
+   "Class not found" rather than the class. (The audit passes the full URI to get a picture.)
+7. **`/welcome` — "Step 1 of 3" over three cards that are all visible and editable at once.**
+   The counter reads like a wizard, gates nothing, and only moves when you act; on a phone it is
+   unclear whether the lower cards are "later" or already available.
+8. **`/welcome` — revisiting it after onboarding offers the whole flow again, with empty
+   fields.** "Save and continue" then writes an empty display name and bio over the real ones.
+   There is no "you have already done this" state; the only ways out are Finish and the tab bar.
+9. **`/welcome` — a failed handle save shows the raw server sentence.** During the stack trouble
+   below, the card read "Unsupported state or unable to authenticate data" under the member's
+   typed handle. Internal messages reach the member unmapped; `HandleChooser.saveErrorMessage`
+   only translates the codes it knows.
+10. **`/me` — a member who skipped the profile card sees their generated handle printed twice**
+    (once as their name, once as their handle), with no nudge to add a name and no visible route
+    to the handle chooser from the card itself.
+11. **`/events/$id/attendance` — "Add someone who came without RSVPing" wants a raw DID**, typed
+    by hand, and answers "That doesn't look like a DID — it starts with 'did:'". No member can
+    do this. A handle field with resolution is the obvious want; the screen's own doc comment
+    already records the deviation.
+12. **`/people/$did` — the Vouch button is unexplained.** Nothing says what a vouch is, that the
+    count is visible to the whole school, or that it can be withdrawn. The one explanatory line
+    ("Counts, never scores") is about the numbers, not the act.
+13. **`/people/$did` is the end of the road.** No way to contact the person, ask them to teach
+    something, or see what they have asked for — the profile links out only to their classes and
+    notes.
+14. **`/admin/newsletter` — "Preview" only exists after "Compose draft"**, and nothing on the
+    screen says a draft will be generated from the month rather than written by hand.
+15. **`/admin/moderation` and `/admin/policy` assume the vocabulary.** "Open an item", "Queue",
+    "Role ladder", "Thresholds" — no line saying what an item is, or what moving a threshold
+    does to a member who is already on the ladder.
+16. **A member opening `/admin` logs a 403 as a console error** ("Failed to load resource…"),
+    as does a non-host opening an attendance page. Harmless, but it is what any error-reporting
+    tool will collect first. (`audit.spec.ts` filters 4xx explicitly and judges 5xx absolutely.)
+17. **Every persona run leaves a class behind.** The host journey posts "Bike clinic (stamp)"
+    into the demo school and, with no cancel control (5), the demo calendar and the bicycle
+    skill page accumulate them. A cheap fix would be a `demo`/`e2e` tag the seed can sweep.
+18. **A brand-new member no longer lands on the needs board.** Task 11 sends them to `/welcome`
+    first, which contradicts PRD §13 constraint 2 as written *and* is what breaks `mvp.spec.ts`'s
+    `signUp()` helper (it asserts the Requests heading immediately after the magic link). Somebody
+    should decide which is right and update the other; the fix in the spec is one line.
