@@ -66,6 +66,7 @@ vi.mock('../lib/api', () => {
       },
       auth: { me: vi.fn() },
       skills: {get:vi.fn()},
+      members: { get: vi.fn() },
       rsvp: { get: vi.fn(), set: vi.fn(), clear: vi.fn() },
       invites: { mint: vi.fn() },
       push: { vapidKey: vi.fn(), subscribe: vi.fn() },
@@ -75,7 +76,7 @@ vi.mock('../lib/api', () => {
 });
 
 const { useInstallFlow } = await import('../components/InstallNudge');
-const { api } = await import('../lib/api');
+const { api, ApiError } = await import('../lib/api');
 const { EventScreen } = await import('./EventScreen');
 
 const baseEvent = {
@@ -128,6 +129,35 @@ describe('EventScreen', () => {
       .mockReset()
       .mockResolvedValue({ ok: true, status: 'going', alsoPublicRecord: false, counts: { going: 3, interested: 1 } });
     vi.mocked(api.rsvp.clear).mockReset().mockResolvedValue({ ok: true, counts: { going: 1, interested: 1 } });
+    vi.mocked(api.members.get).mockReset().mockRejectedValue(new ApiError(404, 'NotFound', 'not in the directory'));
+  });
+
+  it('names the host and links to their profile for a signed-in member', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, hostDid: 'did:plc:host1' });
+    vi.mocked(api.members.get).mockResolvedValue({
+      did: 'did:plc:host1',
+      handle: 'amir.test',
+      displayName: 'Amir',
+      role: 20,
+      roleLabel: 'Hosts classes here',
+      claimCount: 2,
+      vouchCount: 2,
+      lastSeenAt: '2026-09-13T12:00:00Z',
+      claims: [],
+      badges: { counts: { hosted: 3, attended: 0, vouched: 2 }, role: 20, badges: [] },
+      hosting: [],
+      resources: [],
+    });
+    renderScreen();
+    const link = await screen.findByRole('link', { name: 'Amir' });
+    expect(link).toHaveAttribute('href', '/people/did:plc:host1');
+  });
+
+  it('says nothing about the host when the directory has no answer (hidden member, or signed out)', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, hostDid: 'did:plc:host1' });
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+    await waitFor(() => expect(screen.queryByText("Who's teaching")).not.toBeInTheDocument());
   });
 
   it('hides the exact address when the viewer has not RSVP\'d (locationRedacted: true)', async () => {

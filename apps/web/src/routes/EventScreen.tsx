@@ -11,7 +11,7 @@ import { SessionGate } from '../components/SessionGate';
 import { useInstallFlow } from '../components/InstallNudge';
 import { api, ApiError } from '../lib/api';
 import { formatDayStamp, formatTime, formatTimeRange } from '../lib/dates';
-import { useEvent, useMyRsvp, useRsvpClearMutation, useRsvpMutation } from '../lib/queries';
+import { useEvent, useMe, useMemberProfile, useMyRsvp, useRsvpClearMutation, useRsvpMutation } from '../lib/queries';
 import type { EventDetail, EventLocation, SkillLevelRef } from '../lib/types';
 
 /** Verbatim from the plan's global constraints — do not paraphrase. */
@@ -130,12 +130,46 @@ export function EventScreen() {
                 still carries one on a class published before task 19c, and the API
                 gates both the same way. */}
             {!event.locationRedacted && meetingLinks.length ? <div className="class-meeting-links">{meetingLinks.map((link,i)=><a key={`${link.uri}-${i}`} href={link.uri} target="_blank" rel="noopener noreferrer" className="context-link">{link.name || 'Class link'} ↗</a>)}</div> : null}
+            {event.hostDid ? <HostLine did={event.hostDid} /> : null}
             <h2 className="mt-6 text-body font-bold">Who's coming</h2><p className="mt-2 text-body text-ink-soft">{event.rsvps.going} going{event.rsvps.interested ? `, ${event.rsvps.interested} interested` : ''}</p>
             <div className="mt-5"><SessionGate prompt="Sign in to RSVP, invite a friend, or turn on reminders."><EventActions event={event} /></SessionGate></div>
           </aside>
         </div>
       </div>
     </Screen>
+  );
+}
+
+/**
+ * Who is teaching this class, and the way through to them.
+ *
+ * A class page that never names its host is a dead end: the one question every
+ * learner asks before they RSVP ("who is this person, and what else do they
+ * share?") had no answer here, and the member profile — vouches, other classes,
+ * notes — was reachable only through the People tab.
+ *
+ * `hostDid` is on the event for any LISTED class, to any viewer
+ * (`publicRecordFields` in `apps/appview/src/http/visibility.ts`: the record
+ * lives in the host's own repo and the DID is inside its AT-URI). The NAME is
+ * not public, though — the directory is members-only (R9) — so this renders for
+ * a signed-in member and stays silent otherwise, exactly like the roster does.
+ * A member who has hidden themselves 404s from `GET /api/members/:did`, and
+ * that too renders as nothing rather than as a broken link.
+ */
+function HostLine({ did }: { did: string }) {
+  const { data: me } = useMe();
+  const { data: host } = useMemberProfile(me ? did : undefined);
+  if (!host) return null;
+  const name = host.displayName || host.handle || 'A member';
+  return (
+    <>
+      <h2 className="mt-6 text-body font-bold">Who's teaching</h2>
+      <p className="mt-2 text-body">
+        <Link to="/people/$did" params={{ did }}>
+          {name}
+        </Link>
+      </p>
+    </>
   );
 }
 
