@@ -24,6 +24,8 @@ import type {
   SetNewsletterInput,
   SetPublicRoleInput,
   SkillClaimsSetInput,
+  SkillDeprecateInput,
+  SkillMoveInput,
   SkillProposeInput,
   UpdateProfileInput,
 } from './types';
@@ -398,6 +400,41 @@ export function useSetPeersMutation() {
     mutationFn: (body: PeersInput) => api.admin.setPeers(body),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ['peers'] });
+    },
+  });
+}
+
+/** `GET /api/admin/skills/proposals` — the steward queue for the skill taxonomy
+ * (`SkillsAdminScreen`). Also read from `AdminOverviewScreen` for the pending count. */
+export function useSkillProposals() {
+  return useQuery({
+    queryKey: ['skill-proposals'],
+    queryFn: () => api.admin.skills.proposals(),
+  });
+}
+
+/** `POST /api/admin/skills/:id/deprecate`. Invalidates the proposal queue and
+ * the public taxonomy tree, since a deprecated node changes both. */
+export function useDeprecateSkillMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body = {} }: { id: string; body?: SkillDeprecateInput }) => api.admin.skills.deprecate(id, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['skill-proposals'] });
+      void queryClient.invalidateQueries({ queryKey: ['skills'] });
+    },
+  });
+}
+
+/** `POST /api/admin/skills/:id/move`. Same invalidation as deprecate — the
+ * taxonomy tree's shape changed too. */
+export function useMoveSkillMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: SkillMoveInput }) => api.admin.skills.move(id, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['skill-proposals'] });
+      void queryClient.invalidateQueries({ queryKey: ['skills'] });
     },
   });
 }

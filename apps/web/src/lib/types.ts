@@ -425,6 +425,44 @@ export interface SkillExistsBody {
   existing: SkillNode;
 }
 
+/**
+ * One row of `GET /api/admin/skills/proposals` — `apps/appview/src/http/routes/admin.ts`.
+ * `id` is the skill's OWN rkey (not the `fs_skill_proposal` row id) — the same id
+ * `POST /api/admin/skills/:id/deprecate` and `.../move` both take. `label`/`status`
+ * are absent only if the indexer hasn't caught up with a just-proposed record yet.
+ */
+export interface SkillProposalItem {
+  id: string;
+  skillUri: string;
+  label?: string;
+  status?: string;
+  path: string[];
+  proposerHandle?: string;
+  proposedAt: string;
+}
+
+export interface SkillProposalsResponse {
+  proposals: SkillProposalItem[];
+}
+
+export interface SkillDeprecateInput {
+  replacedBy?: string;
+}
+
+export interface SkillDeprecateResult {
+  uri: string;
+  status: string;
+}
+
+export interface SkillMoveInput {
+  parentUri: string;
+}
+
+export interface SkillMoveResult {
+  uri: string;
+  broader: string[];
+}
+
 export interface SkillDetail {
   uri: string;
   id: string;

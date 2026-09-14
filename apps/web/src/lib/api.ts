@@ -81,7 +81,12 @@ import type {
   SkillClaimsResponse,
   SkillClaimsSetInput,
   SkillClaimsSetResult,
+  SkillDeprecateInput,
+  SkillDeprecateResult,
   SkillDetail,
+  SkillMoveInput,
+  SkillMoveResult,
+  SkillProposalsResponse,
   SkillProposeInput,
   SkillProposeResult,
   SkillTreeResponse,
@@ -340,6 +345,16 @@ export const api = {
     peers: (opts: { probe?: boolean } = {}) =>
       get<PeersResponse>('/api/admin/peers', opts.probe ? { probe: 1 } : undefined),
     setPeers: (p: PeersInput) => put<PeersResponse>('/api/admin/peers', p),
+    /** A steward's two levers over `freeschool.draft.skill` (R-6: proposals
+     * publish immediately, so there is no approve step — only deprecate and
+     * move). `:id` is the skill's own rkey, exactly as `proposals()` returns it. */
+    skills: {
+      proposals: () => get<SkillProposalsResponse>('/api/admin/skills/proposals'),
+      deprecate: (id: string, body: SkillDeprecateInput = {}) =>
+        post<SkillDeprecateResult>(`/api/admin/skills/${encodeURIComponent(id)}/deprecate`, body),
+      move: (id: string, body: SkillMoveInput) =>
+        post<SkillMoveResult>(`/api/admin/skills/${encodeURIComponent(id)}/move`, body),
+    },
     newsletter: {
       /** `period` defaults server-side to the current month (`YYYY-MM`). */
       compose: (period?: string) => request<NewsletterDraft>('/api/admin/newsletter', { method: 'POST', query: period ? { period } : undefined }),

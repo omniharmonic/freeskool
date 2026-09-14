@@ -4,7 +4,7 @@ import { FieldGlyph } from '../../components/FieldGlyph';
 import { LoadingState } from '../../components/PageState';
 import { Screen } from '../../components/Screen';
 import { SessionGate } from '../../components/SessionGate';
-import { useMe } from '../../lib/queries';
+import { useMe, useSkillProposals } from '../../lib/queries';
 
 /**
  * Mirrors `Role.Steward` (40) in `packages/shared/src/roles.ts`. The web app
@@ -14,13 +14,14 @@ import { useMe } from '../../lib/queries';
  */
 const STEWARD_ROLE = 40;
 
-type AdminTab = 'overview' | 'policy' | 'moderation' | 'peers' | 'newsletter' | 'handoff';
+type AdminTab = 'overview' | 'policy' | 'moderation' | 'peers' | 'skills' | 'newsletter' | 'handoff';
 
 const TABS: ReadonlyArray<{ key: AdminTab; to: string; label: string; description: string }> = [
   { key: 'overview', to: '/admin', label: 'Overview', description: 'Everything you need to care for the school.' },
   { key: 'policy', to: '/admin/policy', label: 'Policy', description: 'Set the shared agreements and keep the door open.' },
   { key: 'moderation', to: '/admin/moderation', label: 'Moderation', description: 'Review concerns and make decisions together.' },
   { key: 'peers', to: '/admin/peers', label: 'Peers', description: 'Connect this school to other learning communities.' },
+  { key: 'skills', to: '/admin/skills', label: 'Skills', description: 'Review what members have proposed for the shared taxonomy.' },
   { key: 'newsletter', to: '/admin/newsletter', label: 'Newsletter', description: 'Put the coming month into a simple email.' },
   { key: 'handoff', to: '/admin/handoff', label: 'Hand-off', description: 'Invite another person to share stewardship.' },
 ];
@@ -95,16 +96,41 @@ export function AdminLayout({ title, current, standfirst, children }: AdminLayou
   );
 }
 
+/**
+ * The "Skills" tool card's overview copy, per the brief: titled "Proposed
+ * skills" and showing the pending count rather than the tab's own
+ * description. `undefined` while `useSkillProposals` is still loading (a
+ * signed-in steward's first paint), so the card reads a plain "…" rather
+ * than flashing "0 pending" and then correcting itself.
+ */
+function useProposedSkillsCount(): string {
+  const { data, isPending } = useSkillProposals();
+  if (isPending) return '…';
+  const count = data?.proposals.length ?? 0;
+  if (count === 0) return 'Nothing pending';
+  return count === 1 ? '1 pending' : `${count} pending`;
+}
+
 /** `/admin` — the hub: both gates, then links to each sub-screen. */
 export function AdminOverviewScreen() {
+  const pendingCopy = useProposedSkillsCount();
   return (
     <AdminLayout
       title="Steward tools"
       current="overview"
       standfirst="Care for the commons. Keep the school welcoming, connected, and in good hands."
     >
-      <ul className="admin-tools">{TABS.filter(tab => tab.key !== 'overview').map(tab => <li key={tab.key}><Link to={tab.to} className="admin-tool"><FieldGlyph seed={tab.key}/><h2>{tab.label}</h2><p>{tab.description}</p></Link></li>)}</ul>
-
+      <ul className="admin-tools">
+        {TABS.filter((tab) => tab.key !== 'overview').map((tab) => (
+          <li key={tab.key}>
+            <Link to={tab.to} className="admin-tool">
+              <FieldGlyph seed={tab.key} />
+              <h2>{tab.key === 'skills' ? 'Proposed skills' : tab.label}</h2>
+              <p>{tab.key === 'skills' ? pendingCopy : tab.description}</p>
+            </Link>
+          </li>
+        ))}
+      </ul>
     </AdminLayout>
   );
 }

@@ -39,6 +39,7 @@ const AdminOverviewScreen = lazyRouteComponent(() => import('./routes/admin/Admi
 const PolicyScreen = lazyRouteComponent(() => import('./routes/admin/PolicyScreen'), 'PolicyScreen');
 const ModerationScreen = lazyRouteComponent(() => import('./routes/admin/ModerationScreen'), 'ModerationScreen');
 const PeersScreen = lazyRouteComponent(() => import('./routes/admin/PeersScreen'), 'PeersScreen');
+const SkillsAdminScreen = lazyRouteComponent(() => import('./routes/admin/SkillsAdminScreen'), 'SkillsAdminScreen');
 const NewsletterScreen = lazyRouteComponent(() => import('./routes/admin/NewsletterScreen'), 'NewsletterScreen');
 const HandoffScreen = lazyRouteComponent(() => import('./routes/admin/HandoffScreen'), 'HandoffScreen');
 const HandoffAcceptScreen = lazyRouteComponent(() => import('./routes/admin/HandoffAcceptScreen'), 'HandoffAcceptScreen');
@@ -120,6 +121,7 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/policy', component: PolicyScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/moderation', component: ModerationScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/peers', component: PeersScreen }),
+  createRoute({ getParentRoute: () => rootRoute, path: '/admin/skills', component: SkillsAdminScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/newsletter', component: NewsletterScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/handoff', component: HandoffScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/handoff/accept/$token', component: HandoffAcceptScreen }),
