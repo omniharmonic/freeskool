@@ -97,6 +97,25 @@ export async function demoUser(slug: string): Promise<DemoUser> {
 }
 
 /**
+ * The magic link for a door response that has already been read.
+ *
+ * In development the AppView hands the link straight back to whoever posted the form
+ * (`verifyUrl` in `POST /api/auth/{signin,signup}`'s 201 — withheld the moment SMTP is
+ * configured, and always in production), and that is the SAME one-time token the mail
+ * carries. Preferring it over the sink is not a back door: it is the same door, read from
+ * the response instead of from a file that every other process on this machine also
+ * writes to. The dev sink is truncated at boot (`resetDevMailSink`), so a concurrent
+ * `pnpm --filter @freeschool/appview test` run erases the line this test is waiting for —
+ * that race is what this avoids. The sink stays the fallback, so a stack that has stopped
+ * echoing the link still works.
+ */
+export async function verifyUrlFrom(body: unknown, to: string): Promise<string> {
+  const url = (body as { verifyUrl?: unknown } | null)?.verifyUrl;
+  if (typeof url === 'string' && url.includes('/verify?token=')) return url;
+  return magicLinkUrl(to);
+}
+
+/**
  * Sign `page` in as a seeded persona, through the primary door: `POST /api/auth/signin`
  * (the same handler `/signup` uses — it resends for a known email rather than minting a
  * second account), then the magic link. `page.request` shares the page's cookie jar, so
@@ -106,8 +125,54 @@ export async function signInAs(page: Page, slug: string): Promise<DemoUser> {
   const user = await demoUser(slug);
   const res = await page.request.post('/api/auth/signin', { data: { email: user.email } });
   if (!res.ok()) throw new Error(`POST /api/auth/signin for "${slug}" -> ${res.status()} ${await res.text()}`);
-  await page.goto(await magicLinkUrl(user.email));
+  await openMagicLink(page, await verifyUrlFrom(await res.json().catch(() => null), user.email));
   return user;
+}
+
+/**
+ * Open a magic link and WAIT FOR THE SESSION, not just for the page.
+ *
+ * `/verify` sets the cookie from inside the browser (`api.auth.verify`, then a navigation
+ * to `/welcome` or wherever the member was headed), so `page.goto()` resolving means the
+ * verify screen has mounted — not that it has finished. A caller that went straight on to
+ * `page.request.get('/api/auth/me')` was racing that fetch, and won or lost it depending
+ * on how long the magic link took to find. Leaving `/verify` is the observable end of it.
+ */
+export async function openMagicLink(page: Page, url: string): Promise<void> {
+  // Opened RELATIVE to the suite's own `baseURL`, token and query untouched: the AppView
+  // builds the link from its `WEB_PUBLIC_URL`, which names whichever PWA that AppView
+  // thinks is in front of it — not necessarily the one this run was pointed at
+  // (`E2E_BASE_URL`, and the `APPVIEW_PROXY_TARGET` escape hatch in `vite.config.ts`).
+  // Following the host verbatim there signs a DIFFERENT app in and leaves this page
+  // signed out, which reads as a broken door rather than as a mismatched stack.
+  const link = new URL(url);
+  await page.goto(`${link.pathname}${link.search}`);
+  await page.waitForURL((current) => !current.pathname.startsWith('/verify'), { timeout: 30_000 });
+}
+
+/** One node of `GET /api/skills`' tree, as much of it as these journeys read. */
+interface SkillTreeNode {
+  uri: string;
+  id: string;
+  label: string;
+  children?: SkillTreeNode[];
+}
+
+/**
+ * The stable `at://` URI of a taxonomy skill, by its seed id
+ * (`infra/seed/skills/skills-seed.jsonl`) — every skill-shaped URL in the app is that
+ * URI, percent-encoded, and no test should hard-code the authority DID to build one.
+ */
+export async function skillUriFor(page: Page, id: string): Promise<string> {
+  const res = await page.request.get('/api/skills');
+  if (!res.ok()) throw new Error(`GET /api/skills -> ${res.status()}`);
+  const { skills } = (await res.json()) as { skills: SkillTreeNode[] };
+  const stack = [...skills];
+  for (let node = stack.pop(); node; node = stack.pop()) {
+    if (node.id === id) return node.uri;
+    stack.push(...(node.children ?? []));
+  }
+  throw new Error(`no skill "${id}" in the taxonomy — has the seed been loaded?`);
 }
 
 /**
@@ -118,7 +183,7 @@ export async function signInAs(page: Page, slug: string): Promise<DemoUser> {
 export async function signUpFresh(page: Page, address: string): Promise<{ did: string; address: string }> {
   const res = await page.request.post('/api/auth/signup', { data: { email: address } });
   if (!res.ok()) throw new Error(`POST /api/auth/signup for a fresh member -> ${res.status()} ${await res.text()}`);
-  await page.goto(await magicLinkUrl(address));
+  await openMagicLink(page, await verifyUrlFrom(await res.json().catch(() => null), address));
   const me = (await (await page.request.get('/api/auth/me')).json()) as { did: string };
   if (!me.did?.startsWith('did:')) throw new Error('signed up but no session: /api/auth/me returned no DID');
   return { did: me.did, address };

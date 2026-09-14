@@ -38,5 +38,17 @@ export default defineConfig({
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
-  projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'], viewport: { width: 430, height: 932 } } }],
+  projects: [
+    { name: 'chromium', use: { ...devices['Desktop Chrome'], viewport: { width: 430, height: 932 } } },
+    // The screenshot audit, and ONLY the screenshot audit, also runs at a laptop size:
+    // every other spec asserts behaviour that does not change with the viewport, and
+    // running them twice would double the records they write to a real PDS. `audit.spec.ts`
+    // names its output folder after the viewport it finds itself in, so the two projects
+    // fill `test-results/audit/<persona>/{mobile,desktop}/` between them.
+    {
+      name: 'desktop',
+      testMatch: /audit\.spec\.ts/,
+      use: { ...devices['Desktop Chrome'], viewport: { width: 1280, height: 800 } },
+    },
+  ],
 });
