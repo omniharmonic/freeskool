@@ -12,19 +12,52 @@
  * what it would have been without it: a public record must never name a DID its holder
  * did not write (R9), and "Wren thinks Rosa should teach bicycle mechanics", published
  * under Wren's identity, is exactly that. The person asked finds out; nobody else does.
+ *
+ * THREE LIMITS ON THE ASK (Task 10 report, concern 3 — twenty members could each ask the
+ * same person for the same thing, and each ask was a separate public request and a
+ * separate notification):
+ *
+ *   1. It MERGES. An open request for the same skill in the same school, already
+ *      addressed to the same person, is the request this ask belongs on — the asker joins
+ *      it as interested (`lib/request-rsvp.ts#addInterest`) and no second record is
+ *      written. One need, one row on the board, and the interest count becomes the thing
+ *      that says how many people want it.
+ *   2. It notifies AT MOST ONCE per (skill, person) per seven days. The dedup key is the
+ *      pair, not the request URI, so the tenth asker does not become the tenth ping.
+ *   3. It is rate-limited to `MAX_ASKS_PER_DAY` per member per school. 429 `TooManyAsks`,
+ *      and nothing is written — not even the public request, because a request nobody
+ *      meant as a request is still litter on somebody's board.
  */
-import { eq } from 'drizzle-orm'
+import { and, eq, gte, like } from 'drizzle-orm'
 import type { Viewer } from '../http/session.js'
 import { actorAgent } from './actor-agent.js'
 import { NSID } from '../lexicons/nsids.js'
 import { tid } from './ids.js'
 import { getIndexer } from '../index/indexer.js'
+import { listCollection } from '../index/queries.js'
 import { getDb } from '../db/index.js'
-import { requestAskedOf } from '../db/schema.js'
+import { notificationSent, requestAskedOf } from '../db/schema.js'
 import { displayNamesForDids, handlesForDids } from '../http/routes/me.js'
 import { enqueueNotification } from '../notifications/dispatch.js'
+import { addInterest } from './request-rsvp.js'
 import { legacySchoolDid } from './schools.js'
+import { schoolScope } from './school-scope.js'
 import { describeError, log } from './logging.js'
+
+/** How many asks one member may make in one school in a day before the door closes. */
+export const MAX_ASKS_PER_DAY = 10
+const DAY_MS = 86_400_000
+/** How long one (skill, person) pair stays quiet after the member has been told once. */
+const ASK_NOTICE_WINDOW_MS = 7 * DAY_MS
+
+/** Thrown before anything is written. The route answers 429 `TooManyAsks`. */
+export class TooManyAsksError extends Error {
+  readonly code = 'TooManyAsks'
+  constructor() {
+    super(`you can ask for up to ${MAX_ASKS_PER_DAY} things a day`)
+    this.name = 'TooManyAsksError'
+  }
+}
 
 export interface CreateRequestInput {
   title: string
@@ -40,12 +73,36 @@ export interface CreateRequestInput {
   askedOf?: string
 }
 
+export interface CreateRequestResult {
+  uri: string
+  cid: string
+  /** True when this ask joined a request that already existed instead of writing one. */
+  merged?: boolean
+}
+
 export async function createRequest(
   viewer: Viewer,
   input: CreateRequestInput,
   options: { schoolDid?: string } = {},
-): Promise<{ uri: string; cid: string }> {
+): Promise<CreateRequestResult> {
   const { askedOf, ...record } = input
+  const schoolDid = options.schoolDid ?? legacySchoolDid()
+  // A member may not address a request to themselves — it would mean nothing and would
+  // send them a notification about their own typing.
+  const asking = Boolean(askedOf) && askedOf !== viewer.did
+
+  if (asking) {
+    if ((await asksToday(viewer.did, schoolDid)) >= MAX_ASKS_PER_DAY) throw new TooManyAsksError()
+    const open = await openAskFor(input.skill, askedOf!, schoolDid)
+    if (open) {
+      // Merging, not asking again: the board keeps ONE row for this need and the asker
+      // becomes one of the people waiting on it.
+      await addInterest(open.uri, viewer.did, schoolDid)
+      await notifyAsked(viewer.did, askedOf!, schoolDid, input)
+      return { uri: open.uri, cid: open.cid ?? '', merged: true }
+    }
+  }
+
   const agent = await actorAgent(viewer)
   const res = await agent.com.atproto.repo.putRecord({
     repo: viewer.did,
@@ -63,14 +120,12 @@ export async function createRequest(
   const indexer = await getIndexer()
   await indexer.notify(res.data.uri).catch(() => {})
 
-  // A member may not address a request to themselves — it would mean nothing and would
-  // send them a notification about their own typing.
-  if (askedOf && askedOf !== viewer.did) {
+  if (asking) {
     // The request itself is already public and real. Failing the whole call because the
     // app-side half of an ask did not land would tell the member their request failed
     // when it did not, so this is logged and swallowed.
     try {
-      await recordAsk(res.data.uri, viewer.did, askedOf, options.schoolDid ?? legacySchoolDid(), input.title)
+      await recordAsk(res.data.uri, viewer.did, askedOf!, schoolDid, input)
     } catch (err) {
       log.warn('could not record askedOf', { detail: describeError(err) })
     }
@@ -84,18 +139,103 @@ async function recordAsk(
   askerDid: string,
   askedOfDid: string,
   schoolDid: string,
-  title: string,
+  input: CreateRequestInput,
 ): Promise<void> {
   await getDb()
     .insert(requestAskedOf)
     .values({ requestUri, askedOfDid, schoolDid })
     .onConflictDoNothing()
+  await notifyAsked(askerDid, askedOfDid, schoolDid, input)
+}
+
+/**
+ * How many asks this member has made in this school in the last twenty-four hours.
+ *
+ * `fs_request_asked_of` carries no asker column and does not need one: the request's
+ * AT-URI IS the asker's repo, so a prefix match over the primary key answers it. Per
+ * SCHOOL, like every other app-side count here.
+ */
+async function asksToday(askerDid: string, schoolDid: string): Promise<number> {
+  const rows = await getDb()
+    .select({ uri: requestAskedOf.requestUri })
+    .from(requestAskedOf)
+    .where(
+      and(
+        like(requestAskedOf.requestUri, `at://${askerDid}/%`),
+        schoolScope(requestAskedOf.schoolDid, schoolDid),
+        gte(requestAskedOf.createdAt, new Date(Date.now() - DAY_MS)),
+      ),
+    )
+  return rows.length
+}
+
+/**
+ * The open request this ask belongs on, if there is one: same school, same skill, already
+ * addressed to this person. One index query (open requests for that skill) intersected
+ * with one app-side query (what this member has been asked), rather than a walk per row.
+ *
+ * Without a skill there is nothing to match on — two people typing "sourdough" and
+ * "Sourdough bread" mean the same thing and we have no way to know it — so an ask with no
+ * skill always writes its own request.
+ */
+async function openAskFor(
+  skill: string | undefined,
+  askedOfDid: string,
+  schoolDid: string,
+): Promise<{ uri: string; cid: string | null } | null> {
+  if (!skill) return null
+  const asked = await getDb()
+    .select({ uri: requestAskedOf.requestUri })
+    .from(requestAskedOf)
+    .where(and(eq(requestAskedOf.askedOfDid, askedOfDid), schoolScope(requestAskedOf.schoolDid, schoolDid)))
+  if (asked.length === 0) return null
+  const uris = new Set(asked.map((row) => row.uri))
+
+  const indexer = await getIndexer()
+  const { records } = await listCollection(indexer, 'request', {
+    filters: { status: 'open', skill },
+    limit: 200,
+  })
+  const hit = records.find((record) => uris.has(record.uri))
+  return hit ? { uri: hit.uri, cid: hit.cid } : null
+}
+
+/**
+ * Tell the member asked — at most once per (skill, person) per seven days.
+ *
+ * The dedup key is the PAIR and a seven-day bucket, so the claim stays atomic (the
+ * ledger's insert-or-nothing is still what decides a race). A bucket alone would let two
+ * notices land a second apart across a boundary, so the PREVIOUS bucket is checked for a
+ * claim inside the rolling window first; the two together are exactly "once per seven
+ * days" with no lock and no extra table.
+ */
+async function notifyAsked(
+  askerDid: string,
+  askedOfDid: string,
+  schoolDid: string,
+  input: CreateRequestInput,
+): Promise<void> {
+  const now = Date.now()
+  const subject = input.skill ?? `title:${input.title.trim().toLowerCase()}`
+  const base = `request-asked-of:${schoolDid}:${askedOfDid}:${subject}`
+  const bucket = Math.floor(now / ASK_NOTICE_WINDOW_MS)
+  const recent = await getDb()
+    .select({ key: notificationSent.dedupKey })
+    .from(notificationSent)
+    .where(
+      and(
+        eq(notificationSent.dedupKey, `${base}:${bucket - 1}`),
+        gte(notificationSent.claimedAt, new Date(now - ASK_NOTICE_WINDOW_MS)),
+      ),
+    )
+    .limit(1)
+  if (recent.length > 0) return
+
   await enqueueNotification({
     did: askedOfDid,
     category: 'request.asked-of',
-    // One notification per request, whatever else happens: the uri is minted per ask.
-    dedupKey: `request-asked-of:${requestUri}`,
-    title: `${await nameOf(askerDid)} asked if you would teach ${title}`,
+    dedupKey: `${base}:${bucket}`,
+    title: `${await nameOf(askerDid)} asked if you would teach ${input.title}`,
     body: 'You can say yes by posting a class, or leave it for someone else. Nobody is told either way.',
     navigate: '/requests',
     schoolDid,

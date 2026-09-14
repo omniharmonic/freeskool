@@ -487,6 +487,12 @@ export interface RequestClaimInput {
 export interface RequestMutationResult {
   uri: string;
   cid: string;
+  /**
+   * "Ask <name> to teach this" only: true when the ask joined an open request that was
+   * already addressed to that person for that skill, rather than writing a second one.
+   * `uri` is then the OLDER request's, so the member is told where their interest landed.
+   */
+  merged?: boolean;
 }
 
 /**

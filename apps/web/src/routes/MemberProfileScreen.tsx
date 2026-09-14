@@ -107,7 +107,8 @@ function MemberProfileBody({ profile, viewerDid }: { profile: MemberProfileRespo
    * the record, so nothing published here names them.
    */
   const createRequest = useCreateRequestMutation();
-  const [asked, setAsked] = useState<Record<string, boolean>>({});
+  /** Per skill: what just happened, which decides which sentence the row shows. */
+  const [asked, setAsked] = useState<Record<string, 'asked' | 'merged'>>({});
   const [askError, setAskError] = useState<string | null>(null);
   const [askingSkill, setAskingSkill] = useState<string | null>(null);
 
@@ -115,18 +116,16 @@ function MemberProfileBody({ profile, viewerDid }: { profile: MemberProfileRespo
     setAskError(null);
     setAskingSkill(claim.skillUri);
     try {
-      await createRequest.mutateAsync({
+      const result = await createRequest.mutateAsync({
         title: claim.skillLabel,
         skill: claim.skillUri,
         askedOf: profile.did,
       });
-      setAsked((prev) => ({ ...prev, [claim.skillUri]: true }));
+      // `merged` means somebody had already asked them for this: the AppView put this
+      // member on the request that exists rather than adding a second one to the board.
+      setAsked((prev) => ({ ...prev, [claim.skillUri]: result.merged ? 'merged' : 'asked' }));
     } catch (err) {
-      setAskError(
-        err instanceof ApiError && err.status === 401
-          ? 'Sign in again to ask someone to teach something.'
-          : 'Could not send that ask. Try again.',
-      );
+      setAskError(askRefusal(err));
     } finally {
       setAskingSkill(null);
     }
@@ -268,7 +267,7 @@ function MemberProfileBody({ profile, viewerDid }: { profile: MemberProfileRespo
                       attesters={(attestations?.received ?? []).filter((r) => r.skillUri === claim.skillUri)}
                       onToggle={(vouched) => void onToggleVouch(claim, vouched)}
                       askName={own ? undefined : firstName(name)}
-                      asked={asked[claim.skillUri] ?? false}
+                      asked={asked[claim.skillUri]}
                       asking={askingSkill === claim.skillUri}
                       onAsk={() => void onAsk(claim)}
                     />
@@ -338,7 +337,7 @@ function ClaimRow({
   onToggle: (vouched: boolean) => void;
   /** What to call them in "Ask … to teach this". Absent on your own profile. */
   askName?: string;
-  asked: boolean;
+  asked?: 'asked' | 'merged';
   asking: boolean;
   onAsk: () => void;
 }) {
@@ -379,8 +378,9 @@ function ClaimRow({
         <div className="mt-2.5">
           {asked ? (
             <p role="status" className="text-caption text-ink-soft">
-              Asked. It’s on the needs board now, and {askName} has been told — they can say yes by posting a
-              class, or leave it.
+              {asked === 'merged'
+                ? `Added you to the existing request for ${claim.skillLabel}. Somebody had already asked, and ${askName} has been told once.`
+                : `Asked ${askName}. It’s on the needs board now — they can say yes by posting a class, or leave it.`}
             </p>
           ) : (
             <button
@@ -422,6 +422,19 @@ function ClaimRow({
       ) : null}
     </li>
   );
+}
+
+/**
+ * Why an ask did not go through, in the member's own terms. `TooManyAsks` is the AppView
+ * saying this member has asked for plenty today — a limit, not a failure, and it should
+ * not read like the app broke.
+ */
+function askRefusal(err: unknown): string {
+  if (err instanceof ApiError && err.status === 401) return 'Sign in again to ask someone to teach something.';
+  if (err instanceof ApiError && err.status === 429) {
+    return 'You’ve asked for a lot today. Try again tomorrow.';
+  }
+  return 'Could not send that ask. Try again.';
 }
 
 /**

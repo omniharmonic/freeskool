@@ -38,6 +38,21 @@ export async function toggleInterest(
   return { interested: true, count: await countInterested(requestUri, schoolDid) }
 }
 
+/**
+ * Interest WITHOUT the toggle: used by "ask <name> to teach this" when the ask merges
+ * into a request that already exists (`lib/requests.ts`). An asker who is already down as
+ * interested must stay interested — calling `toggleInterest` there would silently take
+ * their name off the very request they just asked to join.
+ */
+export async function addInterest(
+  requestUri: string,
+  did: string,
+  schoolDid = legacySchoolDid(),
+): Promise<number> {
+  await getDb().insert(requestRsvp).values({ requestUri, did, schoolDid }).onConflictDoNothing()
+  return countInterested(requestUri, schoolDid)
+}
+
 export async function countInterested(requestUri: string, schoolDid = legacySchoolDid()): Promise<number> {
   const rows = await getDb()
     .select({ did: requestRsvp.did })

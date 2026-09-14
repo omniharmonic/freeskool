@@ -271,8 +271,35 @@ describe('MemberProfileScreen', () => {
           askedOf: SUBJECT_DID,
         }),
       );
-      // Said back in the member's own words, including that they were told.
-      expect(await screen.findByText(/Wren has been told/)).toBeInTheDocument();
+      // Said back in the member's own words.
+      expect(await screen.findByText(/Asked Wren\./)).toBeInTheDocument();
+    });
+
+    /**
+     * MERGING (Task 10 report, concern 3). Somebody had already asked Wren for this, so
+     * the AppView put this member on that request instead of adding a second one. Saying
+     * "Asked Wren" there would be a small lie — nothing new went on the board, and Wren
+     * was not told again.
+     */
+    it('says the ask joined an existing request when the AppView merged it', async () => {
+      vi.mocked(api.requests.create).mockResolvedValue({ uri: 'at://x/y/z', cid: 'bafy', merged: true });
+      renderScreen();
+
+      fireEvent.click((await screen.findAllByRole('button', { name: 'Ask Wren to teach this' }))[0]!);
+
+      expect(await screen.findByText(/Added you to the existing request for Mending/)).toBeInTheDocument();
+      expect(screen.queryByText(/Asked Wren\./)).not.toBeInTheDocument();
+    });
+
+    it('treats the daily limit as a limit, not a breakage', async () => {
+      vi.mocked(api.requests.create).mockRejectedValue(
+        new ApiError(429, 'TooManyAsks', 'you can ask for up to 10 things a day'),
+      );
+      renderScreen();
+
+      fireEvent.click((await screen.findAllByRole('button', { name: 'Ask Wren to teach this' }))[0]!);
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(/asked for a lot today/i);
     });
 
     it('is offered for every skill they claim', async () => {

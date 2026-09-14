@@ -37,7 +37,7 @@ import { getRecordByUri, listCollection, parseAtUri, sidecarsForEvent } from '..
 import { getRecord } from '../../lib/pds.js'
 import { resolvePdsEndpoint } from '../../lib/identity.js'
 import { countInterested, isInterested, meetsThreshold, toggleInterest } from '../../lib/request-rsvp.js'
-import { createRequest } from '../../lib/requests.js'
+import { createRequest, TooManyAsksError } from '../../lib/requests.js'
 import { currentSchool } from '../school-context.js'
 
 export const requests = new Hono<AppEnv>()
@@ -107,13 +107,20 @@ const createBody = z.object({
   askedOf: z.string().startsWith('did:').max(255).optional(),
 })
 
+/**
+ * 201 for a request that was written, 200 for an ask that MERGED into one that already
+ * existed (`{ merged: true }`, and the `uri` is the older request's — the caller should
+ * show the member where their interest landed rather than claim a new row).
+ */
 requests.post('/requests', requireViewer, async (c) => {
   const parsed = createBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
   const viewer = c.var.viewer!
   try {
-    return c.json(await createRequest(viewer, parsed.data, { schoolDid: currentSchool(c).did }), 201)
+    const result = await createRequest(viewer, parsed.data, { schoolDid: currentSchool(c).did })
+    return c.json(result, result.merged ? 200 : 201)
   } catch (err) {
+    if (err instanceof TooManyAsksError) return c.json({ error: err.code, message: err.message }, 429)
     if (err instanceof NoActorCredentialError) return c.json({ error: 'ReauthRequired' }, 401)
     throw err
   }
