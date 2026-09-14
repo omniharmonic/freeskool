@@ -51,7 +51,7 @@ vi.mock('../../lib/api', () => {
   };
 });
 
-const { api } = await import('../../lib/api');
+const { api, ApiError } = await import('../../lib/api');
 const { SkillsAdminScreen } = await import('./SkillsAdminScreen');
 
 const stewardMe = {
@@ -123,6 +123,42 @@ describe('SkillsAdminScreen', () => {
     fireEvent.click(confirmButtons.at(-1)!);
 
     await waitFor(() => expect(api.admin.skills.deprecate).toHaveBeenCalledWith('bike-repair', {}));
+  });
+
+  it('shows the friendly sentence inside the sheet on a 502, then closes and refetches on retry success', async () => {
+    vi.mocked(api.admin.skills.proposals).mockResolvedValue({ proposals: [proposal] });
+    vi.mocked(api.admin.skills.deprecate)
+      .mockRejectedValueOnce(new ApiError(502, 'AuthorityError', 'Request failed with status 502'))
+      .mockResolvedValueOnce({ uri: proposal.skillUri, status: 'deprecated' });
+    renderScreen();
+
+    await screen.findByText('Bike repair');
+    fireEvent.click(screen.getByRole('button', { name: 'Deprecate' }));
+
+    const confirmButtons = await screen.findAllByRole('button', { name: 'Deprecate' });
+    const confirmButton = confirmButtons.at(-1)!;
+    fireEvent.click(confirmButton);
+
+    expect(
+      await screen.findByText('The taxonomy account could not save that change. Try again in a moment.'),
+    ).toBeInTheDocument();
+
+    // The sheet stayed open — the confirm button is still reachable and the
+    // proposal row behind it didn't take its own error paint.
+    expect(screen.getByRole('dialog')).toBeVisible();
+    expect(screen.getByText('Deprecate this skill?')).toBeInTheDocument();
+
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => expect(api.admin.skills.deprecate).toHaveBeenCalledTimes(2));
+    await waitFor(() =>
+      expect(
+        screen.queryByText('The taxonomy account could not save that change. Try again in a moment.'),
+      ).not.toBeInTheDocument(),
+    );
+    // Mutation success invalidates `['skill-proposals']`, so the list refetches
+    // beyond its initial load.
+    await waitFor(() => expect(api.admin.skills.proposals).toHaveBeenCalledTimes(2));
   });
 
   it('opens a parent picker and calls the move mutation with the chosen parent', async () => {

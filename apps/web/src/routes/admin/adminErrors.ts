@@ -27,6 +27,13 @@ const CODE_SENTENCES: Partial<Record<string, string>> = {
   // `POST /api/admin/moderation/:id/execute` when another steward already
   // ran it first.
   AlreadyResolved: 'Another steward already ran this. Refreshing the queue.',
+  // `POST /api/admin/skills/:id/deprecate` or `.../move` (503) when this
+  // school has no curation authority configured — same condition
+  // `ProposeSkillSheet` handles for proposals.
+  AuthorityUnavailable: 'Proposing and editing skills is not switched on for this school yet.',
+  // Same endpoints (502) when `SchoolActorPort` itself failed to write the
+  // change as the school.
+  AuthorityError: 'The taxonomy account could not save that change. Try again in a moment.',
 };
 
 function isGenericFallback(err: ApiError): boolean {

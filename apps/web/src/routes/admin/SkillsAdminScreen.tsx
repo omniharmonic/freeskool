@@ -36,38 +36,43 @@ export function SkillsAdminScreen() {
   const [deprecateTarget, setDeprecateTarget] = useState<SkillProposalItem | null>(null);
   const [moveTarget, setMoveTarget] = useState<SkillProposalItem | null>(null);
   const [moveParentUri, setMoveParentUri] = useState('');
-  const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
+  const [deprecateError, setDeprecateError] = useState<string | null>(null);
+  const [moveError, setMoveError] = useState<string | null>(null);
 
   const parents = parentOptions(flattenSkills(tree?.skills ?? []));
   const proposals = data?.proposals ?? [];
 
-  const closeDeprecate = () => setDeprecateTarget(null);
+  const closeDeprecate = () => {
+    setDeprecateTarget(null);
+    setDeprecateError(null);
+  };
   const closeMove = () => {
     setMoveTarget(null);
     setMoveParentUri('');
+    setMoveError(null);
   };
 
   const onConfirmDeprecate = async () => {
     if (!deprecateTarget) return;
     const { id } = deprecateTarget;
-    setRowErrors((prev) => ({ ...prev, [id]: '' }));
+    setDeprecateError(null);
     try {
       await deprecateMutation.mutateAsync({ id, body: {} });
       closeDeprecate();
     } catch (err) {
-      setRowErrors((prev) => ({ ...prev, [id]: adminErrorSentence(err, 'Could not deprecate this skill. Try again.') }));
+      setDeprecateError(adminErrorSentence(err, 'Could not deprecate this skill. Try again.'));
     }
   };
 
   const onConfirmMove = async () => {
     if (!moveTarget || !moveParentUri) return;
     const { id } = moveTarget;
-    setRowErrors((prev) => ({ ...prev, [id]: '' }));
+    setMoveError(null);
     try {
       await moveMutation.mutateAsync({ id, body: { parentUri: moveParentUri } });
       closeMove();
     } catch (err) {
-      setRowErrors((prev) => ({ ...prev, [id]: adminErrorSentence(err, 'Could not move this skill. Try again.') }));
+      setMoveError(adminErrorSentence(err, 'Could not move this skill. Try again.'));
     }
   };
 
@@ -111,7 +116,14 @@ export function SkillsAdminScreen() {
                   <p className="text-caption text-ink-faint">Deprecated.</p>
                 ) : (
                   <div className="flex flex-wrap gap-3">
-                    <Button ink="pink" variant="quiet" onClick={() => setDeprecateTarget(p)}>
+                    <Button
+                      ink="pink"
+                      variant="quiet"
+                      onClick={() => {
+                        setDeprecateTarget(p);
+                        setDeprecateError(null);
+                      }}
+                    >
                       Deprecate
                     </Button>
                     <Button
@@ -120,17 +132,13 @@ export function SkillsAdminScreen() {
                       onClick={() => {
                         setMoveTarget(p);
                         setMoveParentUri('');
+                        setMoveError(null);
                       }}
                     >
                       Move
                     </Button>
                   </div>
                 )}
-                {rowErrors[p.id] ? (
-                  <p role="alert" className="text-body text-pink">
-                    {rowErrors[p.id]}
-                  </p>
-                ) : null}
               </li>
             );
           })}
@@ -142,6 +150,11 @@ export function SkillsAdminScreen() {
           {deprecateTarget ? (deprecateTarget.label ?? deprecateTarget.id) : ''} will no longer show as an active
           skill anywhere in the app. This can’t be undone from here.
         </p>
+        {deprecateError ? (
+          <p role="alert" className="mt-3 text-body text-pink">
+            {deprecateError}
+          </p>
+        ) : null}
         <div className="mt-5 flex gap-3 pb-1">
           <Button ink="pink" onClick={() => void onConfirmDeprecate()} disabled={deprecateMutation.isPending}>
             Deprecate
@@ -166,6 +179,11 @@ export function SkillsAdminScreen() {
             clearLabel="Change"
           />
         </div>
+        {moveError ? (
+          <p role="alert" className="mt-3 text-body text-pink">
+            {moveError}
+          </p>
+        ) : null}
         <div className="mt-5 flex gap-3 pb-1">
           <Button ink="blue" onClick={() => void onConfirmMove()} disabled={!moveParentUri || moveMutation.isPending}>
             Move this skill here
