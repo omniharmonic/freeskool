@@ -17,6 +17,7 @@ import { config } from '../config.js'
 import { newSessionId, signSessionId, verifySessionCookie } from '../lib/crypto.js'
 import { roleOf } from '../lib/roles.js'
 import { Role } from '@freeschool/shared'
+import type { School } from '../lib/schools.js'
 
 export type SessionKind = 'custodial' | 'oauth'
 
@@ -26,7 +27,11 @@ export interface Viewer {
   sessionId: string
 }
 
-export type AppEnv = { Variables: { viewer?: Viewer } }
+/**
+ * `school` is set by `http/school-context.ts#withSchool` on every request; read it with
+ * `currentSchool(c)` (which 404s when it is absent) rather than off the context directly.
+ */
+export type AppEnv = { Variables: { viewer?: Viewer; school?: School } }
 
 export async function createSession(c: Context, did: string, kind: SessionKind): Promise<string> {
   const id = newSessionId()

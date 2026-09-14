@@ -60,6 +60,19 @@ const schema = z.object({
    */
   SCHOOL_LABELS: z.string().default('boulder').transform(csv),
 
+  /**
+   * MS §11 Phase 3/4's flag. `0` (the default) means this AppView serves exactly ONE
+   * school — the env-configured legacy school — and `http/school-context.ts` resolves
+   * every request to it without touching the Host header or the session. `1` turns on
+   * host-based resolution (`fs_school_domain`), the session's `current_school_did`, and
+   * a 404 `UnknownSchool` for a host that names no school.
+   *
+   * The new code paths are LIVE either way: with the flag off they simply all resolve to
+   * the same school, which is what makes "MULTI_SCHOOL=0 behaves exactly as before" a
+   * property of one resolution function rather than of every call site.
+   */
+  MULTI_SCHOOL: z.stringbool().default(false),
+
   /** Taxonomy authority DID: when set, the skill tree/detail routes ignore skill records from any other DID. */
   AUTHORITY_DID: z.string().default(''),
   /** Handle for the taxonomy authority account (ops/documentation use only). */
@@ -229,6 +242,7 @@ export function redactedConfig(c: Config) {
     handleDomain: c.handleDomain,
     peers: c.PEER_PDS_HOSTS.length,
     schoolConfigured: Boolean(c.SCHOOL_DID && c.SCHOOL_APP_PASSWORD),
+    multiSchool: c.MULTI_SCHOOL,
     liveIngest: c.CONTRAIL_LIVE_INGEST,
     peerLiveSync: c.PEER_LIVE_SYNC,
     custodyKeyVersion: c.CUSTODY_KEY_VERSION,
