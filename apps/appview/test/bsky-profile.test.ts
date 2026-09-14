@@ -143,4 +143,129 @@ describe('importBlueskyProfile', () => {
     const profile = await loadProfile(DID)
     expect(profile.avatar).toBeUndefined()
   })
+
+  it('skips an avatar URL that does not point at a Bluesky CDN host, but keeps text fields', async () => {
+    if (!available) return console.warn(SKIP_MESSAGE)
+    let avatarFetched = false
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/xrpc/app.bsky.actor.getProfile')) {
+        return new Response(
+          JSON.stringify({ ...fixture, avatar: 'https://evil.example.com/steal-a-credential.png' }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      avatarFetched = true
+      throw new Error(`should never fetch a disallowed avatar host: ${url}`)
+    }) as typeof fetch
+
+    const result = await importBlueskyProfile(DID, { overwrite: false, fetchImpl })
+    expect(avatarFetched).toBe(false)
+    expect(result.imported).toBe(true)
+    expect(result.fields.sort()).toEqual(['bio', 'displayName'])
+    const profile = await loadProfile(DID)
+    expect(profile.avatar).toBeUndefined()
+  })
+
+  it('rejects an avatar whose declared content-length exceeds the 5 MB cap, without reading the body', async () => {
+    if (!available) return console.warn(SKIP_MESSAGE)
+    const fetchImpl = fetchImplWith()
+    const gated = (async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.startsWith('https://cdn.bsky.app/')) {
+        return new Response(Buffer.from(PNG_BASE64, 'base64'), {
+          status: 200,
+          headers: { 'content-type': 'image/png', 'content-length': String(6 * 1024 * 1024) },
+        })
+      }
+      return fetchImpl(input)
+    }) as typeof fetch
+
+    const result = await importBlueskyProfile(DID, { overwrite: false, fetchImpl: gated })
+    expect(result.fields).not.toContain('avatar')
+    const profile = await loadProfile(DID)
+    expect(profile.avatar).toBeUndefined()
+  })
+
+  it('aborts reading an avatar body that exceeds 5 MB even with no content-length header', async () => {
+    if (!available) return console.warn(SKIP_MESSAGE)
+    const oversized = Buffer.alloc(5 * 1024 * 1024 + 10, 1)
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/xrpc/app.bsky.actor.getProfile')) {
+        return new Response(JSON.stringify(fixture), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      if (url.startsWith('https://cdn.bsky.app/')) {
+        // Deliberately no content-length header — the streamed cap is the only guard.
+        return new Response(oversized, { status: 200, headers: { 'content-type': 'image/png' } })
+      }
+      throw new Error(`unexpected fetch in test: ${url}`)
+    }) as typeof fetch
+
+    const result = await importBlueskyProfile(DID, { overwrite: false, fetchImpl })
+    expect(result.fields).not.toContain('avatar')
+    const profile = await loadProfile(DID)
+    expect(profile.avatar).toBeUndefined()
+  })
+})
+
+describe('importBlueskyProfile races a concurrent PUT /api/me', () => {
+  /** Mirrors `me.ts`'s `PUT /` upsert exactly, standing in for a concurrent member edit. */
+  async function writeProfileLikePutApiMe(value: Record<string, unknown>): Promise<void> {
+    const now = new Date()
+    await testDb()
+      .insert(appMeta)
+      .values({ key: PROFILE_KEY(DID), value, updatedAt: now })
+      .onConflictDoUpdate({ target: appMeta.key, set: { value, updatedAt: now } })
+  }
+
+  function deferredGateFetch(body: unknown) {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const fetchImpl = (async (input: RequestInfo | URL) => {
+      const url = typeof input === 'string' ? input : input.toString()
+      if (url.includes('/xrpc/app.bsky.actor.getProfile')) {
+        await gate
+        return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+      }
+      throw new Error(`unexpected fetch in test: ${url}`)
+    }) as typeof fetch
+    return { fetchImpl, release }
+  }
+
+  it('overwrite:false — a PUT that lands while the fetch is in flight wins; the import writes nothing', async () => {
+    if (!available) return console.warn(SKIP_MESSAGE)
+    const { fetchImpl, release } = deferredGateFetch({ handle: 'race.test', displayName: 'From Bluesky' })
+
+    const importPromise = importBlueskyProfile(DID, { overwrite: false, fetchImpl })
+    // The import's network call is now blocked on `gate`. Simulate the member's own
+    // `PUT /api/me` landing in that exact window.
+    await writeProfileLikePutApiMe({ bio: 'Member edited this while the import was in flight' })
+    release()
+    const result = await importPromise
+
+    expect(result).toEqual({ imported: false, fields: [] })
+    const profile = await loadProfile(DID)
+    expect(profile).toEqual({ bio: 'Member edited this while the import was in flight' })
+  })
+
+  it('overwrite:true — a PUT that lands while the fetch is in flight is preserved; only the resolved fields merge in', async () => {
+    if (!available) return console.warn(SKIP_MESSAGE)
+    const { fetchImpl, release } = deferredGateFetch({ handle: 'race.test', displayName: 'From Bluesky' })
+
+    const importPromise = importBlueskyProfile(DID, { overwrite: true, fetchImpl })
+    await writeProfileLikePutApiMe({ bio: 'Member edited this while the import was in flight' })
+    release()
+    const result = await importPromise
+
+    expect(result.imported).toBe(true)
+    expect(result.fields).toEqual(['displayName'])
+    const profile = await loadProfile(DID)
+    // The import's own field (displayName) landed, AND the concurrent edit (bio) survived
+    // — proving the merge happened against the row's live value, not a stale in-process copy.
+    expect(profile.displayName).toBe('From Bluesky')
+    expect(profile.bio).toBe('Member edited this while the import was in flight')
+  })
 })
