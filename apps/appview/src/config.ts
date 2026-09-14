@@ -73,6 +73,9 @@ const schema = z.object({
    */
   MULTI_SCHOOL: z.stringbool().default(false),
 
+  /** How long a school's `SchoolActorPort` stays cached (MS §5 and Appendix B). */
+  SCHOOL_ACTOR_CACHE_TTL_MS: z.coerce.number().int().positive().default(1_800_000),
+
   /** Taxonomy authority DID: when set, the skill tree/detail routes ignore skill records from any other DID. */
   AUTHORITY_DID: z.string().default(''),
   /** Handle for the taxonomy authority account (ops/documentation use only). */
