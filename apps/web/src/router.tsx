@@ -1,4 +1,5 @@
 
+import { useEffect } from 'react';
 import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet, useRouterState } from '@tanstack/react-router';
 import { useMe } from './lib/queries';
 import { FlowFrame } from './components/FlowFrame';
@@ -70,6 +71,17 @@ function Shell() {
  */
 function PersonProfileRoute() {
   const { isPending, data } = useMe();
+  // BOTH halves are fetched while the session is still resolving, and neither is
+  // rendered until it has. This route is the one place in the app where which lazy
+  // component renders depends on a query: letting the loser mount and suspend means
+  // React sees a component that called `use()` replaced mid-suspension by a different
+  // one ("called use() to suspend in a previous render but did not call use() when it
+  // finished"), which it logs as an error on every member profile. Warming both chunks
+  // first makes the eventual render synchronous, so there is no suspension to replace.
+  useEffect(() => {
+    void MemberProfileScreen.preload?.();
+    void PublicProfileScreen.preload?.();
+  }, []);
   if (isPending) return <FlowFrame title="Opening this page" description="Just a moment…">{null}</FlowFrame>;
   return data ? <MemberProfileScreen /> : <PublicProfileScreen />;
 }
