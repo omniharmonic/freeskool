@@ -38,7 +38,8 @@
 import { normalizeImage, type StoredImage } from '../../lib/images.js'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, desc, eq, inArray } from 'drizzle-orm'
+import { XRPCError } from '@atproto/api'
+import { and, desc, eq, inArray, sql } from 'drizzle-orm'
 import type { AppEnv, SessionKind } from '../session.js'
 import { requireViewer } from '../session.js'
 import { evidenceFor, roleOf } from '../../lib/roles.js'
@@ -57,6 +58,8 @@ import { isPublicRoleOptIn, publishRoleClaim, setPublicRoleOptIn } from '../../l
 import { badgeSentences, type VouchCount } from '../../lib/badges.js'
 import { receivedWithAttesters, vouchCountsFor } from '../../lib/attestations.js'
 import { importBlueskyProfile } from '../../lib/bsky-profile.js'
+import { isValidChosenHandle } from '../../lib/handles.js'
+import { resolveHandle } from '../../lib/pds.js'
 
 export const me = new Hono<AppEnv>()
 
@@ -204,6 +207,113 @@ me.get('/visibility-defaults', async (c) => {
     oauthDoor: viewer.kind === 'oauth',
     tierBConfirmRequired: true as const,
   })
+})
+
+/**
+ * Task 6: choosing a handle. Benjamin (founder), signing up through the email door,
+ * could never claim a handle of his own choosing — this is the server side of the fix,
+ * consumed by the `/welcome` screen (Task 11).
+ *
+ * `handle:<did>` in `fs_app_meta` is the same best-effort cache `lib/bsky-profile.ts`'s
+ * `cacheHandle` writes and `handlesForDids` above reads as its last resort — kept in the
+ * same shape (`{ handle, resolvedAt }`) so either writer can update it. `fs_custodial_account`
+ * is still the primary source `handlesForDids` checks first, and is updated unconditionally
+ * on a successful change.
+ */
+const HANDLE_CACHE_KEY = (did: string) => `handle:${did}`
+const HANDLE_CHANGES_KEY = (did: string) => `handle-changes:${did}`
+const HANDLE_CHANGE_LIMIT = 3
+const HANDLE_CHANGE_WINDOW_MS = 24 * 60 * 60 * 1000
+
+async function isHandleTaken(fullHandle: string): Promise<boolean> {
+  const rows = await getDb().select({ did: custodialAccount.did }).from(custodialAccount).where(eq(custodialAccount.handle, fullHandle)).limit(1)
+  if (rows.length > 0) return true
+  return (await resolveHandle(fullHandle)) != null
+}
+
+me.get('/handle/check', async (c) => {
+  const prefix = c.req.query('handle') ?? ''
+  const format = isValidChosenHandle(prefix)
+  if (!format.ok) return c.json({ available: false, reason: format.reason })
+  const fullHandle = `${prefix}.${config().handleDomain}`
+  if (await isHandleTaken(fullHandle)) return c.json({ available: false, reason: 'taken' })
+  return c.json({ available: true })
+})
+
+/** Recent (within the last 24h) handle-change timestamps for `did`, oldest first. */
+async function recentHandleChanges(did: string): Promise<string[]> {
+  const rows = await getDb().select({ value: appMeta.value }).from(appMeta).where(eq(appMeta.key, HANDLE_CHANGES_KEY(did))).limit(1)
+  const all = Array.isArray(rows[0]?.value) ? (rows[0]!.value as string[]) : []
+  const cutoff = Date.now() - HANDLE_CHANGE_WINDOW_MS
+  return all.filter((iso) => new Date(iso).getTime() > cutoff)
+}
+
+async function recordHandleChange(did: string, recent: string[]): Promise<void> {
+  const value = [...recent, new Date().toISOString()]
+  await getDb()
+    .insert(appMeta)
+    .values({ key: HANDLE_CHANGES_KEY(did), value, updatedAt: new Date() })
+    .onConflictDoUpdate({ target: appMeta.key, set: { value, updatedAt: new Date() } })
+}
+
+const handleBody = z.object({ handle: z.string() }).strict()
+
+me.put('/handle', async (c) => {
+  const viewer = c.var.viewer!
+  if (viewer.kind !== 'custodial') return c.json({ error: 'NotCustodial' }, 403)
+
+  const parsed = handleBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
+
+  const format = isValidChosenHandle(parsed.data.handle)
+  if (!format.ok) return c.json({ error: 'InvalidHandle', reason: format.reason }, 400)
+
+  const recent = await recentHandleChanges(viewer.did)
+  if (recent.length >= HANDLE_CHANGE_LIMIT) {
+    return c.json({ error: 'TooManyHandleChanges', message: `at most ${HANDLE_CHANGE_LIMIT} handle changes per day` }, 429)
+  }
+
+  const fullHandle = `${parsed.data.handle}.${config().handleDomain}`
+
+  try {
+    const agent = await actorAgent(viewer)
+    await agent.com.atproto.identity.updateHandle({ handle: fullHandle })
+  } catch (err) {
+    if (err instanceof XRPCError && err.error === 'HandleNotAvailable') return c.json({ error: 'HandleTaken' }, 409)
+    if (err instanceof XRPCError && err.error === 'InvalidHandle') return c.json({ error: 'InvalidHandle' }, 400)
+    throw err
+  }
+
+  const now = new Date()
+  await getDb()
+    .update(custodialAccount)
+    .set({ handle: fullHandle })
+    .where(eq(custodialAccount.did, viewer.did))
+  await getDb()
+    .insert(appMeta)
+    .values({ key: HANDLE_CACHE_KEY(viewer.did), value: { handle: fullHandle, resolvedAt: now.toISOString() }, updatedAt: now })
+    .onConflictDoUpdate({ target: appMeta.key, set: { value: { handle: fullHandle, resolvedAt: now.toISOString() }, updatedAt: now } })
+  await recordHandleChange(viewer.did, recent)
+
+  return c.json({ handle: fullHandle })
+})
+
+/**
+ * Sets `fs_member_prefs.onboardedAt` once, idempotently (Task 6 — `/welcome`'s finishing
+ * step). `coalesce` keeps the FIRST timestamp rather than sliding it forward on a repeat
+ * call: "onboarded" is a fact about when it first happened, not a heartbeat.
+ */
+me.post('/onboarded', async (c) => {
+  const did = c.var.viewer!.did
+  const now = new Date()
+  await getDb()
+    .insert(memberPrefs)
+    .values({ did, onboardedAt: now, updatedAt: now })
+    .onConflictDoUpdate({
+      target: memberPrefs.did,
+      set: { onboardedAt: sql`coalesce(${memberPrefs.onboardedAt}, ${now})`, updatedAt: now },
+    })
+  return c.json({ onboarded: true })
 })
 
 /**

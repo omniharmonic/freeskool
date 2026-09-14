@@ -29,7 +29,7 @@ import { oauthClient, OAuthUnavailableError } from '../oauth.js'
 import { config } from '../../config.js'
 import { roleOf } from '../../lib/roles.js'
 import { getDb } from '../../db/index.js'
-import { custodialAccount } from '../../db/schema.js'
+import { custodialAccount, memberPrefs } from '../../db/schema.js'
 import { describeError, log } from '../../lib/logging.js'
 
 export const auth = new Hono<AppEnv>()
@@ -126,7 +126,11 @@ auth.post('/logout', async (c) => {
 
 auth.get('/me', requireViewer, async (c) => {
   const viewer = c.var.viewer!
-  const [role, custodial] = await Promise.all([roleOf(viewer.did), getCustodialAccount(viewer.did)])
+  const [role, custodial, prefsRows] = await Promise.all([
+    roleOf(viewer.did),
+    getCustodialAccount(viewer.did),
+    getDb().select({ onboardedAt: memberPrefs.onboardedAt }).from(memberPrefs).where(eq(memberPrefs.did, viewer.did)).limit(1),
+  ])
   return c.json({
     did: viewer.did,
     kind: viewer.kind,
@@ -134,6 +138,9 @@ auth.get('/me', requireViewer, async (c) => {
     handle: custodial?.handle,
     isCustodial: custodial?.isCustodial ?? false,
     emailVerified: Boolean(custodial?.verifiedAt),
+    // Task 6: consistent with `GET /api/me`'s own `onboarded` field — see `me.ts`'s
+    // `loadDirectoryPrefs`, which reads the same column the same way.
+    onboarded: (prefsRows[0]?.onboardedAt ?? null) != null,
   })
 })
 
