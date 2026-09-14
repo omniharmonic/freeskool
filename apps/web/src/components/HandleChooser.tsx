@@ -3,8 +3,12 @@ import { Button } from './bits';
 import { ApiError } from '../lib/api';
 import { useHandleCheck, useSetHandleMutation } from '../lib/queries';
 
-/** The rule the server enforces (`^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])?$`), said
- * the way a person would say it. Shown for a prefix that doesn't fit. */
+/** Mirror of the server's rule — `HANDLE_PREFIX_RE` in `apps/appview/src/lib/handles.ts:37`.
+ * Keep the two identical: a client that is stricter refuses handles the school would
+ * happily give out, and a client that is looser sends requests that can only 400. */
+export const HANDLE_PREFIX_RE = /^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])?$/;
+
+/** That rule said the way a person would say it. Shown for a prefix that doesn't fit. */
 export const HANDLE_RULE = '3 to 20 characters, lowercase letters, numbers and dashes.';
 
 /** The part after the first dot: a member picks the prefix, the school keeps the domain. */
@@ -56,18 +60,29 @@ export function HandleChooser({
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
+  // The input already trims and lowercases every keystroke, so `prefix` is the
+  // normalized prefix throughout.
+  const typed = prefix;
+  const wellFormed = HANDLE_PREFIX_RE.test(typed);
+
+  // Only a syntactically valid prefix is worth asking the server about: "is this
+  // spelled right" is answerable here, and answering it here means no request per
+  // keystroke while someone is still halfway through typing.
   useEffect(() => {
-    const typed = prefix.trim();
+    if (!wellFormed) {
+      setDebounced('');
+      return;
+    }
     const timer = setTimeout(() => setDebounced(typed), 300);
     return () => clearTimeout(timer);
-  }, [prefix]);
+  }, [typed, wellFormed]);
 
   const check = useHandleCheck(debounced);
   const setHandle = useSetHandleMutation();
 
-  const typed = prefix.trim();
   let state: CheckState = 'idle';
   if (typed.length === 0) state = 'idle';
+  else if (!wellFormed) state = 'invalid';
   else if (typed !== debounced || check.isPending || check.isFetching) state = 'checking';
   else if (check.isError) state = 'error';
   else if (check.data?.available) state = 'available';
@@ -114,7 +129,10 @@ export function HandleChooser({
           <input
             aria-label="Your handle"
             value={prefix}
-            onChange={(event) => setPrefix(event.target.value)}
+            // Normalized as it is typed, not on submit: a phone capitalizes the first
+            // letter of a field by habit, and a capitalized prefix must never reach the
+            // server (nor read back as "invalid" to the member who typed it).
+            onChange={(event) => setPrefix(event.target.value.trim().toLowerCase())}
             maxLength={20}
             autoCapitalize="none"
             autoCorrect="off"
