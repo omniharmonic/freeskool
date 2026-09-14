@@ -28,6 +28,7 @@ export function CalendarScreen() {
   const { data: me } = useMe();
   const school = info?.school;
   const schoolName = me?.school?.name ?? school?.name ?? 'Free School';
+  const signedIn = Boolean(me);
   const today = dayKey(new Date());
   const events = useMemo(() => (data?.events ?? []).filter(event => {
     const matches = `${event.name} ${event.neighborhood ?? ''} ${(event.tags ?? []).join(' ')}`.toLocaleLowerCase().includes(search.toLocaleLowerCase().trim());
@@ -44,6 +45,7 @@ export function CalendarScreen() {
       <div><p className="local-line"><span className="status-dot" />{school?.region || 'Your local learning commons'}</p>
         <h1>Everybody has<br />something to share.</h1>
         <p>A school without walls. Learn a skill, share what you know,<br className="desktop-break" /> and find your people. Always free. Open to everyone.</p>
+        {!signedIn ? <p className="calendar-guest-note">Browse freely. Sign in to RSVP, teach or ask for a class.</p> : null}
         <div className="intro-actions"><Link to="/events/new" className="primary-action"><span aria-hidden="true">＋</span> Post a class</Link><Link to="/requests" className="text-action">Ask to learn something <span aria-hidden="true">↗</span></Link></div>
       </div>
       <div className="commons-drawing"><SchoolMark /><span>Built by all of us.</span></div>

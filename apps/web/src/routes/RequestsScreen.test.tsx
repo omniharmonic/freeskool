@@ -176,6 +176,25 @@ describe('RequestsScreen', () => {
     expect(screen.queryByRole('button', { name: /i can teach this/i })).not.toBeInTheDocument();
   });
 
+  it('shows a masthead "Sign in" link that carries the return path when nobody is signed in', async () => {
+    vi.mocked(api.auth.me).mockRejectedValue(new ApiError(401, 'Unauthorized', 'sign in'));
+    const originalPath = window.location.pathname;
+    window.history.pushState({}, '', '/requests');
+    try {
+      renderScreen();
+      const links = await screen.findAllByRole('link', { name: 'Sign in' });
+      expect(links.some((link) => link.getAttribute('href') === '/signin?next=%2Frequests')).toBe(true);
+    } finally {
+      window.history.pushState({}, '', originalPath);
+    }
+  });
+
+  it('does not show the masthead "Sign in" link once signed in', async () => {
+    renderScreen();
+    await screen.findByRole('button', { name: 'Ask for one' });
+    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
+  });
+
   it('shows an inline error (and does not silently succeed) when "I want this too" fails', async () => {
     vi.mocked(api.requests.rsvp).mockRejectedValueOnce(new ApiError(500, 'ServerError', 'something went wrong'));
     renderScreen();

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
@@ -18,11 +18,24 @@ vi.mock('@tanstack/react-router', () => ({
   ),
 }));
 
-vi.mock('../lib/api', () => ({
-  api: { calendar: { list: vi.fn() } },
-}));
+vi.mock('../lib/api', () => {
+  class ApiError extends Error {
+    status: number;
+    code?: string;
+    constructor(status: number, code: string | undefined, message: string) {
+      super(message);
+      this.name = 'ApiError';
+      this.status = status;
+      this.code = code;
+    }
+  }
+  return {
+    api: { calendar: { list: vi.fn() }, auth: { me: vi.fn() } },
+    ApiError,
+  };
+});
 
-const { api } = await import('../lib/api');
+const { api, ApiError } = await import('../lib/api');
 const { CalendarScreen } = await import('./CalendarScreen');
 
 const listedEvent = {
@@ -57,6 +70,14 @@ function renderScreen() {
     </QueryClientProvider>,
   );
 }
+
+// Signed in by default — matches production for anyone who has already
+// signed in — so the masthead-specific tests below are the ones that flip it.
+beforeEach(() => {
+  vi.mocked(api.auth.me)
+    .mockReset()
+    .mockResolvedValue({ did: 'did:plc:host1', kind: 'custodial', role: 20, isCustodial: true, emailVerified: true, onboarded: true });
+});
 
 describe('CalendarScreen', () => {
   it('marks a peer-routed class "Listed from another school"', async () => {
@@ -125,5 +146,28 @@ describe('calendar discovery', () => {
     renderScreen();
     expect(await screen.findByRole('alert')).toHaveTextContent('couldn’t load');
     expect(screen.queryByText(/nothing on the calendar yet/i)).not.toBeInTheDocument();
+  });
+});
+
+describe('masthead sign-in', () => {
+  beforeEach(() => {
+    vi.mocked(api.calendar.list).mockReset().mockResolvedValue({ from: '', to: '', events: [] });
+  });
+
+  it('shows "Sign in" in the masthead, returning to this page, when nobody is signed in', async () => {
+    vi.mocked(api.auth.me).mockReset().mockRejectedValue(new ApiError(401, 'Unauthorized', 'sign in'));
+    renderScreen();
+
+    const link = await screen.findByRole('link', { name: 'Sign in' });
+    expect(link).toHaveAttribute('href', '/signin?next=%2F');
+    expect(screen.getByText('Browse freely. Sign in to RSVP, teach or ask for a class.')).toBeInTheDocument();
+  });
+
+  it('shows neither the masthead "Sign in" link nor the guest lede once signed in', async () => {
+    renderScreen();
+    await screen.findByText(/nothing on the calendar yet/i);
+
+    expect(screen.queryByRole('link', { name: 'Sign in' })).not.toBeInTheDocument();
+    expect(screen.queryByText('Browse freely. Sign in to RSVP, teach or ask for a class.')).not.toBeInTheDocument();
   });
 });

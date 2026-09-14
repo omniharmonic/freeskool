@@ -24,9 +24,22 @@ vi.mock('@tanstack/react-router', () => ({
   },
 }));
 
-vi.mock('../lib/api', () => ({
-  api: { skills: { tree: vi.fn() } },
-}));
+vi.mock('../lib/api', () => {
+  class ApiError extends Error {
+    status: number;
+    code?: string;
+    constructor(status: number, code: string | undefined, message: string) {
+      super(message);
+      this.name = 'ApiError';
+      this.status = status;
+      this.code = code;
+    }
+  }
+  return {
+    api: { skills: { tree: vi.fn() }, auth: { me: vi.fn() } },
+    ApiError,
+  };
+});
 
 const { api } = await import('../lib/api');
 const { SkillsScreen } = await import('./SkillsScreen');

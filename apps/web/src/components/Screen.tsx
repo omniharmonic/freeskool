@@ -1,6 +1,8 @@
 import { useEffect, useCallback, useRef, useState, type ReactNode } from 'react';
 import { SchoolMark } from './SchoolMark';
 import { useRouter } from '@tanstack/react-router';
+import { useMe } from '../lib/queries';
+import { ApiError } from '../lib/api';
 
 interface ScreenProps {
   title: string;
@@ -33,6 +35,14 @@ export function Screen({ title, eyebrow, standfirst, trailing, back, beneathTitl
   const [collapsed, setCollapsed] = useState(false);
   const frame = useRef<number | null>(null);
   const router = useRouter();
+  // `GET /api/auth/me` 401s with nobody signed in (see `SessionGate`); that's
+  // this masthead's own cue to offer the door, not a loading flash. Skipped on
+  // `back` screens (sub-pages, forms, `SessionGate`'s own fallback) so the
+  // action shows once, on the tabbed screens it's meant for — Calendar,
+  // Skills, Requests, People — rather than doubling up wherever else a signed
+  // out visitor can land.
+  const { isError, error } = useMe();
+  const signedOut = !back && isError && error instanceof ApiError && error.status === 401;
 
   const onScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
     const top = event.currentTarget.scrollTop;
@@ -67,7 +77,10 @@ export function Screen({ title, eyebrow, standfirst, trailing, back, beneathTitl
           >
             {title}
           </span>
-          <div className="flex items-center gap-2">{trailing}</div>
+          <div className="flex items-center gap-2">
+            {trailing}
+            {signedOut ? <SignInAction /> : null}
+          </div>
         </div>
       </div>
 
@@ -86,5 +99,21 @@ export function Screen({ title, eyebrow, standfirst, trailing, back, beneathTitl
         </main>
       </div>
     </>
+  );
+}
+
+/**
+ * The masthead's own sign-in door — the "Ask for one" masthead action on
+ * Requests is the style reference (44px target, plain copy, no exclamation
+ * marks). `next` carries only the pathname: the tab a visitor comes back to,
+ * not their scroll position or search text, and only the paths
+ * `signin-return.ts` recognizes make it past `rememberSignInReturn`.
+ */
+function SignInAction() {
+  const next = encodeURIComponent(window.location.pathname);
+  return (
+    <a href={`/signin?next=${next}`} className="header-print text-blue">
+      Sign in
+    </a>
   );
 }

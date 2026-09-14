@@ -536,6 +536,7 @@ dialog.sheet::backdrop {
 .status-dot { display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--c-green); flex-shrink: 0; }
 .calendar-intro h1 { font-size: clamp(38px, 4.3vw, 58px); line-height: 1.025; font-weight: 600; letter-spacing: -.052em; }
 .calendar-intro h1 + p { margin-top: 20px; font-size: 15px; line-height: 1.65; color: var(--c-ink-soft); }
+.calendar-guest-note { margin-top: 10px; font-size: 13px; color: var(--c-ink-soft); }
 .intro-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 24px; margin-top: 25px; }
 .primary-action { display: inline-flex; min-height: 44px; align-items: center; justify-content: center; gap: 10px; padding: 11px 18px; border-radius: 7px; background: var(--c-blue); color: var(--c-on-blue); font-size: 13px; font-weight: 600; }
 .primary-action:hover { filter: brightness(1.1); }
