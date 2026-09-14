@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { FlowFrame } from '../components/FlowFrame';
 import { HandleChooser } from '../components/HandleChooser';
@@ -55,7 +55,11 @@ export function WelcomeScreen() {
 
   // Already been through this once: there is nothing here that Me does not do
   // better, so send them there rather than offering the whole flow again.
-  const alreadyOnboarded = me?.onboarded === true;
+  // Latched on the FIRST answer only: "Finish" sets the flag and refetches `me`,
+  // and that flip must not hijack the hand-off to the needs board.
+  const arrived = useRef<boolean | null>(null);
+  if (me && arrived.current === null) arrived.current = me.onboarded === true;
+  const alreadyOnboarded = arrived.current === true;
   useEffect(() => {
     if (alreadyOnboarded) void navigate({ to: '/me' });
   }, [alreadyOnboarded, navigate]);
