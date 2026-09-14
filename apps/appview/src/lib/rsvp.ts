@@ -21,6 +21,7 @@ import { and, asc, eq, inArray, lt } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { rsvp } from '../db/schema.js'
 import { rowId } from './ids.js'
+import { legacySchoolDid } from './schools.js'
 
 export type RsvpStatus = 'going' | 'interested' | 'notgoing' | 'waitlisted'
 /** Statuses a CALLER may request. `'waitlisted'` is server-assigned only — see above. */
@@ -32,6 +33,13 @@ export interface UpsertRsvpInput {
   status: RsvpStatus
   alsoPublicRecord?: boolean
   publicRecordUri?: string | null
+  /**
+   * Denormalised from `fs_event_school` so a capacity/waitlist query never crosses
+   * schools (MS §4). Every other query here is keyed by `eventUri`, which is already
+   * school-scoped by `routes/events.ts#loadEvent`'s gate — this is the stamp, not a
+   * second filter.
+   */
+  schoolDid?: string
 }
 
 export async function upsertRsvp(input: UpsertRsvpInput): Promise<{ id: string }> {
@@ -43,6 +51,7 @@ export async function upsertRsvp(input: UpsertRsvpInput): Promise<{ id: string }
       id,
       eventUri: input.eventUri,
       did: input.did,
+      schoolDid: input.schoolDid ?? legacySchoolDid(),
       status: input.status,
       alsoPublicRecord: input.alsoPublicRecord ?? false,
       publicRecordUri: input.publicRecordUri ?? null,

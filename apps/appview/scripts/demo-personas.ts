@@ -167,6 +167,82 @@ export const HOSTS = PERSONAS.filter((p) => p.intent === 'host').map((p) => p.sl
 export const LEARNERS = PERSONAS.filter((p) => p.intent === 'learner').map((p) => p.slug)
 
 /* ------------------------------------------------------------------------- *
+ * A SECOND CITY (federation phase, Task 11)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The labels `seed-demo.ts --schools …` understands. `boulder` is always the
+ * env-configured (legacy) school of the local stack — seeding it is what this file has
+ * always done — and `denver` is a real second school created through `createSchool`.
+ */
+export const DEMO_SCHOOLS = ['boulder', 'denver'] as const
+export type DemoSchool = (typeof DEMO_SCHOOLS)[number]
+
+/**
+ * Where each school is served from in development. `*.localhost` resolves to 127.0.0.1
+ * in Chromium and in curl without touching `/etc/hosts`, so a two-school stack needs no
+ * machine-level setup: `boulder.localhost:5173` and `denver.localhost:5173` both reach
+ * the one Vite dev server, which proxies `/api` to the one AppView with the ORIGINAL
+ * Host header (`changeOrigin: false`), and `withSchool` reads it.
+ */
+export const DEMO_SCHOOL_HOSTS: Record<DemoSchool, string> = {
+  boulder: 'boulder.localhost',
+  denver: 'denver.localhost',
+}
+
+/**
+ * WHO THE LOCAL SCHOOL IS PRETENDING TO BE. The dev stack's env-configured school is
+ * whatever `create-school` last named it (`E2e-86269 Free School` on a box that has run
+ * the e2e suite), while its own published `freeschool.draft.school` record says Boulder —
+ * so the calendar masthead reads one name signed out and another signed in. The seed
+ * settles it: this demo IS Boulder, in the row as well as in the record.
+ */
+export const BOULDER = {
+  label: 'boulder',
+  name: 'Boulder Free School',
+  city: 'Boulder, Colorado',
+} as const
+
+/** Denver's own name and region, as `createSchool` records them. */
+export const DENVER = {
+  label: 'denver',
+  name: 'Denver Free School',
+  city: 'Denver, Colorado',
+  /**
+   * Denver asks for one attended class before you may host, where Boulder asks for
+   * none. That single difference is what makes the SAME person (Maya, below) a **Host in
+   * Boulder and a Member in Denver** off identical claims and an identical profile —
+   * MS §11's unit requirement, made visible in the product.
+   */
+  hostMinAttended: 1,
+} as const
+
+/**
+ * DENVER-ONLY CAST. Small on purpose: the point of the second school is the isolation
+ * boundary, not a second community to browse. Wren is Denver's steward and has no
+ * standing whatsoever in Boulder.
+ */
+export const DENVER_PERSONAS: Persona[] = [
+  {
+    slug: 'wren',
+    displayName: 'Wren',
+    bio: 'Started this one after moving down the hill. Mostly I unlock the room and write down what we agreed.',
+    intent: 'steward',
+    skills: [
+      { id: SKILL.facilitation, level: 'teaching' },
+      { id: SKILL.gardening, level: 'practicing' },
+    ],
+  },
+]
+
+/**
+ * Personas from the Boulder cast who ALSO belong to Denver — the same DID, the same
+ * profile, the same skill claims (all global, MS §2), and deliberately DIFFERENT
+ * vouches, RSVPs and derived role (all per school, MS §4).
+ */
+export const IN_BOTH_SCHOOLS = ['maya'] as const
+
+/* ------------------------------------------------------------------------- *
  * Identicons
  * ------------------------------------------------------------------------- */
 

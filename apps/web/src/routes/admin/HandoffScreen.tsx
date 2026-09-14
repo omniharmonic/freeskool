@@ -54,6 +54,7 @@ export function HandoffScreen() {
       title="Hand-off"
       current="handoff"
       standfirst="Any steward can hand stewardship to another member at any time, so this school never depends on one person staying forever."
+      help="This makes a one-time link that turns whoever opens it into a steward alongside you. It does not remove you, and it expires — so send it to the person you mean and nobody else."
     >
       <div className="plate space-y-5">
         <label className="block">

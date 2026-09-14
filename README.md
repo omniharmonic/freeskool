@@ -111,6 +111,21 @@ The hosts have to actually be allowed to host, so the seed checks the school's p
 
 Running a second stack beside a first (the e2e suite does this): `APPVIEW_PORT=4100 APPVIEW_PUBLIC_URL=http://localhost:4100 … pnpm --filter @freeschool/appview dev` and `APPVIEW_PROXY_TARGET=http://localhost:4100 pnpm --filter @freeschool/web dev`.
 
+#### Two schools locally
+
+One AppView can host several cities (`docs/superpowers/specs/2026-09-13-multi-school-design.md`). To see two:
+
+```bash
+MULTI_SCHOOL=1 pnpm --filter @freeschool/appview dev          # the flag that makes the Host header decide
+pnpm --filter @freeschool/appview seed:demo --schools boulder,denver
+```
+
+Then open **`http://boulder.localhost:5173`** and **`http://denver.localhost:5173`**. `*.localhost` resolves to loopback in every browser (RFC 6761 — no `/etc/hosts` entry), and the Vite dev proxy forwards the original `Host`, so the AppView resolves the city from it. Denver is created through the same `createSchool` an operator would use, gets a real DID on the local PDS, and asks for one attended class before hosting — so **Maya is a Host in Boulder and a Member in Denver** off the same profile and the same claims, with different vouches and different RSVPs in each. Wren is Denver's steward and has no steward tools in Boulder.
+
+Two things differ from production, both on purpose. Sessions are **per city** locally: Chromium refuses a cookie with `Domain=localhost`, so `SESSION_COOKIE_DOMAIN` is left empty and each host has its own sign-in (production sets `.freeskool.xyz`, and the switcher carries you across). And `seed:demo` makes the `*.localhost` hosts each school's **canonical** domain, so the school switcher and `/schools` link somewhere that answers.
+
+The two-school journey is `pnpm --filter @freeschool/web exec playwright test e2e/multi-school.spec.ts`, and `pnpm --filter @freeschool/appview privacy-audit` reports per school. The rollout order for an existing single-school deployment is `docs/runbooks/multi-school-rollout.md` — **back-fill before the second school exists**, and that runbook says why twice.
+
 **Signing in with an existing ATProto account cannot work on `http://localhost`** — a confidential OAuth client needs an `https:` `client_id` with a real hostname — so those routes answer `503 OAuthNotConfigured` locally, by design. See `apps/appview/README.md` §5. The primary door (a new Free School identity) is unaffected, and is the door the project wants people to use.
 
 ### 7. Check it

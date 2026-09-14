@@ -52,7 +52,10 @@ describe('POST /signin', () => {
     const res = await post('/signin', { email: 'door@example.org' })
     expect(res.status).toBe(201)
     const body = (await res.json()) as { did: string; handle: string }
-    expect(signup).toHaveBeenCalledWith({ email: 'door@example.org' })
+    // `schoolDid` rides along since the federation phase: the door joins the school the
+    // request resolved to (`''` here — this suite mounts the router without `withSchool`,
+    // which is exactly the case `schoolDidOrLegacy` exists to keep working).
+    expect(signup).toHaveBeenCalledWith({ email: 'door@example.org', schoolDid: '' })
     expect(body).toMatchObject({ did: 'did:plc:door', handle: 'door.test' })
   })
 

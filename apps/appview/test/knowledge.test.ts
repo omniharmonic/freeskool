@@ -5,7 +5,7 @@ process.env.FEEDBACK_BALLOT_PEPPER ??= 'knowledge-test-pepper'
 import { beforeAll,beforeEach,afterAll,it,expect,vi } from 'vitest'
 import type { Context } from 'hono'
 import { pgAvailable,testDb,truncate,closeTestDb } from './helpers/pg.js'
-import { appMeta } from '../src/db/schema.js'
+import { appMeta, membership } from '../src/db/schema.js'
 import { createSession } from '../src/http/session.js'
 import { signSessionId } from '../src/lib/crypto.js'
 import { config } from '../src/config.js'
@@ -20,7 +20,11 @@ vi.mock('../src/http/routes/events.js',async()=>({...await vi.importActual('../s
 const { createApp }=await import('../src/http/app.js')
 let available=false
 beforeAll(async()=>{available=await pgAvailable();expect(available).toBe(true)})
-beforeEach(async()=>{if(available)await truncate('fs_app_meta','fs_session','fs_member');role=20;indexed.resources=[];indexed.claims=[];indexed.events=[];indexed.linkedClass=null;writes.put.mockReset().mockResolvedValue({data:{uri:`at://${did}/freeschool.draft.resource/new`}})})
+beforeEach(async()=>{if(available){await truncate('fs_app_meta','fs_session','fs_member','fs_membership');
+ // `GET /api/practitioners` scopes to `currentSchool`'s membership (MS §10); SCHOOL_DID
+ // is unset in this file, so that's the legacy `''` school, same as every other DID here.
+ await testDb().insert(membership).values({did,schoolDid:'',door:'custodial'})}
+ role=20;indexed.resources=[];indexed.claims=[];indexed.events=[];indexed.linkedClass=null;writes.put.mockReset().mockResolvedValue({data:{uri:`at://${did}/freeschool.draft.resource/new`}})})
 afterAll(async()=>{if(available)await closeTestDb()})
 async function cookie(){const id=await createSession({header:()=>{}} as unknown as Context,did,'custodial');return `${config().SESSION_COOKIE}=${signSessionId(id)}`}
 it('keeps private profiles and avatars inaccessible until explicit opt-in, and revokes access immediately',async()=>{

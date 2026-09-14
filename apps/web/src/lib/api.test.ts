@@ -46,6 +46,22 @@ describe('api client', () => {
     await expect(api.auth.signup({ email: 'not-an-email' })).rejects.toBeInstanceOf(ApiError);
   });
 
+  it('schools.nearby takes the envelope the route actually sends, or a bare array', async () => {
+    const fort = { did: 'did:plc:fc', name: 'Fort Collins Free School', tags: [], peers: [] };
+    // What `GET /api/schools/nearby` returns today.
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(200, { schools: [fort] }));
+    expect(await api.schools.nearby()).toEqual([fort]);
+
+    // …and the bare-array shape, so the page does not depend on which one lands.
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(200, [fort]));
+    expect(await api.schools.nearby()).toEqual([fort]);
+  });
+
+  it('schools.nearby lets a 404 through as an ApiError — the page shows an empty section, not a retry', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(404, { error: 'NotFound' }));
+    await expect(api.schools.nearby()).rejects.toMatchObject({ status: 404 });
+  });
+
   it('events.icsHref builds the .ics path without making a request', () => {
     expect(api.events.icsHref('x')).toBe('/api/events/x.ics');
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();

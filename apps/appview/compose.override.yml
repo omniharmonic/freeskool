@@ -12,7 +12,14 @@
 #
 # `.test` is reserved by RFC 6761 for exactly this purpose and is NOT in atproto's
 # disallowed list, so it works. Set `PDS_HANDLE_DOMAIN=test` for the AppView to match.
+#
+# `.test2` is the SECOND handle domain, and it is here so the neutral-hostname migration
+# (`apps/appview/scripts/migrate-pds-hostname.ts`, `docs/runbooks/pds-hostname-migration.md`)
+# can be rehearsed exactly as it will run on production: a throwaway dev account really
+# moves from `<prefix>.test` to `<prefix>.test2` and back, against the real plc.directory.
+# Both stay listed at once because the production transition serves both the old and the
+# new handle domain for its whole duration — that overlap IS the rollback plan.
 services:
   pds:
     environment:
-      PDS_SERVICE_HANDLE_DOMAINS: ".test,.localhost"
+      PDS_SERVICE_HANDLE_DOMAINS: ".test,.test2,.localhost"

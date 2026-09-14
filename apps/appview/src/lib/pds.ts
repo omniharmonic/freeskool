@@ -234,6 +234,58 @@ export async function getRecord(
   return (await res.json()) as { uri: string; cid?: string; value: Record<string, unknown> }
 }
 
+/**
+ * WHY THIS EXISTS BESIDE `getRecord`. `getRecord` answers `null` for every unhappy
+ * outcome — a record that is genuinely absent, a PDS that is down, a 502 from the edge, a
+ * DNS failure. That is fine for a READ (show nothing), and dangerous for a
+ * READ-MODIFY-WRITE: "no record" and "I could not read the record" lead to opposite
+ * actions, and taking the second for the first means re-writing the school's record from
+ * scratch — dropping its `policy` pointer, which is how a transient 503 would silently
+ * relax the destructive-action threshold to the defaults (`lib/policy.ts`).
+ *
+ * So: `{ found: false }` ONLY for an explicit `RecordNotFound`, and a throw for anything
+ * else, including a network error. A caller doing a read-modify-write must let that throw
+ * reach the user rather than invent a record.
+ */
+export class RecordReadError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'RecordReadError'
+  }
+}
+
+export type RecordRead =
+  | { found: true; uri: string; cid?: string; value: Record<string, unknown> }
+  | { found: false }
+
+export async function readRecord(
+  repo: string,
+  collection: string,
+  rkey: string,
+  base = config().PDS_URL,
+): Promise<RecordRead> {
+  const url = new URL('/xrpc/com.atproto.repo.getRecord', base)
+  url.searchParams.set('repo', repo)
+  url.searchParams.set('collection', collection)
+  url.searchParams.set('rkey', rkey)
+  // A network failure rejects, and is deliberately NOT caught: see the note above.
+  const res = await fetch(url)
+  if (res.ok) {
+    const body = (await res.json()) as { uri: string; cid?: string; value: Record<string, unknown> }
+    return { found: true, ...body }
+  }
+  const detail = (await res.json().catch(() => ({}))) as { error?: unknown; message?: unknown }
+  const code = typeof detail.error === 'string' ? detail.error : `HTTP${res.status}`
+  // The atproto error for "this repo has no such record". Everything else — RepoNotFound,
+  // RepoDeactivated, an auth failure, a gateway error — is a read we did not get.
+  if (code === 'RecordNotFound') return { found: false }
+  throw new RecordReadError(res.status, code, typeof detail.message === 'string' ? detail.message : code)
+}
+
 export async function listRecords(
   repo: string,
   collection: string,

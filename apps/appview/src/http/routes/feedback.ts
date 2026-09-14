@@ -23,6 +23,8 @@ import type { AppEnv } from '../session.js'
 import { requireViewer } from '../session.js'
 import { feedbackSummary, submitFeedback, FeedbackError } from '../../lib/feedback.js'
 import { loadEvent } from './events.js'
+import { currentSchool } from '../school-context.js'
+import { schoolScope } from '../../lib/school-scope.js'
 import { getDb } from '../../db/index.js'
 import { attendance } from '../../db/schema.js'
 import { enqueueNotification } from '../../notifications/dispatch.js'
@@ -49,7 +51,8 @@ feedbackRoutes.post('/feedback', requireViewer, async (c) => {
   const viewer = c.var.viewer!
   const { eventUri, direction, aspects, text } = parsed.data
 
-  const loaded = await loadEvent(eventUri)
+  const schoolDid = currentSchool(c).did
+  const loaded = await loadEvent(eventUri, schoolDid)
   if (!loaded) return c.json({ error: 'NotFound' }, 404)
 
   const attended = await getDb()
@@ -59,6 +62,7 @@ feedbackRoutes.post('/feedback', requireViewer, async (c) => {
       and(
         eq(attendance.eventUri, eventUri),
         eq(attendance.attendeeDid, viewer.did),
+        schoolScope(attendance.schoolDid, schoolDid),
         eq(attendance.participated, true),
         isNull(attendance.voidedAt),
       ),
@@ -79,6 +83,7 @@ feedbackRoutes.post('/feedback', requireViewer, async (c) => {
       direction,
       ...(aspects ? { aspects } : {}),
       ...(text ? { text } : {}),
+      schoolDid,
     })
   } catch (err) {
     if (err instanceof FeedbackError) return c.json({ error: err.code, message: err.message }, err.status as 409)
@@ -99,7 +104,7 @@ feedbackRoutes.post('/feedback', requireViewer, async (c) => {
    * `dedupKey` carries no timestamp, so `enqueueNotification` claims it once per event and
    * every later ballot is silent. With NO actor, ever.
    */
-  const summary = await feedbackSummary(eventUri)
+  const summary = await feedbackSummary(eventUri, schoolDid)
   if (summary.released) {
     await enqueueNotification({
       did: loaded.hostDid,
@@ -108,6 +113,7 @@ feedbackRoutes.post('/feedback', requireViewer, async (c) => {
       title: 'Feedback on a class you taught',
       body: 'Enough people have answered for a summary. It stays anonymous.',
       navigate: `/events/${encodeURIComponent(eventUri)}/feedback`,
+      schoolDid,
     })
   }
 
@@ -116,15 +122,16 @@ feedbackRoutes.post('/feedback', requireViewer, async (c) => {
 
 feedbackRoutes.get('/events/:id/feedback-summary', async (c) => {
   const eventUri = decodeURIComponent(c.req.param('id'))
-  const loaded = await loadEvent(eventUri)
+  const schoolDid = currentSchool(c).did
+  const loaded = await loadEvent(eventUri, schoolDid)
   if (!loaded) return c.json({ error: 'NotFound' }, 404)
   // #14: the same guard as `GET /api/events/:id`. An unlisted or moderated-away class is
   // not discoverable, and neither is its feedback — otherwise this endpoint confirms that a
   // given at-uri exists, and how busy it was, for an event the calendar will not show.
   const viewer = c.var.viewer
-  const relation = viewer ? await viewerRelation(viewer, eventUri, loaded.hostDid) : 'public'
+  const relation = viewer ? await viewerRelation(viewer, eventUri, loaded.hostDid, currentSchool(c).did) : 'public'
   if (!loaded.listed && relation === 'public') return c.json({ error: 'NotFound' }, 404)
-  const summary = await feedbackSummary(eventUri)
+  const summary = await feedbackSummary(eventUri, schoolDid)
   // Everyone who can see the class sees the same summary. The host has no privileged view.
   return c.json(summary)
 })

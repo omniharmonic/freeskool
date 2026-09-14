@@ -5,6 +5,7 @@
  * nothing — see `jobs/newsletter.ts#SendNewsletterDeps`.
  */
 process.env.SCHOOL_DID = 'did:plc:school'
+const SCHOOL = 'did:plc:school'
 
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { eq } from 'drizzle-orm'
@@ -53,7 +54,7 @@ describe('sendNewsletterIssue', () => {
 
     const draft = await composeNewsletterIssue('2026-09')
     const { calls, sendFn } = fakeSender()
-    const res = await sendNewsletterIssue(draft.id, { sendFn })
+    const res = await sendNewsletterIssue(draft.id, SCHOOL, { sendFn })
 
     expect(res.ok).toBe(true)
     if (res.ok) {
@@ -87,7 +88,7 @@ describe('sendNewsletterIssue', () => {
       calls.push(mail)
       return { delivered: true, transport: 'fake' }
     }
-    const res = await sendNewsletterIssue(draft.id, { sendFn })
+    const res = await sendNewsletterIssue(draft.id, SCHOOL, { sendFn })
 
     expect(res.ok).toBe(true)
     if (res.ok) {
@@ -108,16 +109,16 @@ describe('sendNewsletterIssue', () => {
     await subscribe('did:plc:subscriber-d', 'd@example.org')
     const draft = await composeNewsletterIssue('2026-09')
     const { sendFn } = fakeSender()
-    const first = await sendNewsletterIssue(draft.id, { sendFn })
+    const first = await sendNewsletterIssue(draft.id, SCHOOL, { sendFn })
     expect(first.ok).toBe(true)
-    const second = await sendNewsletterIssue(draft.id, { sendFn })
+    const second = await sendNewsletterIssue(draft.id, SCHOOL, { sendFn })
     expect(second.ok).toBe(false)
     if (!second.ok) expect(second.error).toBe('AlreadySent')
   })
 
   it('404s on an unknown issue id', async () => {
     if (!available) return
-    const res = await sendNewsletterIssue('not-a-real-id', { sendFn: fakeSender().sendFn })
+    const res = await sendNewsletterIssue('not-a-real-id', SCHOOL, { sendFn: fakeSender().sendFn })
     expect(res.ok).toBe(false)
     if (!res.ok) expect(res.status).toBe(404)
   })

@@ -44,6 +44,14 @@ export type SchoolAction =
    * publishing it did.
    */
   | 'retract-role-claim'
+  /**
+   * The school re-publishing its OWN `freeschool.draft.school` record's `peers` and
+   * `tags` — the peer registry and the routing tags as a record (federation ruling 9,
+   * interop gap 4b). Steward-level and not destructive: it names other SCHOOLS, never a
+   * member, and nothing of anyone else's is removed by it. Distinct from `write-policy`,
+   * which touches the same record for a different reason, so an audit row says which.
+   */
+  | 'set-peers'
 
 /**
  * Actions that require the policy's destructiveActionStewards threshold (default 2).

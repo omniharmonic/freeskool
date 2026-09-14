@@ -1,0 +1,987 @@
+/**
+ * THE TENANT-ISOLATION SUITE (MS §11's "the one that matters").
+ *
+ * Two schools, three members — one in A alone, one in B alone, one in both — and a
+ * ROUTE TABLE. For every route in the table the suite asks the same question twice, once
+ * on each school's host, and asserts that the answer contains nothing that belongs to the
+ * other school: not a DID, not an event URI, not a notification title, not a vouch.
+ *
+ * The point of the table is that adding a route is ONE LINE. A new list endpoint that
+ * forgets its `school_did` filter fails here rather than in production, which is the only
+ * way this invariant survives the next twenty routes (Task 11 finishes the table).
+ *
+ * WHY THE LEGACY SCHOOL IS A THIRD DID. `lib/school-scope.ts` widens the predicate to
+ * include unstamped (`''`) rows for the legacy school alone. Making neither A nor B the
+ * legacy school keeps both of them on the strict `=` path, so a passing assertion here
+ * says something about tenancy rather than about the transition rule.
+ *
+ * R9/MS §10, encoded as expectations rather than prose:
+ *   - `GET /api/members/:did` is 404 — never 403 — for a DID with no shared school,
+ *     because a 403 confirms existence;
+ *   - a steward of A gets 403 on B's steward surface, not a quieter kind of yes;
+ *   - a class on A's calendar is 404 on B, so its roster cannot even be addressed.
+ */
+process.env.MULTI_SCHOOL = '1'
+// Deliberately neither school — see the module doc.
+process.env.SCHOOL_DID = 'did:plc:school-legacy'
+process.env.SCHOOL_HANDLE = 'legacy.test'
+process.env.AUTHORITY_DID = 'did:plc:taxonomy'
+process.env.DATABASE_URL ??= 'postgres://freeschool:freeschool@localhost:5434/freeschool'
+process.env.PDS_URL ??= 'http://localhost:3000'
+process.env.PDS_HANDLE_DOMAIN ??= 'test'
+process.env.SESSION_SECRET ??= 'tenant-isolation-session-secret'
+process.env.CUSTODY_KEYS ??= `v1:${Buffer.alloc(32, 31).toString('base64')}`
+process.env.FEEDBACK_BALLOT_PEPPER ??= 'tenant-isolation-pepper'
+process.env.APPVIEW_PUBLIC_URL ??= 'http://localhost:4000'
+
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const SCHOOL_A = 'did:plc:school-a'
+const SCHOOL_B = 'did:plc:school-b'
+const HOST_A = 'a.test'
+const HOST_B = 'b.test'
+
+/**
+ * No DID here may be a SUBSTRING of another: the leak assertion is a substring search
+ * over the whole response body, and `…member-a` inside `…member-both` would fail every
+ * route for a reason that has nothing to do with tenancy.
+ */
+const MEMBER_A = 'did:plc:tenant-alice'
+const MEMBER_B = 'did:plc:tenant-bruno'
+const MEMBER_BOTH = 'did:plc:tenant-mira'
+const STEWARD_A = 'did:plc:tenant-quinn'
+/** Author of the needs-board request: in neither school, so its at-uri names no secret. */
+const ASKER = 'did:plc:tenant-asker'
+
+const SKILL = 'at://did:plc:taxonomy/freeschool.draft.skill/welding'
+const EVENT_A = `at://${MEMBER_A}/community.lexicon.calendar.event/ea`
+const EVENT_B = `at://${MEMBER_B}/community.lexicon.calendar.event/eb`
+const REQUEST_A = `at://${ASKER}/freeschool.draft.request/ra`
+/** The month the seeded classes fall in — both are 24h out, so "now" unless that crosses. */
+const ZINE_MONTH = new Date(Date.now() + 86_400_000).toISOString().slice(0, 7)
+
+/**
+ * Strings that belong to exactly one school and must never cross. Every one of them is
+ * also a PRESENCE needle for at least one route below (see `present`), so the table
+ * proves both halves at once: the route shows its own school's row, and never the
+ * other's. A secret nothing asserts the presence of is a secret nothing is testing.
+ */
+const SECRETS: Record<'a' | 'b', string[]> = {
+  a: [
+    MEMBER_A,
+    'alice.test',
+    EVENT_A,
+    'vouch-from-a',
+    'Notification from A',
+    'proposal-a',
+    'case-a',
+    'reason-a',
+    'issue-a',
+    'pds-a.example',
+  ],
+  b: [
+    MEMBER_B,
+    'bruno.test',
+    EVENT_B,
+    'vouch-from-b',
+    'Notification from B',
+    'proposal-b',
+    'case-b',
+    'reason-b',
+    'issue-b',
+    'pds-b.example',
+  ],
+}
+
+/**
+ * DIFFERENT POLICY, DIFFERENT ROLE, SAME PERSON — MS §11's unit requirement, expressed
+ * where it is observable. `MEMBER_BOTH` has three confirmed attendances in A and one in
+ * B; A lets a member host after two and B after five. So the same member is a **Host in
+ * A and a Member in B**, which is what `/api/me`, `/api/me/badges` and
+ * `/api/school/how-it-works` assert as their own-school presence needle.
+ */
+const HOST_MIN_ATTENDED: Record<'a' | 'b', number> = { a: 2, b: 5 }
+const ATTENDED_BOTH: Record<'a' | 'b', number> = { a: 3, b: 1 }
+
+/* ────────────────────────────── the fake index ────────────────────────────── */
+
+const { skillRecords, skillClaimRecords, eventRecords, requestRecords, eventConfigs } = vi.hoisted(() => ({
+  skillRecords: [
+    {
+      uri: 'at://did:plc:taxonomy/freeschool.draft.skill/welding',
+      did: 'did:plc:taxonomy',
+      collection: 'freeschool.draft.skill',
+      rkey: 'welding',
+      cid: 'bafy',
+      record: { id: 'welding', label: 'Welding' },
+    },
+  ],
+  /** Public `freeschool.draft.skillClaim` records — the member's OWN statement (MS §2). */
+  skillClaimRecords: [] as Array<Record<string, unknown>>,
+  eventRecords: [] as Array<Record<string, unknown>>,
+  requestRecords: [] as Array<Record<string, unknown>>,
+  eventConfigs: [] as Array<{ uri: string; did: string; eventUri: string }>,
+}))
+
+vi.mock('../src/index/indexer.js', () => ({
+  resetIndexer: () => {},
+  getIndexer: async () => ({
+    contrail: {
+      async query(short: string) {
+        if (short === 'skill') return { records: skillRecords }
+        if (short === 'skillClaim') return { records: skillClaimRecords }
+        if (short === 'event') return { records: eventRecords }
+        if (short === 'request') return { records: requestRecords }
+        return { records: [] }
+      },
+    },
+    db: {
+      prepare(sqlText: string) {
+        const short = /records_([A-Za-z0-9_]+)/.exec(sqlText)?.[1]
+        return {
+          bind(arg: string) {
+            return {
+              all: async () => {
+                if (short !== 'eventConfig') return { results: [] }
+                const rows = eventConfigs.filter((r) => r.eventUri === arg)
+                return {
+                  results: rows.map((r) => ({
+                    uri: r.uri,
+                    did: r.did,
+                    rkey: r.uri.split('/').pop(),
+                    cid: 'bafy',
+                    record: JSON.stringify({ event: { uri: r.eventUri }, visibility: 'listed', tags: ['skillshare'] }),
+                    time_us: 1,
+                    indexed_at: 1,
+                  })),
+                }
+              },
+              first: async () => null,
+            }
+          },
+        }
+      },
+    },
+    async notify() {},
+  }),
+}))
+
+// No network: the school record is simply absent, which `refreshPolicyCache` treats as
+// "a school that has not written a policy yet" and caches as the defaults.
+vi.mock('../src/lib/pds.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/lib/pds.js')>()),
+  getRecord: async () => null,
+}))
+
+import { eq } from 'drizzle-orm'
+import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
+import { createApp } from '../src/http/app.js'
+import { config } from '../src/config.js'
+import { newSessionId, signSessionId } from '../src/lib/crypto.js'
+import { resetSchoolContextCache } from '../src/http/school-context.js'
+import {
+  appMeta,
+  attendance,
+  attendanceTally,
+  attestation,
+  custodialAccount,
+  invite,
+  eventSchool,
+  moderationQueue,
+  newsletterIssue,
+  notificationFeed,
+  peer,
+  requestRsvp,
+  rsvp,
+  policyCache,
+  school,
+  schoolDomain,
+  session,
+  skillClaimIndex,
+  skillProposal,
+  steward,
+} from '../src/db/schema.js'
+import { joinSchool, leaveSchool } from '../src/lib/membership.js'
+import { subscribe } from '../src/lib/newsletter-subscriptions.js'
+import { isPublicRoleOptIn, publishRoleClaim } from '../src/lib/membership-claims.js'
+import { setSchoolActor } from '../src/lib/school-actors.js'
+import { Role } from '@freeschool/shared'
+import type { Did, SchoolActorPort } from '@freeschool/school-actor'
+import { rowId } from '../src/lib/ids.js'
+
+/**
+ * Which schools a role claim was RETRACTED from. The port is faked wholesale: the
+ * assertions here are about which school a write is aimed at, and a real PDS would only
+ * add a network dependency to that question.
+ */
+const retractions: string[] = []
+
+function fakePort(): SchoolActorPort {
+  return {
+    async describeActor(i: { schoolDid: Did }) {
+      return { schoolDid: i.schoolDid, pdsEndpoint: 'http://pds.test', custody: 'app-owned' as const, online: true }
+    },
+    async authorize() {
+      return { allowed: true as const, auditId: 'audit' }
+    },
+    async putRecordAsSchool(i: { schoolDid: Did; collection: string; rkey: string }) {
+      return { uri: `at://${i.schoolDid}/${i.collection}/${i.rkey}`, cid: 'bafy', auditId: 'audit' }
+    },
+    async deleteRecordAsSchool(i: { schoolDid: Did }) {
+      retractions.push(i.schoolDid)
+      return { auditId: 'audit' }
+    },
+  } as unknown as SchoolActorPort
+}
+
+let available = false
+
+beforeAll(async () => {
+  available = await pgAvailable()
+  if (!available) console.warn(SKIP_MESSAGE)
+})
+
+afterAll(async () => {
+  setSchoolActor(undefined)
+  if (available) await closeTestDb()
+})
+
+async function cookieFor(did: string): Promise<string> {
+  const id = newSessionId()
+  await testDb()
+    .insert(session)
+    .values({ id, did, kind: 'custodial', expiresAt: new Date(Date.now() + 86_400_000) })
+  return `${config().SESSION_COOKIE}=${signSessionId(id)}`
+}
+
+const cookies: Record<string, string> = {}
+
+beforeEach(async () => {
+  if (!available) return
+  await truncate(
+    'fs_school',
+    'fs_school_domain',
+    'fs_membership',
+    'fs_member',
+    'fs_member_prefs',
+    'fs_session',
+    'fs_steward',
+    'fs_attestation',
+    'fs_skill_claim_index',
+    'fs_skill_proposal',
+    'fs_notification_feed',
+    'fs_rsvp',
+    'fs_request_rsvp',
+    'fs_event_school',
+    'fs_policy_cache',
+    'fs_custodial_account',
+    'fs_invite',
+    'fs_app_meta',
+    'fs_attendance',
+    'fs_attendance_tally',
+    'fs_moderation_queue',
+    'fs_newsletter_issue',
+    'fs_newsletter_subscription',
+    'fs_peer',
+  )
+  resetSchoolContextCache()
+  setSchoolActor(fakePort())
+  retractions.length = 0
+  eventRecords.length = 0
+  requestRecords.length = 0
+  skillClaimRecords.length = 0
+  eventConfigs.length = 0
+  for (const did of [MEMBER_A, MEMBER_B]) {
+    skillClaimRecords.push({
+      uri: `at://${did}/freeschool.draft.skillClaim/welding`,
+      did,
+      collection: 'freeschool.draft.skillClaim',
+      rkey: 'welding',
+      cid: 'bafy',
+      record: { skill: SKILL, level: 'teaching' },
+    })
+  }
+
+  const db = testDb()
+  await db.insert(school).values([
+    { did: SCHOOL_A, label: 'a', name: 'A Free School', handle: HOST_A },
+    { did: SCHOOL_B, label: 'b', name: 'B Free School', handle: HOST_B },
+  ])
+  /**
+   * A policy for each school with `publishRoles` ON, so the role-claim gate reaches the
+   * per-member opt-in rather than short-circuiting on policy. `policy_uri` is non-null on
+   * purpose: `currentPolicyUri` refreshes when it is null, and a refresh (the school
+   * record is mocked absent) would write the defaults back over this.
+   */
+  await db.insert(policyCache).values([
+    {
+      schoolDid: SCHOOL_A,
+      policyUri: `at://${SCHOOL_A}/freeschool.draft.policy/p1`,
+      thresholds: {
+        memberRequires: 'invite-or-vouch',
+        publishRoles: true,
+        hostMinAttended: HOST_MIN_ATTENDED.a,
+      },
+    },
+    {
+      schoolDid: SCHOOL_B,
+      policyUri: `at://${SCHOOL_B}/freeschool.draft.policy/p1`,
+      thresholds: {
+        memberRequires: 'invite-or-vouch',
+        publishRoles: true,
+        hostMinAttended: HOST_MIN_ATTENDED.b,
+      },
+    },
+  ])
+  await db.insert(schoolDomain).values([
+    { host: HOST_A, schoolDid: SCHOOL_A, kind: 'canonical' },
+    { host: HOST_B, schoolDid: SCHOOL_B, kind: 'canonical' },
+  ])
+
+  /**
+   * `hasProfile` and the `invite-or-vouch` member gate are what `deriveRole` runs on, so
+   * every person here needs an identity (global) and admission evidence IN EACH SCHOOL
+   * they belong to (per school) — otherwise everyone is a Visitor and the steward
+   * assertions below would pass for the wrong reason.
+   */
+  for (const [did, handle] of [
+    [MEMBER_A, 'alice.test'],
+    [MEMBER_B, 'bruno.test'],
+    [MEMBER_BOTH, 'mira.test'],
+    [STEWARD_A, 'quinn.test'],
+  ] as const) {
+    await db.insert(custodialAccount).values({ did, handle, email: `${handle}@example.org`, keyVersion: 'v1' })
+  }
+  for (const [did, schoolDid] of [
+    [MEMBER_A, SCHOOL_A],
+    [MEMBER_B, SCHOOL_B],
+    [MEMBER_BOTH, SCHOOL_A],
+    [MEMBER_BOTH, SCHOOL_B],
+    [STEWARD_A, SCHOOL_A],
+    [STEWARD_A, SCHOOL_B],
+  ] as const) {
+    await db
+      .insert(invite)
+      .values({ code: rowId(), schoolDid, inviterDid: 'did:plc:tenant-founder', usedByDid: did, usedAt: new Date() })
+  }
+
+  await joinSchool(MEMBER_A, SCHOOL_A, 'custodial')
+  await joinSchool(MEMBER_B, SCHOOL_B, 'custodial')
+  await joinSchool(MEMBER_BOTH, SCHOOL_A, 'custodial')
+  await joinSchool(MEMBER_BOTH, SCHOOL_B, 'custodial')
+  // A steward of A, and an ordinary member of B — exactly the person MS §5's acceptance
+  // criterion is about ("a Denver steward has no steward power on Boulder").
+  await joinSchool(STEWARD_A, SCHOOL_A, 'custodial')
+  await joinSchool(STEWARD_A, SCHOOL_B, 'custodial')
+  await db.insert(steward).values({ did: STEWARD_A, schoolDid: SCHOOL_A })
+
+  // The same member's own claim, GLOBAL by design (MS §2) — it is the LIST of who holds
+  // it that must be answered within one school.
+  await db.insert(skillClaimIndex).values([
+    { did: MEMBER_A, skillUri: SKILL, level: 'teaching', visibility: 'public' },
+    { did: MEMBER_B, skillUri: SKILL, level: 'teaching', visibility: 'public' },
+    { did: MEMBER_BOTH, skillUri: SKILL, level: 'teaching', visibility: 'public' },
+  ])
+
+  // One vouch for MEMBER_BOTH in each school, from that school's own member.
+  await db.insert(attestation).values([
+    { id: 'vouch-from-a', attesterDid: MEMBER_A, subjectDid: MEMBER_BOTH, skillUri: SKILL, schoolDid: SCHOOL_A },
+    { id: 'vouch-from-b', attesterDid: MEMBER_B, subjectDid: MEMBER_BOTH, skillUri: SKILL, schoolDid: SCHOOL_B },
+  ])
+
+  await db.insert(skillProposal).values([
+    { id: 'proposal-a', skillUri: SKILL, schoolDid: SCHOOL_A, proposerDid: MEMBER_A, status: 'published' },
+    { id: 'proposal-b', skillUri: SKILL, schoolDid: SCHOOL_B, proposerDid: MEMBER_B, status: 'published' },
+  ])
+
+  await db.insert(notificationFeed).values([
+    { id: rowId(), did: MEMBER_BOTH, schoolDid: SCHOOL_A, category: 'event.reminder', title: 'Notification from A' },
+    { id: rowId(), did: MEMBER_BOTH, schoolDid: SCHOOL_B, category: 'event.reminder', title: 'Notification from B' },
+  ])
+
+  // One class on each calendar, hosted by that school's own member.
+  for (const [uri, host, schoolDid] of [
+    [EVENT_A, MEMBER_A, SCHOOL_A],
+    [EVENT_B, MEMBER_B, SCHOOL_B],
+  ] as const) {
+    eventRecords.push({
+      uri,
+      did: host,
+      collection: 'community.lexicon.calendar.event',
+      rkey: uri.split('/').pop(),
+      cid: 'bafy',
+      record: {
+        name: `Class in ${schoolDid === SCHOOL_A ? 'A' : 'B'}`,
+        startsAt: new Date(Date.now() + 86_400_000).toISOString(),
+      },
+    })
+    eventConfigs.push({ uri: `${uri}-cfg`, did: host, eventUri: uri })
+    await db.insert(eventSchool).values({ eventUri: uri, schoolDid })
+  }
+  // Someone from each school is coming to their own school's class.
+  await db.insert(rsvp).values([
+    { id: rowId(), eventUri: EVENT_A, did: MEMBER_A, schoolDid: SCHOOL_A, status: 'going' },
+    { id: rowId(), eventUri: EVENT_B, did: MEMBER_B, schoolDid: SCHOOL_B, status: 'going' },
+  ])
+
+  // A moderation case in each school. MS §10: a member of A may not learn that a case
+  // exists in B, let alone its reason — so the reason is a per-school secret AND the
+  // presence needle for `/api/admin/moderation`.
+  await db.insert(moderationQueue).values([
+    {
+      id: 'case-a',
+      schoolDid: SCHOOL_A,
+      action: 'remove-listing',
+      reason: 'reason-a',
+      status: 'open',
+      subjectUri: EVENT_A,
+      openedByDid: STEWARD_A,
+    },
+    {
+      id: 'case-b',
+      schoolDid: SCHOOL_B,
+      action: 'remove-listing',
+      reason: 'reason-b',
+      status: 'open',
+      subjectUri: EVENT_B,
+      openedByDid: STEWARD_A,
+    },
+  ])
+
+  // One newsletter draft per school (one monthly digest per city, MS §4).
+  await db.insert(newsletterIssue).values([
+    { id: 'issue-a', schoolDid: SCHOOL_A, month: '2026-01', html: '', text: '' },
+    { id: 'issue-b', schoolDid: SCHOOL_B, month: '2026-01', html: '', text: '' },
+  ])
+
+  // A peer registry per school: who A federates with is A's business, not B's.
+  await db.insert(peer).values([
+    { host: 'https://pds-a.example', source: 'admin', schoolDid: SCHOOL_A },
+    { host: 'https://pds-b.example', source: 'admin', schoolDid: SCHOOL_B },
+  ])
+
+  // Attendance evidence: three confirmed in A, one in B, for the same person. With A's
+  // `hostMinAttended: 2` and B's `5`, `deriveRole` answers Host in A and Member in B.
+  await db.insert(attendanceTally).values([
+    { did: MEMBER_BOTH, schoolDid: SCHOOL_A, attendedConfirmed: ATTENDED_BOTH.a },
+    { did: MEMBER_BOTH, schoolDid: SCHOOL_B, attendedConfirmed: ATTENDED_BOTH.b },
+  ])
+  // Live attendance rows on each school's own class, so the host's count endpoint has
+  // something of its own to show.
+  await db.insert(attendance).values([
+    { id: rowId(), eventUri: EVENT_A, attendeeDid: MEMBER_BOTH, attestedByDid: MEMBER_A, schoolDid: SCHOOL_A },
+    { id: rowId(), eventUri: EVENT_B, attendeeDid: MEMBER_BOTH, attestedByDid: MEMBER_B, schoolDid: SCHOOL_B },
+  ])
+
+  // Subscribed to A's monthly digest and NOT to B's — `(did, school_did)` is the PK.
+  await subscribe(MEMBER_BOTH, 'mira.test@example.org', SCHOOL_A)
+
+  /**
+   * PUBLICLY LISTED PROFILES for the two school-only members. This is the one
+   * deliberately GLOBAL surface (MS §10: "a member's own statements about themselves"),
+   * and `GLOBAL_ROUTES` below pins it as global on purpose rather than leaving it
+   * untested and therefore free to drift either way.
+   */
+  await db.insert(appMeta).values([
+    {
+      key: `profile:${MEMBER_A}`,
+      // The avatar is app-side profile data, not a public claim: it exercises
+      // `GET /api/members/:did/avatar`, gated on `memberVisible` (per-school), not on
+      // `publicListing` the way `GET /api/profiles/:did` is.
+      value: { displayName: 'Alice', bio: 'welder', publicListing: true, avatar: { data: 'AAAA', alt: '', revision: '1' } },
+    },
+    { key: `profile:${MEMBER_B}`, value: { displayName: 'Bruno', bio: 'welder', publicListing: true } },
+    // A's class has a cover image; B's does not. `GET /api/events/:id/image` scopes
+    // through `loadEvent`, same as `.ics` — this gives it a 200-vs-404 to actually prove.
+    { key: `event-presentation:${EVENT_A}`, value: { cover: { data: 'AAAA', alt: '', revision: '1' } } },
+  ])
+
+  requestRecords.push({
+    uri: REQUEST_A,
+    did: ASKER,
+    collection: 'freeschool.draft.request',
+    rkey: 'ra',
+    cid: 'bafy',
+    record: { title: 'Someone teach welding', status: 'open', threshold: 3, createdAt: new Date().toISOString() },
+  })
+  // Interest in the SAME request, registered separately in each school.
+  await db.insert(requestRsvp).values([
+    { requestUri: REQUEST_A, did: MEMBER_A, schoolDid: SCHOOL_A },
+    { requestUri: REQUEST_A, did: MEMBER_B, schoolDid: SCHOOL_B },
+  ])
+
+  cookies.memberBoth = await cookieFor(MEMBER_BOTH)
+  cookies.memberA = await cookieFor(MEMBER_A)
+  cookies.stewardA = await cookieFor(STEWARD_A)
+})
+
+/* ────────────────────────────── the route table ───────────────────────────── */
+
+type Viewer = 'anon' | 'memberBoth' | 'memberA' | 'stewardA'
+
+interface RouteCase {
+  name: string
+  path: string
+  viewer: Viewer
+  /** Expected status per school; defaults to 200 on both. */
+  expect?: { a?: number; b?: number }
+  /**
+   * The OWN school's secrets that must be PRESENT. Without this an endpoint that returned
+   * an empty body — or 404'd for an unrelated reason — would pass the leak assertion
+   * trivially, which is the one way a tenancy suite can quietly stop testing anything.
+   */
+  present?: (on: 'a' | 'b') => string[]
+  /** Extra per-school assertion on the parsed body, when a status is not enough. */
+  check?: (body: unknown, on: 'a' | 'b') => void
+}
+
+const member = (on: 'a' | 'b') => [on === 'a' ? MEMBER_A : MEMBER_B]
+const handle = (on: 'a' | 'b') => (on === 'a' ? 'alice.test' : 'bruno.test')
+const event = (on: 'a' | 'b') => [on === 'a' ? EVENT_A : EVENT_B]
+
+const ROUTES: RouteCase[] = [
+  { name: 'members directory', path: '/api/members', viewer: 'memberBoth', present: (on) => [...member(on), handle(on)] },
+  {
+    name: "one member's profile (404, never 403, across schools)",
+    path: `/api/members/${encodeURIComponent(MEMBER_A)}`,
+    viewer: 'memberBoth',
+    expect: { a: 200, b: 404 },
+    present: (on) => (on === 'a' ? [MEMBER_A] : []),
+  },
+  {
+    name: "a member's avatar",
+    path: `/api/members/${encodeURIComponent(MEMBER_A)}/avatar`,
+    viewer: 'memberBoth',
+    // Gated on `memberVisible`, the same per-school membership check as the profile above.
+    expect: { a: 200, b: 404 },
+  },
+  { name: 'people on a skill page', path: `/api/skills/${encodeURIComponent(SKILL)}`, viewer: 'memberBoth', present: member },
+  {
+    name: "who publicly claims a skill — scoped to the viewer's school (MS §10)",
+    path: `/api/practitioners?skill=${encodeURIComponent(SKILL)}`,
+    viewer: 'anon',
+    present: member,
+  },
+  {
+    name: 'my vouches',
+    path: '/api/me/attestations',
+    viewer: 'memberBoth',
+    present: (on) => [`vouch-from-${on}`],
+  },
+  {
+    name: 'the needs board',
+    path: '/api/requests',
+    viewer: 'memberBoth',
+    // The REQUEST is a record in the asker's own repo and reaches both cities from the
+    // global index; only the INTEREST in it is per school, which is what `check` pins.
+    present: () => ['Someone teach welding'],
+    check: (body, on) => {
+      const items = (body as { requests?: Array<{ rsvpCount: number }> }).requests ?? []
+      // One interested member in each school; a threshold must be met within one city.
+      for (const r of items) expect(r.rsvpCount, `rsvpCount on ${on}`).toBe(1)
+    },
+  },
+  { name: 'the public calendar', path: '/api/calendar', viewer: 'anon', present: event },
+  {
+    name: "a class's roster",
+    path: `/api/events/${encodeURIComponent(EVENT_A)}/rsvps`,
+    viewer: 'stewardA',
+    expect: { a: 200, b: 404 },
+    present: (on) => (on === 'a' ? [MEMBER_A] : []),
+  },
+  {
+    name: "the other school's roster",
+    path: `/api/events/${encodeURIComponent(EVENT_B)}/rsvps`,
+    viewer: 'stewardA',
+    // 404 on A (not our class) and 403 on B (not a steward there): neither says more.
+    expect: { a: 404, b: 403 },
+  },
+  {
+    name: 'the policy surface',
+    path: '/api/admin/policy',
+    viewer: 'stewardA',
+    expect: { a: 200, b: 403 },
+    // A's own policy URI and A's own threshold — B's policy is a different record with a
+    // different number, and a steward of A must be shown neither.
+    present: (on) => (on === 'a' ? [`at://${SCHOOL_A}/freeschool.draft.policy/p1`, `"hostMinAttended":${HOST_MIN_ATTENDED.a}`] : []),
+  },
+  {
+    name: 'the skill-proposal queue',
+    path: '/api/admin/skills/proposals',
+    viewer: 'stewardA',
+    expect: { a: 200, b: 403 },
+    // The queue projects the SKILL's rkey and the proposer's HANDLE, never the app-side
+    // proposal row id — so the handle is what proves the row came from this school.
+    present: (on) => (on === 'a' ? ['alice.test'] : []),
+  },
+  {
+    name: 'my notifications',
+    path: '/api/notifications',
+    viewer: 'memberBoth',
+    present: (on) => [`Notification from ${on.toUpperCase()}`],
+  },
+  {
+    name: 'the moderation queue',
+    path: '/api/admin/moderation',
+    viewer: 'stewardA',
+    expect: { a: 200, b: 403 },
+    // MS §10: not the reason, not the subject, not that a case EXISTS.
+    present: (on) => (on === 'a' ? ['case-a', 'reason-a'] : []),
+  },
+  {
+    name: 'newsletter drafts',
+    path: '/api/admin/newsletter',
+    viewer: 'stewardA',
+    expect: { a: 200, b: 403 },
+    present: (on) => (on === 'a' ? ['issue-a'] : []),
+  },
+  {
+    name: 'the most recently composed newsletter',
+    path: '/api/admin/newsletter/last',
+    viewer: 'stewardA',
+    expect: { a: 200, b: 403 },
+    present: (on) => (on === 'a' ? ['issue-a'] : []),
+  },
+  {
+    name: 'the peer registry',
+    path: '/api/admin/peers',
+    viewer: 'stewardA',
+    expect: { a: 200, b: 403 },
+    present: (on) => (on === 'a' ? ['pds-a.example'] : []),
+  },
+  { name: 'the printable zine', path: `/api/zine/${ZINE_MONTH}`, viewer: 'anon', present: event },
+  { name: 'the subscribable feed', path: '/api/calendar.ics', viewer: 'anon', present: event },
+  {
+    name: 'one class',
+    path: `/api/events/${encodeURIComponent(EVENT_A)}`,
+    viewer: 'memberBoth',
+    expect: { a: 200, b: 404 },
+    present: (on) => (on === 'a' ? [EVENT_A, 'Class in A'] : []),
+  },
+  {
+    name: "a class's .ics file",
+    path: `/api/events/${encodeURIComponent(EVENT_A)}.ics`,
+    viewer: 'anon',
+    expect: { a: 200, b: 404 },
+    present: (on) => (on === 'a' ? [EVENT_A] : []),
+  },
+  {
+    name: "a class's cover image",
+    path: `/api/events/${encodeURIComponent(EVENT_A)}/image`,
+    viewer: 'anon',
+    // A's class has a cover; the same URI is simply not A's class from B's host.
+    expect: { a: 200, b: 404 },
+  },
+  {
+    name: "a class's attendance counts",
+    path: `/api/events/${encodeURIComponent(EVENT_A)}/attendance`,
+    viewer: 'memberA',
+    expect: { a: 200, b: 404 },
+    present: (on) => (on === 'a' ? ['"total":1'] : []),
+  },
+  {
+    name: "my own RSVP and the class's counts",
+    path: `/api/rsvp?eventUri=${encodeURIComponent(EVENT_A)}`,
+    viewer: 'memberA',
+    // The class is 404 from B, so its counts cannot even be addressed from there.
+    expect: { a: 200, b: 404 },
+    present: (on) => (on === 'a' ? ['"going":1'] : []),
+  },
+  {
+    name: "a class's anonymous feedback summary",
+    path: `/api/events/${encodeURIComponent(EVENT_A)}/feedback-summary`,
+    viewer: 'anon',
+    expect: { a: 200, b: 404 },
+  },
+  {
+    name: 'my own summary',
+    path: '/api/me',
+    viewer: 'memberBoth',
+    // The SAME member, the SAME evidence, two policies: Host in A, Member in B.
+    present: (on) => [`"school":"${on === 'a' ? SCHOOL_A : SCHOOL_B}"`, `"role":${on === 'a' ? Role.Host : Role.Member}`],
+  },
+  {
+    name: 'who I am and where — /api/auth/me',
+    path: '/api/auth/me',
+    viewer: 'memberBoth',
+    // Same member, same evidence, two policies — same fact `/api/me` pins, from the door
+    // route instead of the profile one.
+    present: (on) => [`"school":{"did":"${on === 'a' ? SCHOOL_A : SCHOOL_B}"`, `"role":${on === 'a' ? Role.Host : Role.Member}`],
+  },
+  {
+    name: 'my badges',
+    path: '/api/me/badges',
+    viewer: 'memberBoth',
+    present: (on) => [`"attended":${ATTENDED_BOTH[on]}`, `"role":${on === 'a' ? Role.Host : Role.Member}`],
+  },
+  {
+    name: 'my newsletter subscription',
+    path: '/api/me/newsletter',
+    viewer: 'memberBoth',
+    // Subscribed in A only: one city's digest is not the other's.
+    present: (on) => [`"subscribed":${on === 'a'}`],
+  },
+  {
+    name: 'how this school works',
+    path: '/api/school/how-it-works',
+    viewer: 'anon',
+    // The live rules, rendered from THIS school's policy.
+    present: (on) => [`${HOST_MIN_ATTENDED[on]} confirmed attendances`],
+  },
+  {
+    name: 'nearby schools',
+    path: '/api/schools/nearby',
+    viewer: 'anon',
+    // No peer school RECORD is indexed in this suite, so the honest answer is an empty
+    // list; what matters here is that asking does not spill the co-tenant's rows.
+    check: (body) => expect((body as { schools: unknown[] }).schools).toEqual([]),
+  },
+  {
+    name: 'the school picker',
+    path: '/api/schools',
+    viewer: 'anon',
+    // DELIBERATELY the same on both hosts (MS §10 ruling 2): a school's EXISTENCE is a
+    // public record; its membership is not, and this route carries no counts.
+    present: () => ['A Free School', 'B Free School'],
+  },
+]
+
+/**
+ * DELIBERATELY GLOBAL SURFACES, pinned as global.
+ *
+ * MS §2's dividing rule: what the member wrote about themselves is global; what a school
+ * observed is per school. These routes serve only the first kind — the shared skill
+ * taxonomy, and profiles/claims/resources their holders explicitly published to the whole
+ * internet (`publicListing`, an opt-in strictly stronger than "one school may see me").
+ * None of them names a school, so none of them answers "which city is this person in".
+ *
+ * They are in a table of their own, asserting that both hosts answer IDENTICALLY, because
+ * the alternative — leaving them out — lets them drift in either direction unnoticed: a
+ * later change that scopes them would silently break the public web, and a later change
+ * that widens a per-school route into one of these would look like nothing happened.
+ */
+const GLOBAL_ROUTES: Array<{ name: string; path: string; why: string }> = [
+  { name: 'the skill taxonomy', path: '/api/skills', why: 'one shared tree (MS §6)' },
+  {
+    name: 'a published profile',
+    path: `/api/profiles/${encodeURIComponent(MEMBER_A)}`,
+    why: 'the member wrote it and published it; it names no school',
+  },
+  { name: 'the resource library', path: '/api/resources', why: 'author-owned public records' },
+]
+
+async function get(route: RouteCase, on: 'a' | 'b'): Promise<{ status: number; text: string }> {
+  const host = on === 'a' ? HOST_A : HOST_B
+  const headers: Record<string, string> = { Host: host }
+  if (route.viewer !== 'anon') headers.Cookie = cookies[route.viewer]!
+  const res = await createApp().request(`http://${host}${route.path}`, { headers })
+  return { status: res.status, text: await res.text() }
+}
+
+describe('tenant isolation, route by route', () => {
+  for (const route of ROUTES) {
+    it(`${route.name}: nothing from the other school`, async () => {
+      if (!available) return
+      for (const on of ['a', 'b'] as const) {
+        const other = on === 'a' ? 'b' : 'a'
+        const { status, text } = await get(route, on)
+        expect(status, `${route.path} on ${on}`).toBe(route.expect?.[on] ?? 200)
+        for (const secret of SECRETS[other]) {
+          expect(text, `${route.path} on ${on} leaked ${secret}`).not.toContain(secret)
+        }
+        for (const needle of route.present?.(on) ?? []) {
+          expect(text, `${route.path} on ${on} is missing its own ${needle}`).toContain(needle)
+        }
+        if (route.check && status === 200) route.check(JSON.parse(text), on)
+      }
+    })
+  }
+})
+
+describe('the surfaces that are global on purpose', () => {
+  for (const route of GLOBAL_ROUTES) {
+    it(`${route.name}: the same on both hosts — ${route.why}`, async () => {
+      if (!available) return
+      const bodies: string[] = []
+      for (const host of [HOST_A, HOST_B]) {
+        const res = await createApp().request(`http://${host}${route.path}`, { headers: { Host: host } })
+        expect(res.status, `${route.path} on ${host}`).toBe(200)
+        bodies.push(await res.text())
+      }
+      expect(bodies[0], `${route.path} differs between hosts`).toBe(bodies[1])
+    })
+  }
+
+  it('the members DIRECTORY, by contrast, is strictly per school', async () => {
+    if (!available) return
+    const res = await createApp().request(`http://${HOST_A}/api/members`, {
+      headers: { Host: HOST_A, Cookie: cookies.memberBoth! },
+    })
+    expect(await res.text()).not.toContain(MEMBER_B)
+  })
+})
+
+describe('the tenancy the table depends on', () => {
+  it('a host that names no school is 404 UnknownSchool, not the legacy school', async () => {
+    if (!available) return
+    const res = await createApp().request('http://nowhere.test/api/members', {
+      headers: { Host: 'nowhere.test', Cookie: cookies.memberBoth! },
+    })
+    expect(res.status).toBe(404)
+    expect(((await res.json()) as { error: string }).error).toBe('UnknownSchool')
+  })
+
+  it('X-Forwarded-Host wins over Host, because the edge is what the member typed', async () => {
+    if (!available) return
+    const res = await createApp().request(`http://${HOST_B}/api/members`, {
+      headers: { Host: HOST_B, 'X-Forwarded-Host': HOST_A, Cookie: cookies.memberBoth! },
+    })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { members: Array<{ did: string }> }
+    expect(body.members.map((m) => m.did).sort()).toEqual([MEMBER_A, MEMBER_BOTH, STEWARD_A].sort())
+  })
+
+  it('each school sees only its own members, and the member of both sees both rosters', async () => {
+    if (!available) return
+    for (const [host, expected] of [
+      [HOST_A, [MEMBER_A, MEMBER_BOTH, STEWARD_A]],
+      [HOST_B, [MEMBER_B, MEMBER_BOTH, STEWARD_A]],
+    ] as const) {
+      const res = await createApp().request(`http://${host}/api/members`, {
+        headers: { Host: host, Cookie: cookies.memberBoth! },
+      })
+      const body = (await res.json()) as { members: Array<{ did: string }> }
+      expect(body.members.map((m) => m.did).sort()).toEqual([...expected].sort())
+    }
+  })
+
+  /**
+   * REVIEW ROUND 1, BLOCKING. `publishRoleClaim` writes a PUBLIC record that NAMES the
+   * school it belongs to. While the opt-in was global, opting in on A published a naming
+   * in B the moment a B re-derivation fired under a `publishRoles` policy — consent given
+   * to one school spent in another, which is precisely what R9 forbids.
+   */
+  describe('the public-role opt-in is per school', () => {
+    it('opting in on A publishes nothing in B', async () => {
+      if (!available) return
+      const app = createApp()
+      const res = await app.request(`http://${HOST_A}/api/me/public-role`, {
+        method: 'PUT',
+        headers: { Host: HOST_A, Cookie: cookies.memberBoth!, 'content-type': 'application/json' },
+        body: JSON.stringify({ publicRole: true }),
+      })
+      expect(res.status).toBe(200)
+      expect(await isPublicRoleOptIn(MEMBER_BOTH, SCHOOL_A)).toBe(true)
+      expect(await isPublicRoleOptIn(MEMBER_BOTH, SCHOOL_B)).toBe(false)
+      // And the gate the claim actually goes through agrees, at a role that qualifies.
+      expect((await publishRoleClaim(SCHOOL_B as Did, MEMBER_BOTH as Did, Role.Host)).reason).toBe('not-opted-in')
+    })
+
+    it("opting out of A retracts A's claim and leaves B's consent alone", async () => {
+      if (!available) return
+      const app = createApp()
+      for (const host of [HOST_A, HOST_B]) {
+        await app.request(`http://${host}/api/me/public-role`, {
+          method: 'PUT',
+          headers: { Host: host, Cookie: cookies.memberBoth!, 'content-type': 'application/json' },
+          body: JSON.stringify({ publicRole: true }),
+        })
+      }
+      retractions.length = 0
+      await app.request(`http://${HOST_A}/api/me/public-role`, {
+        method: 'PUT',
+        headers: { Host: HOST_A, Cookie: cookies.memberBoth!, 'content-type': 'application/json' },
+        body: JSON.stringify({ publicRole: false }),
+      })
+      expect(retractions).toEqual([SCHOOL_A])
+      expect(await isPublicRoleOptIn(MEMBER_BOTH, SCHOOL_A)).toBe(false)
+      expect(await isPublicRoleOptIn(MEMBER_BOTH, SCHOOL_B)).toBe(true)
+    })
+
+    it("GET /api/me/public-role answers for the host's own school", async () => {
+      if (!available) return
+      const app = createApp()
+      await app.request(`http://${HOST_B}/api/me/public-role`, {
+        method: 'PUT',
+        headers: { Host: HOST_B, Cookie: cookies.memberBoth!, 'content-type': 'application/json' },
+        body: JSON.stringify({ publicRole: true }),
+      })
+      for (const [host, expected] of [
+        [HOST_A, false],
+        [HOST_B, true],
+      ] as const) {
+        const res = await app.request(`http://${host}/api/me/public-role`, {
+          headers: { Host: host, Cookie: cookies.memberBoth! },
+        })
+        expect(((await res.json()) as { publicRole: boolean }).publicRole).toBe(expected)
+      }
+    })
+  })
+
+  /**
+   * THE SWITCHED SESSION (review round 2). Every steward assertion above resolves the
+   * school from the HOST. Task 4 added a second resolution path — `fs_session
+   * .current_school_did`, used when the host names no school — and a power that survived
+   * a switch would be a hole the host-based table could never see: the steward of A picks
+   * B in the switcher and, from then on, every admin route they touch is B's.
+   */
+  it('a steward of A who switches their session to B gets 403 on B’s admin surface', async () => {
+    if (!available) return
+    const db = testDb()
+    const [row] = await db.select({ id: session.id }).from(session).where(eq(session.did, STEWARD_A)).limit(1)
+    await db.update(session).set({ currentSchoolDid: SCHOOL_B }).where(eq(session.id, row!.id))
+
+    // A host that names NO school, so resolution falls through to the session's choice.
+    const res = await createApp().request('http://apex.test/api/admin/policy', {
+      headers: { Host: 'apex.test', Cookie: cookies.stewardA! },
+    })
+    expect(res.status).toBe(403)
+
+    // ...and the same session switched back to A is a steward again, so the 403 above is
+    // about the school and not about the switch having broken authentication.
+    await db.update(session).set({ currentSchoolDid: SCHOOL_A }).where(eq(session.id, row!.id))
+    const back = await createApp().request('http://apex.test/api/admin/policy', {
+      headers: { Host: 'apex.test', Cookie: cookies.stewardA! },
+    })
+    expect(back.status).toBe(200)
+  })
+
+  it('a steward who leaves stops being one, on the host and on a switched session', async () => {
+    if (!available) return
+    const db = testDb()
+    const app = createApp()
+    expect(
+      (await app.request(`http://${HOST_A}/api/admin/policy`, { headers: { Host: HOST_A, Cookie: cookies.stewardA! } }))
+        .status,
+    ).toBe(200)
+
+    await leaveSchool(STEWARD_A, SCHOOL_A)
+
+    expect(
+      (await app.request(`http://${HOST_A}/api/admin/policy`, { headers: { Host: HOST_A, Cookie: cookies.stewardA! } }))
+        .status,
+    ).toBe(403)
+
+    const [row] = await db.select({ id: session.id }).from(session).where(eq(session.did, STEWARD_A)).limit(1)
+    await db.update(session).set({ currentSchoolDid: SCHOOL_A }).where(eq(session.id, row!.id))
+    expect(
+      (await app.request('http://apex.test/api/admin/policy', { headers: { Host: 'apex.test', Cookie: cookies.stewardA! } }))
+        .status,
+    ).toBe(403)
+  })
+
+  it('a vouch given in A is invisible in B, and vice versa', async () => {
+    if (!available) return
+    for (const [host, present, absent] of [
+      [HOST_A, MEMBER_A, MEMBER_B],
+      [HOST_B, MEMBER_B, MEMBER_A],
+    ] as const) {
+      const res = await createApp().request(`http://${host}/api/me/attestations`, {
+        headers: { Host: host, Cookie: cookies.memberBoth! },
+      })
+      const body = (await res.json()) as { received: Array<{ attesterDid: string }> }
+      expect(body.received.map((r) => r.attesterDid)).toEqual([present])
+      expect(body.received.map((r) => r.attesterDid)).not.toContain(absent)
+    }
+  })
+})

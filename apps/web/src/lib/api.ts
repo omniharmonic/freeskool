@@ -50,6 +50,10 @@ import type {
   InviteMintInput,
   InviteMintResult,
   InviteRedeemResult,
+  LastNewsletterIssueResponse,
+  LeaveSchoolResult,
+  NearbySchool,
+  SchoolsResponse,
   ModerationApproveResult,
   ModerationExecuteResult,
   ModerationProposeInput,
@@ -78,6 +82,7 @@ import type {
   RsvpSetInput,
   RsvpSetResult,
   SetNewsletterInput,
+  SwitchSchoolResult,
   SetPublicRoleInput,
   SignupResult,
   SkillClaimsResponse,
@@ -197,6 +202,14 @@ export const api = {
       get<VerifyResult>('/api/auth/verify', { token }, { accept: 'application/json' }),
     me: () => get<AuthMe>('/api/auth/me'),
     logout: () => post<{ ok: boolean }>('/api/auth/logout'),
+    /**
+     * Move this session to another school the member belongs to. 403
+     * `NotAMember` otherwise. The answer carries the school's host because
+     * switching is a NAVIGATION: each city is its own origin, so the caller
+     * sends the browser there rather than re-rendering in place.
+     */
+    switchSchool: (schoolDid: string) =>
+      post<SwitchSchoolResult>('/api/auth/switch-school', { schoolDid }),
     /**
      * Secondary door. `confirm` must be true or the AppView refuses with 428;
      * `handle` (a handle or a DID) is required too or it refuses with 400
@@ -369,6 +382,9 @@ export const api = {
       /** `period` defaults server-side to the current month (`YYYY-MM`). */
       compose: (period?: string) => request<NewsletterDraft>('/api/admin/newsletter', { method: 'POST', query: period ? { period } : undefined }),
       send: (id: string) => post<{ ok: boolean; recipientCount: number }>(`/api/admin/newsletter/${encodeURIComponent(id)}/send`),
+      /** The most recently composed issue, for the Preview section BEFORE a steward
+       * composes a new one this session — `{ issue: null }` when nothing ever was. */
+      last: () => get<LastNewsletterIssueResponse>('/api/admin/newsletter/last'),
     },
     handoff: {
       start: (b: HandoffStartInput) => post<HandoffStartResult>('/api/admin/handoff', b),
@@ -380,6 +396,29 @@ export const api = {
 
   school: {
     howItWorks: () => get<HowItWorksResponse>('/api/school/how-it-works'),
+  },
+
+  /**
+   * The school DIRECTORY (`apps/appview/src/http/routes/schools.ts`), as
+   * opposed to `school` above, which is this school's own public page.
+   * `list` is public; `leave` needs a session and answers 404 — never 403 —
+   * for a school the viewer is not a member of.
+   */
+  schools: {
+    list: () => get<SchoolsResponse>('/api/schools'),
+    /**
+     * Peers, from their own published school records. Task 6 owns the route;
+     * this tolerates both shapes it could land in (a bare array or the
+     * `{ schools }` envelope `GET /api/schools` uses) so `/schools` does not
+     * have to be redeployed in lockstep with it. A 404 from an AppView that
+     * does not have it yet reaches the caller as an `ApiError` and is shown as
+     * an empty section, not as a failure.
+     */
+    nearby: async (): Promise<NearbySchool[]> => {
+      const data = await get<NearbySchool[] | { schools?: NearbySchool[] }>('/api/schools/nearby');
+      return Array.isArray(data) ? data : (data?.schools ?? []);
+    },
+    leave: (did: string) => post<LeaveSchoolResult>(`/api/schools/${encodeURIComponent(did)}/leave`),
   },
 
   zine: {

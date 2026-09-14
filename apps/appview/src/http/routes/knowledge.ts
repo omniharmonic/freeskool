@@ -1,7 +1,7 @@
 /** Public, author-owned knowledge records; practitioner profiles are explicitly opt-in. */
 import { Hono, type Context } from 'hono'
 import { z } from 'zod'
-import { eq, inArray, sql } from 'drizzle-orm'
+import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
 import { Role } from '@freeschool/shared'
 import { requireRole, requireViewer, type AppEnv } from '../session.js'
 import { getIndexer } from '../../index/indexer.js'
@@ -14,7 +14,8 @@ import { actorAgent } from '../../lib/actor-agent.js'
 import { NSID } from '../../lexicons/nsids.js'
 import { tid } from '../../lib/ids.js'
 import { getDb } from '../../db/index.js'
-import { appMeta } from '../../db/schema.js'
+import { appMeta, membership } from '../../db/schema.js'
+import { currentSchool } from '../school-context.js'
 import { PROFILE_KEY, type Profile } from './me.js'
 import { loadEvent } from './events.js'
 
@@ -67,6 +68,15 @@ async function publicSummaries(dids: string[]) {
       .filter((r) => r.value.publicListing)
       .map((r) => [r.key.slice('profile:'.length), r.value]),
   )
+}
+/** Narrows `dids` to the ones with a current (non-left) `fs_membership` row in `schoolDid`. */
+async function didsInSchool(dids: string[], schoolDid: string): Promise<string[]> {
+  if (dids.length === 0) return []
+  const rows = await getDb()
+    .select({ did: membership.did })
+    .from(membership)
+    .where(and(inArray(membership.did, dids), eq(membership.schoolDid, schoolDid), isNull(membership.leftAt)))
+  return rows.map((r) => r.did)
 }
 /** Exported for `lib/members.ts`'s member-profile "resources" list (author-owned, public-visible only). */
 export async function resources(
@@ -331,6 +341,13 @@ knowledge.get('/profiles/:did/avatar', async (c) => {
  *
  * The `publicListing` opt-in join below is unchanged: an indexed claim is a public
  * record, but appearing in a directory is a separate, explicit choice (R9).
+ *
+ * SCOPED TO THE VIEWER'S SCHOOL (MS §10: "who claims welding" is answered only within
+ * the viewer's school, not globally). The route itself stays public — no session is
+ * required — but `currentSchool(c)` still resolves from the request's host, so a
+ * Boulder host answers only with Boulder members and a Denver host only with Denver's.
+ * Membership, not authorship: `fs_membership` is the roster MS §10 means here, the same
+ * table `lib/members.ts#inSchool` reads for the members-only directory.
  */
 knowledge.get('/practitioners', async (c) => {
   c.header('X-Robots-Tag', 'noindex, nofollow')
@@ -343,7 +360,8 @@ knowledge.get('/practitioners', async (c) => {
   const valid = records.filter(
     (r) => publicClaim.safeParse(r.value).success && r.value.skill === skill,
   )
-  const dids = [...new Set(valid.map((r) => r.did))]
+  const candidates = [...new Set(valid.map((r) => r.did))]
+  const dids = await didsInSchool(candidates, currentSchool(c).did)
   const summaries = await publicSummaries(dids)
   const profiles = []
   for (const did of dids) {

@@ -26,6 +26,8 @@ import {
   notificationTarget,
 } from '../db/schema.js'
 import { rowId } from '../lib/ids.js'
+import { legacySchoolDid } from '../lib/schools.js'
+import { schoolScope } from '../lib/school-scope.js'
 import { declarativePayload, sendPush, type PushSubscriptionRecord } from '../lib/push.js'
 import { sendMail } from '../lib/mail.js'
 import { log } from '../lib/logging.js'
@@ -39,6 +41,10 @@ export const CATEGORIES = [
   'offering.published',
   'member.joined',
   'feedback.received',
+  // "Rosa asked if you would teach bicycle mechanics" (UX audit journey finding 13). The
+  // ONLY place the asked member is named — the request record itself never is (see
+  // `lib/requests.ts`), so this notification is the whole of how they find out.
+  'request.asked-of',
 ] as const
 export type Category = (typeof CATEGORIES)[number]
 
@@ -57,6 +63,13 @@ export interface EnqueueInput {
   navigate?: string
   /** Anything transport-specific (an .ics attachment, say). */
   extra?: Record<string, unknown>
+  /**
+   * WHICH SCHOOL this is about (MS §4): so a feed row can say which one, and so one
+   * school's notifications can be paused without touching another's. Transports and
+   * preferences stay GLOBAL — one device, one inbox, preferences per category not per
+   * city — which is why only the three ledger tables carry the column.
+   */
+  schoolDid?: string
 }
 
 export interface EnqueueResult {
@@ -73,9 +86,10 @@ export async function enqueueNotification(input: EnqueueInput): Promise<EnqueueR
   const category = input.category as Category
   if (ACTORLESS_CATEGORIES.has(category)) assertActorless(input)
 
+  const schoolDid = input.schoolDid ?? legacySchoolDid()
   const claim = await db
     .insert(notificationSent)
-    .values({ dedupKey: input.dedupKey, did: input.did, category })
+    .values({ dedupKey: input.dedupKey, did: input.did, schoolDid, category })
     .onConflictDoNothing()
     .returning({ dedupKey: notificationSent.dedupKey })
   if (claim.length === 0) return { claimed: false, targets: 0 }
@@ -83,6 +97,7 @@ export async function enqueueNotification(input: EnqueueInput): Promise<EnqueueR
   await db.insert(notificationFeed).values({
     id: rowId(),
     did: input.did,
+    schoolDid,
     category,
     title: input.title,
     body: input.body ?? null,
@@ -94,6 +109,7 @@ export async function enqueueNotification(input: EnqueueInput): Promise<EnqueueR
     await db.insert(notificationOutbox).values({
       id: rowId(),
       did: input.did,
+      schoolDid,
       category,
       dedupKey: `${input.dedupKey}:${t.id}`,
       payload: {
@@ -273,19 +289,26 @@ export async function setPref(did: string, category: string, transport: Transpor
     })
 }
 
-export async function listNotifications(did: string, limit = 50) {
+/** This member's notifications FROM THIS SCHOOL. Only ever the viewer's own rows (MS §10). */
+export async function listNotifications(did: string, limit = 50, schoolDid = legacySchoolDid()) {
   return getDb()
     .select()
     .from(notificationFeed)
-    .where(eq(notificationFeed.did, did))
+    .where(and(eq(notificationFeed.did, did), schoolScope(notificationFeed.schoolDid, schoolDid)))
     .orderBy(sql`${notificationFeed.createdAt} DESC`)
     .limit(limit)
 }
 
-export async function markRead(did: string, ids: string[]): Promise<void> {
+export async function markRead(did: string, ids: string[], schoolDid = legacySchoolDid()): Promise<void> {
   if (ids.length === 0) return
   await getDb()
     .update(notificationFeed)
     .set({ readAt: new Date() })
-    .where(and(eq(notificationFeed.did, did), inArray(notificationFeed.id, ids)))
+    .where(
+      and(
+        eq(notificationFeed.did, did),
+        schoolScope(notificationFeed.schoolDid, schoolDid),
+        inArray(notificationFeed.id, ids),
+      ),
+    )
 }

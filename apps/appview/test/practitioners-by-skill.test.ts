@@ -16,7 +16,7 @@ process.env.FEEDBACK_BALLOT_PEPPER ??= 'practitioners-test-pepper'
 
 import { afterAll, beforeAll, beforeEach, expect, it, vi } from 'vitest'
 import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
-import { appMeta } from '../src/db/schema.js'
+import { appMeta, membership } from '../src/db/schema.js'
 
 const SKILL = 'at://did:plc:school/freeschool.draft.skill/bike-repair'
 const OTHER = 'at://did:plc:school/freeschool.draft.skill/sourdough'
@@ -75,7 +75,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   if (!available) return
-  await truncate('fs_app_meta')
+  await truncate('fs_app_meta', 'fs_membership')
   asked.length = 0
   await testDb()
     .insert(appMeta)
@@ -84,6 +84,9 @@ beforeEach(async () => {
       value: { displayName: 'A neighbor who fixes bikes', bio: 'Tuesdays at the shop.', publicListing: true },
       updatedAt: new Date(),
     })
+  // `GET /api/practitioners` scopes to `currentSchool`'s membership (MS §10); SCHOOL_DID
+  // is unset in this file, so that's the legacy `''` school.
+  await testDb().insert(membership).values({ did: PRACTITIONER, schoolDid: '', door: 'custodial' })
 })
 
 afterAll(async () => {

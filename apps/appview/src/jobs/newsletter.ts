@@ -28,7 +28,10 @@ import { describeError, log } from '../lib/logging.js'
 import { config } from '../config.js'
 import { sendMail, type Mail } from '../lib/mail.js'
 import { activeSubscribers, rotateUnsubscribeToken } from '../lib/newsletter-subscriptions.js'
-import { eq } from 'drizzle-orm'
+import { legacySchoolDid, listSchools } from '../lib/schools.js'
+import { schoolsOfEvents } from '../lib/event-school.js'
+import { schoolScope } from '../lib/school-scope.js'
+import { and, eq } from 'drizzle-orm'
 
 export interface Digest {
   subject: string
@@ -36,17 +39,25 @@ export interface Digest {
   eventCount: number
 }
 
-export async function composeMonthlyDigest(period: string): Promise<Digest> {
+/**
+ * ONE SCHOOL's month. The window query is over the GLOBAL index, so the school filter has
+ * to be applied here — exactly as the calendar and the zine do — or every city's digest is
+ * the union of every city's classes (MS §10.1: no cross-school aggregate is ever
+ * rendered).
+ */
+export async function composeMonthlyDigest(period: string, schoolDid = legacySchoolDid()): Promise<Digest> {
   const [year, month] = period.split('-').map(Number)
   const from = new Date(Date.UTC(year ?? 1970, (month ?? 1) - 1, 1))
   const to = new Date(Date.UTC(year ?? 1970, month ?? 1, 1))
 
   const indexer = await getIndexer()
   const events = await eventsInWindow(indexer, from.toISOString(), to.toISOString(), 500)
+  const eventSchools = await schoolsOfEvents(events.map((e) => e.uri))
 
   const lines: string[] = []
   let count = 0
   for (const e of events) {
+    if ((eventSchools.get(e.uri) ?? legacySchoolDid()) !== schoolDid) continue
     const [listings, configs] = await Promise.all([
       sidecarsForEvent<EventListing>(indexer, 'eventListing', e.uri),
       sidecarsForEvent<EventConfig>(indexer, 'eventConfig', e.uri),
@@ -104,21 +115,34 @@ export interface NewsletterIssueDraft {
 }
 
 /** Composes a draft and stores it in `fs_newsletter_issue`. Does not send anything. */
-export async function composeNewsletterIssue(period: string): Promise<NewsletterIssueDraft> {
-  const digest = await composeMonthlyDigest(period)
+export async function composeNewsletterIssue(
+  period: string,
+  schoolDid: string = legacySchoolDid(),
+): Promise<NewsletterIssueDraft> {
+  const digest = await composeMonthlyDigest(period, schoolDid)
   const html = renderDigestHtml(digest)
   const id = rowId()
-  await getDb().insert(newsletterIssue).values({ id, month: period, html, text: digest.body, status: 'draft' })
+  await getDb().insert(newsletterIssue).values({ id, schoolDid, month: period, html, text: digest.body, status: 'draft' })
   log.info('newsletter draft composed', { events: digest.eventCount })
   return { id, month: period, html, text: digest.body, status: 'draft' }
 }
 
-/** The scheduled job body. Composes last month's draft; never sends. */
-export async function runMonthlyNewsletter(now = new Date()): Promise<{ id: string; period: string }> {
+/**
+ * The scheduled job body. Composes last month's draft FOR EVERY SCHOOL — one monthly
+ * digest per city (MS §4) — and never sends. Falls back to the legacy school when
+ * `fs_school` is empty, so a deployment that has not booted the registry still composes.
+ */
+export async function runMonthlyNewsletter(now = new Date()): Promise<{ id: string; period: string; schools: number }> {
   const prev = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() - 1, 1))
   const period = prev.toISOString().slice(0, 7)
-  const draft = await composeNewsletterIssue(period)
-  return { id: draft.id, period }
+  const schools = await listSchools().catch(() => [])
+  const dids = schools.length > 0 ? schools.map((s) => s.did) : [legacySchoolDid()]
+  let first: NewsletterIssueDraft | undefined
+  for (const did of dids) {
+    const draft = await composeNewsletterIssue(period, did)
+    first ??= draft
+  }
+  return { id: first?.id ?? '', period, schools: dids.length }
 }
 
 export const MAX_RECIPIENTS_PER_RUN = 500
@@ -155,16 +179,25 @@ function unsubscribeUrl(token: string): string {
  *     issue) this table does not have. Documented limitation: `skipped` in the result
  *     names how many were not reached this run; reaching them needs a follow-up issue.
  */
-export async function sendNewsletterIssue(id: string, deps: SendNewsletterDeps = {}): Promise<SendNewsletterResult> {
+export async function sendNewsletterIssue(
+  id: string,
+  schoolDid: string = legacySchoolDid(),
+  deps: SendNewsletterDeps = {},
+): Promise<SendNewsletterResult> {
   const send = deps.sendFn ?? sendMail
   const db = getDb()
-  const rows = await db.select().from(newsletterIssue).where(eq(newsletterIssue.id, id)).limit(1)
+  // A steward of Denver must not be able to send — or even find — a Boulder issue.
+  const rows = await db
+    .select()
+    .from(newsletterIssue)
+    .where(and(eq(newsletterIssue.id, id), schoolScope(newsletterIssue.schoolDid, schoolDid)))
+    .limit(1)
   const issue = rows[0]
   if (!issue) return { ok: false, status: 404, error: 'NotFound', message: 'no such newsletter issue' }
   if (issue.status === 'sent') return { ok: false, status: 409, error: 'AlreadySent', message: 'this issue was already sent' }
 
   // Peek one past the cap so we know whether anyone was skipped, without a second query.
-  const candidates = await activeSubscribers(MAX_RECIPIENTS_PER_RUN + 1)
+  const candidates = await activeSubscribers(MAX_RECIPIENTS_PER_RUN + 1, schoolDid)
   const skipped = Math.max(0, candidates.length - MAX_RECIPIENTS_PER_RUN)
   const subscribers = skipped > 0 ? candidates.slice(0, MAX_RECIPIENTS_PER_RUN) : candidates
   const subject = issue.html.match(/<h1[^>]*>(.*?)<\/h1>/)?.[1] ?? `Free School, ${issue.month}`
@@ -173,7 +206,7 @@ export async function sendNewsletterIssue(id: string, deps: SendNewsletterDeps =
   let failed = 0
   for (const sub of subscribers) {
     try {
-      const token = await rotateUnsubscribeToken(sub.did)
+      const token = await rotateUnsubscribeToken(sub.did, schoolDid)
       const url = unsubscribeUrl(token)
       const html = `${issue.html}\n<p style="font-size:12px;color:#666;">Don't want this? <a href="${url}">Unsubscribe</a>.</p>`
       const text = `${issue.text}\n\nUnsubscribe: ${url}`

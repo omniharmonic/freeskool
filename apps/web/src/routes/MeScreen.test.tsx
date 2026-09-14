@@ -46,7 +46,8 @@ vi.mock('../lib/api', () => {
   }
   return {
     api: {
-      auth: { me: vi.fn(), logout: vi.fn(), takeOwnership: vi.fn() },
+      auth: { me: vi.fn(), logout: vi.fn(), takeOwnership: vi.fn(), switchSchool: vi.fn() },
+      schools: { leave: vi.fn() },
       me: {
         profile: vi.fn(),
         updateProfile: vi.fn(),
@@ -493,5 +494,76 @@ describe('MeScreen', () => {
 
     await waitFor(() => expect(api.me.updateProfile).toHaveBeenCalledTimes(2));
     expect(vi.mocked(api.me.updateProfile).mock.calls[1]![0]).toMatchObject({ confirmPublicLinkage: true });
+  });
+
+  describe('"Leave this school"', () => {
+    const BOULDER = { did: 'did:plc:boulder', label: 'boulder', name: 'Boulder Free School' };
+    /** jsdom has no navigation; this is what leaving does on the way out. */
+    const assign = vi.fn();
+
+    function signedInAt(school: typeof BOULDER | undefined, kind: 'custodial' | 'oauth' = 'custodial') {
+      vi.mocked(api.auth.me).mockResolvedValue({
+        did: 'did:plc:wren',
+        kind,
+        role: 20,
+        handle: 'wren.fs.boulder',
+        isCustodial: kind === 'custodial',
+        emailVerified: true,
+        onboarded: true,
+        ...(school ? { school, schools: [{ ...school, host: 'boulder.freeskool.xyz' }] } : {}),
+      });
+    }
+
+    beforeEach(() => {
+      assign.mockReset();
+      vi.mocked(api.schools.leave).mockReset().mockResolvedValue({ left: true });
+      Object.defineProperty(window, 'location', { configurable: true, value: { assign } });
+    });
+
+    it('is not offered when the session names no school', async () => {
+      signedInAt(undefined);
+      renderScreen();
+      await screen.findByRole('heading', { name: 'Me' });
+      expect(screen.queryByRole('button', { name: 'Leave this school' })).not.toBeInTheDocument();
+    });
+
+    it('asks first, says what leaving does and does not do, and only then calls the API', async () => {
+      signedInAt(BOULDER);
+      renderScreen();
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Leave this school' }));
+
+      const sheet = await screen.findByRole('dialog', { name: 'Leave Boulder Free School?' });
+      expect(within(sheet).getByText(/come off the members directory/i)).toBeInTheDocument();
+      expect(within(sheet).getByText(/public record is taken back/i)).toBeInTheDocument();
+      expect(within(sheet).getByText(/classes you taught stay/i)).toBeInTheDocument();
+      // Nothing has happened yet: the confirm is the decision, not a progress bar.
+      expect(api.schools.leave).not.toHaveBeenCalled();
+
+      fireEvent.click(within(sheet).getByRole('button', { name: 'Leave this school' }));
+
+      await waitFor(() => expect(api.schools.leave).toHaveBeenCalledWith('did:plc:boulder'));
+      // Sign-out-like: the calendar, loaded fresh, with a notice.
+      await waitFor(() => expect(assign).toHaveBeenCalledWith('/?left=1'));
+    });
+
+    it('is offered to a member who came through the OAuth door too', async () => {
+      signedInAt(BOULDER, 'oauth');
+      renderScreen();
+      expect(await screen.findByRole('button', { name: 'Leave this school' })).toBeInTheDocument();
+    });
+
+    it('stays put and says so when leaving is refused', async () => {
+      signedInAt(BOULDER);
+      vi.mocked(api.schools.leave).mockRejectedValue(new ApiError(404, 'NotFound', 'not found'));
+      renderScreen();
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Leave this school' }));
+      const sheet = await screen.findByRole('dialog', { name: 'Leave Boulder Free School?' });
+      fireEvent.click(within(sheet).getByRole('button', { name: 'Leave this school' }));
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(/not a member of this school/i);
+      expect(assign).not.toHaveBeenCalled();
+    });
   });
 });

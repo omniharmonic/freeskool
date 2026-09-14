@@ -76,6 +76,14 @@ interface AdminLayoutProps {
   title: string;
   current: AdminTab;
   standfirst?: string;
+  /**
+   * One line, in plain language, saying what this screen actually does to
+   * people — UX audit journey finding 15: every steward screen assumed its own
+   * vocabulary ("item", "queue", "threshold", "peer") and none of them said
+   * what pressing anything here would mean for a member. Sits under the
+   * heading, above the tool.
+   */
+  help?: string;
   children: ReactNode;
 }
 
@@ -88,11 +96,11 @@ interface AdminLayoutProps {
  * Wraps the result in `Screen` with the sub-nav sitting `beneathTitle`, so it
  * scrolls with the page rather than pinning a second chrome bar.
  */
-export function AdminLayout({ title, current, standfirst, children }: AdminLayoutProps) {
+export function AdminLayout({ title, current, standfirst, help, children }: AdminLayoutProps) {
   return (
     <SessionGate screen prompt="Sign in as a steward to manage this school.">
       <Screen title={title} layout="admin" standfirst={standfirst} back={current !== 'overview'}>
-        <div className="safe-x"><RoleGate><div className="admin-workbench"><AdminSubNav current={current} /><div className="admin-content">{children}</div></div></RoleGate></div>
+        <div className="safe-x"><RoleGate><div className="admin-workbench"><AdminSubNav current={current} /><div className="admin-content">{help ? <p className="admin-help mb-5 max-w-[62ch] text-body text-ink-soft">{help}</p> : null}{children}</div></div></RoleGate></div>
       </Screen>
     </SessionGate>
   );

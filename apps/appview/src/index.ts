@@ -13,6 +13,7 @@ import { startJobs } from './jobs/index.js'
 import { getIndexer } from './index/indexer.js'
 import { startPeerLiveSync } from './index/live-sync.js'
 import { refreshPolicyCache } from './lib/policy.js'
+import { ensureLegacySchoolRow, listSchools } from './lib/schools.js'
 import { seedSkillTiers } from './lib/skill-tiers.js'
 import { resetDevMailSink } from './lib/mail.js'
 import { closeDb } from './db/index.js'
@@ -26,11 +27,22 @@ export async function main(): Promise<{ close: () => Promise<void> }> {
   await resetDevMailSink()
 
   await runMigrations()
+  // The env-configured school becomes a `fs_school` row (idempotent, no-op when
+  // `SCHOOL_DID` is unset). Must follow the migrations and precede anything that reads
+  // the registry. `scripts/backfill-school.ts` is what stamps the existing rows.
+  await ensureLegacySchoolRow().catch((err) =>
+    log.warn('could not ensure the legacy school row', { detail: describeError(err) }),
+  )
   // Idempotent: a fresh deploy enforces the Tier B gate from the first boot, not only
   // once an operator remembers to run it by hand.
   await seedSkillTiers().catch((err) => log.warn('skill-tier boot-seed failed', { detail: describeError(err) }))
   const indexer = await getIndexer()
   await indexer.init()
+  // Warm the policy cache for EVERY school this AppView hosts (MS Appendix A), falling
+  // back to the env-configured one for a deployment whose registry row is not there yet.
+  for (const s of await listSchools().catch(() => [])) {
+    await refreshPolicyCache(s.did).catch(() => {})
+  }
   if (c.SCHOOL_DID) await refreshPolicyCache(c.SCHOOL_DID).catch(() => {})
 
   const app = createApp()

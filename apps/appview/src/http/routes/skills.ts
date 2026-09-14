@@ -29,6 +29,7 @@ import { authorityClient } from '../../lib/authority.js'
 import { normalizeLabel, slugify } from '../../lib/slug.js'
 import { NSID } from '../../lexicons/nsids.js'
 import { describeError, log } from '../../lib/logging.js'
+import { currentSchool } from '../school-context.js'
 
 export const skills = new Hono<AppEnv>()
 
@@ -177,7 +178,8 @@ skills.get('/skills/:id', withViewer, async (c) => {
 
   // Members directory (R9): who has this skill, ONLY for a signed-in viewer — an
   // anonymous reader of this otherwise-public endpoint must never see the roster.
-  const people = c.var.viewer ? await peopleForSkill(uri, c.var.viewer.did) : undefined
+  // "Who claims welding" is answered only WITHIN the viewer's school (MS §10).
+  const people = c.var.viewer ? await peopleForSkill(uri, c.var.viewer.did, currentSchool(c).did) : undefined
 
   return c.json({
     uri: self.uri,
@@ -302,7 +304,10 @@ skills.post('/skills', requireViewer, async (c) => {
   const proposalId = rowId()
   const uri = `at://${cfg.AUTHORITY_DID}/${NSID.skill}/${id}`
   await getDb().transaction(async (tx) => {
-    await tx.insert(skillProposal).values({ id: proposalId, skillUri: uri, proposerDid: viewer.did, status: 'pending' })
+    // Attribution only — the taxonomy itself stays one authority (MS §6).
+    await tx
+      .insert(skillProposal)
+      .values({ id: proposalId, skillUri: uri, schoolDid: currentSchool(c).did, proposerDid: viewer.did, status: 'pending' })
   })
 
   const createdAt = new Date().toISOString()

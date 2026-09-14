@@ -69,6 +69,54 @@ export function useMe() {
   });
 }
 
+/**
+ * `POST /api/auth/switch-school`. Deliberately does NOT invalidate anything:
+ * every city is its own origin, so the caller navigates to the returned host
+ * and the whole app reloads there. Invalidating first would repaint the
+ * current school's screens with a session that has already moved.
+ */
+export function useSwitchSchoolMutation() {
+  return useMutation({
+    mutationFn: (schoolDid: string) => api.auth.switchSchool(schoolDid),
+    retry: false,
+  });
+}
+
+/** The public directory of schools (`GET /api/schools`). No session needed. */
+export function useSchools() {
+  return useQuery({
+    queryKey: ['schools'],
+    queryFn: () => api.schools.list(),
+  });
+}
+
+/**
+ * `GET /api/schools/nearby` — peers, from their own published school records.
+ *
+ * `retry: false` because the interesting failure is a 404 from an AppView that
+ * does not serve this route yet, and retrying a 404 four times only delays the
+ * empty state `/schools` already knows how to render.
+ */
+export function useNearbySchools() {
+  return useQuery({
+    queryKey: ['schools', 'nearby'],
+    queryFn: () => api.schools.nearby(),
+    retry: false,
+  });
+}
+
+/**
+ * `POST /api/schools/:did/leave`. Invalidates nothing on purpose: leaving ends
+ * this membership, and the caller returns to the calendar the way signing out
+ * does — a full navigation, with every cached answer dropped.
+ */
+export function useLeaveSchoolMutation() {
+  return useMutation({
+    mutationFn: (schoolDid: string) => api.schools.leave(schoolDid),
+    retry: false,
+  });
+}
+
 export function useRequests() {
   return useQuery({
     queryKey: ['requests'],
@@ -446,6 +494,16 @@ export function useMoveSkillMutation() {
   });
 }
 
+/** `{ issue: null }` when nothing has ever been composed for this school —
+ * NOT an error, so the screen's Preview section can fall back to "Nothing
+ * to preview yet" rather than showing a query-error state. */
+export function useLastNewsletterIssue() {
+  return useQuery({
+    queryKey: ['newsletter-last'],
+    queryFn: () => api.admin.newsletter.last(),
+  });
+}
+
 /** Composing never mutates anything server-persistent in a way the UI needs
  * to invalidate elsewhere — it only ever creates a fresh draft row the
  * caller then holds onto by id. */
@@ -580,10 +638,15 @@ export function useEventRoster(eventId: string | undefined, enabled = true) {
   });
 }
 
-export function useHowItWorks() {
+/**
+ * `enabled` exists for one caller: `SignInScreen`, which needs this school's NAME only
+ * when it is explaining a school switch, and must not add a request to every sign-in.
+ */
+export function useHowItWorks(enabled = true) {
   return useQuery({
     queryKey: ['how-it-works'],
     queryFn: () => api.school.howItWorks(),
+    enabled,
   });
 }
 

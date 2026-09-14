@@ -31,6 +31,55 @@ export interface VerifyResult {
   did: string;
 }
 
+/** A school as the viewer's own session knows it. Never another member's. */
+export interface ViewerSchool {
+  did: string;
+  label: string;
+  name: string;
+  /** The host this school is served from — where the switcher navigates. */
+  host: string;
+}
+
+/**
+ * `GET /api/schools` — the public directory of the schools this AppView hosts.
+ *
+ * Name, city, and a host you can visit. NEVER a member count, a class count or
+ * a "most active" ordering (spec ruling 7): a directory of cities is a public
+ * fact, how many people are in each one is not.
+ */
+export interface SchoolListing {
+  did: string;
+  label: string;
+  name: string;
+  city?: string | null;
+  /** Where the school is served — the link out of this page. */
+  host: string;
+}
+
+export interface SchoolsResponse {
+  schools: SchoolListing[];
+}
+
+/**
+ * `GET /api/schools/nearby` — schools this one has named as peers, read from
+ * their own published `freeschool.draft.school` records rather than from any
+ * local table. Absent (404) on a deployment whose AppView predates it, which
+ * `/schools` treats as "none to show" rather than as an error.
+ */
+export interface NearbySchool {
+  did: string;
+  name: string;
+  city?: string | null;
+  host?: string;
+  tags?: string[];
+  peers?: string[];
+}
+
+/** `POST /api/schools/:did/leave`. */
+export interface LeaveSchoolResult {
+  left: boolean;
+}
+
 export interface AuthMe {
   did: string;
   kind: 'custodial' | 'oauth';
@@ -42,6 +91,33 @@ export interface AuthMe {
    * everyone who signed up before onboarding existed, which is the point:
    * they get the offer once, on their next verified sign-in. */
   onboarded: boolean;
+  /**
+   * The school THIS REQUEST resolved to — the host's, or the session's when
+   * the host names none (the apex). Absent on a deployment that has not been
+   * bootstrapped with a school at all.
+   */
+  school?: Omit<ViewerSchool, 'host'>;
+  /**
+   * Every school the viewer belongs to. The ONLY cross-school list in the
+   * app, and it is the viewer's own membership and nobody else's (MS §10.1).
+   * `SchoolSwitcher` renders when there is more than one; one school is not a
+   * choice and must not look like one.
+   */
+  schools?: ViewerSchool[];
+}
+
+/** `POST /api/auth/switch-school`. `host` is where the PWA navigates next. */
+export interface SwitchSchoolResult {
+  school: Omit<ViewerSchool, 'host'>;
+  host: string;
+  /**
+   * Whether the session cookie reaches that host (`SESSION_COOKIE_DOMAIN` is set and the
+   * host is under it). When it does not — the dev stack, and production before the
+   * cookie-domain cutover — the browser would arrive signed out, so `SchoolSwitcher`
+   * sends it to that city's sign-in door with a line saying what happened instead.
+   * Optional because an AppView older than this field simply says nothing.
+   */
+  sessionSpansHosts?: boolean;
 }
 
 /**
@@ -394,6 +470,13 @@ export interface CreateRequestInput {
   description?: string;
   skill?: string;
   threshold?: number;
+  /**
+   * "Ask <name> to teach this" — the member this request is addressed to.
+   * APP-SIDE ON THE APPVIEW: it never reaches the public request record, which
+   * must not name a person who did not write it. The only one who learns of it
+   * is the member asked, in their own notifications.
+   */
+  askedOf?: string;
 }
 
 export interface RequestClaimInput {
@@ -404,6 +487,12 @@ export interface RequestClaimInput {
 export interface RequestMutationResult {
   uri: string;
   cid: string;
+  /**
+   * "Ask <name> to teach this" only: true when the ask joined an open request that was
+   * already addressed to that person for that skill, rather than writing a second one.
+   * `uri` is then the OLDER request's, so the member is told where their interest landed.
+   */
+  merged?: boolean;
 }
 
 /**
@@ -904,6 +993,24 @@ export interface NewsletterDraft {
   html: string;
   status: string;
   [key: string]: unknown;
+}
+
+/** `GET /api/admin/newsletter/last` (steward) — the most recently composed
+ * `fs_newsletter_issue` for the current school. Content and status only,
+ * never a recipient list; `sentAt`/`recipientCount` are `null` on a draft
+ * that has not been sent. */
+export interface NewsletterIssue {
+  id: string;
+  month: string;
+  status: string;
+  sentAt: string | null;
+  recipientCount: number | null;
+  html: string;
+  text: string;
+}
+
+export interface LastNewsletterIssueResponse {
+  issue: NewsletterIssue | null;
 }
 
 /**

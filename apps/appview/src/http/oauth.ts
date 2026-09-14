@@ -32,6 +32,7 @@ import { eq } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { oauthClientKey, oauthSession, oauthState } from '../db/schema.js'
 import { config } from '../config.js'
+import { normalizeHost, schoolByHost } from '../lib/schools.js'
 
 const KID = 'freeschool-appview-1'
 
@@ -143,4 +144,61 @@ export async function jwks(): Promise<unknown> {
 /** Reset for tests. */
 export function resetOauthClient(): void {
   client = undefined
+}
+
+/* ─────────────────── the host the member came from (MS §3) ─────────────────── */
+
+/**
+ * OAUTH LIVES ON ONE ORIGIN. A confidential client's `client_id` IS its metadata URL and
+ * its `redirect_uri` must sit on the same origin, so one client per city would mean N
+ * metadata documents, N key registrations and a consent screen that names a different
+ * thing each time. The apex is therefore the front door for the whole network: the dance
+ * starts and ends on `APPVIEW_PUBLIC_URL`.
+ *
+ * Which leaves one thing to carry: the city the member was looking at when they pressed
+ * the button. It rides in the OAuth `state` — the library's own `appState`, stored
+ * server-side in `fs_oauth_state` alongside the PKCE verifier and handed back by
+ * `client.callback()`, so no new column is needed and nothing about it is visible to, or
+ * writable by, the browser.
+ *
+ * ON THE WAY BACK IT IS NEVER REFLECTED RAW. The host must parse as a hostname and must
+ * name a school in `fs_school_domain`; anything else lands on the apex. An open redirect
+ * here would be a session-fixation gift, since the response that follows sets the session
+ * cookie.
+ */
+export function oauthOriginState(host: string): string | undefined {
+  const normalized = (host ?? '').trim().toLowerCase()
+  return HOST_RE.test(normalized) ? normalized : undefined
+}
+
+/** A hostname, optionally with a port. Deliberately no scheme, no path, no userinfo. */
+const HOST_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$/
+
+/**
+ * Where the callback sends the member, and which school their session belongs to.
+ *
+ * One lookup answers both questions, because they are the same question: the state names
+ * a school host or it does not. `{ schoolDid: undefined }` means the apex — a member who
+ * started there, or a state this deployment cannot vouch for.
+ */
+export async function resolveOauthOrigin(
+  state: string | null | undefined,
+): Promise<{ host?: string; schoolDid?: string }> {
+  const host = oauthOriginState(state ?? '')
+  if (!host) return {}
+  const school = await schoolByHost(normalizeHost(host)).catch(() => undefined)
+  if (!school) return {}
+  return { host, schoolDid: school.did }
+}
+
+/**
+ * `https://<school host>/?<query>`, or the apex when no school host was resolved. The
+ * apex URL is taken whole from `webPublicUrl` because in development it carries a port
+ * (`http://localhost:5173`); a school host carries its own, so only the scheme is
+ * borrowed.
+ */
+export function oauthReturnUrl(host: string | undefined, query: string): string {
+  if (!host) return `${config().webPublicUrl}/?${query}`
+  const scheme = config().webPublicUrl.startsWith('http://') ? 'http' : 'https'
+  return `${scheme}://${host}/?${query}`
 }

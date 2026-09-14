@@ -91,6 +91,29 @@ function listingTime(createdAt?: string): number {
   return Number.isNaN(t) ? -Infinity : t
 }
 
+/**
+ * OUR OWN school's curation, out of everything the index holds for this event.
+ *
+ * FEDERATION (MS §7, ruling 7). Once we follow a peer school's PDS we index THEIR
+ * `coop.lexicon.event.listing` records too — a peer curating a class in their own city.
+ * `isListed` cannot tell whose listing it is reading, so without this filter two things
+ * both go wrong: a peer's `listed` record would put a class nobody here teaches on our
+ * calendar, and a peer's `removed` record would take one of OUR classes off it. Whose
+ * calendar this is, is decided here and nowhere else.
+ *
+ * The owner of a listing is its `school` field, falling back to the repo that wrote it
+ * (every listing we write carries both). An unconfigured deployment — `schoolDid` is `''`,
+ * which is what a unit suite and a pre-bootstrap install both look like — filters nothing,
+ * exactly as the `fs_*` school scoping widens for the legacy school.
+ */
+export function listingsOfSchool(
+  listings: Array<{ did: string; value: EventListing }>,
+  schoolDid: string,
+): EventListing[] {
+  if (!schoolDid) return listings.map((l) => l.value)
+  return listings.filter((l) => (l.value.school ?? l.did) === schoolDid).map((l) => l.value)
+}
+
 export interface CalendarInclusion {
   show: boolean
   origin: 'ours' | 'listed'

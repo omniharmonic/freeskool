@@ -44,9 +44,10 @@ import type { Did } from '@freeschool/school-actor'
 import { getDb } from '../db/index.js'
 import { memberPrefs } from '../db/schema.js'
 import { getThresholds } from './policy.js'
-import { schoolActor } from './school-actor.js'
+import { actorFor } from './school-actors.js'
+import { legacySchoolDid } from './schools.js'
+import { publicRoleOptIn, setPublicRole } from './membership.js'
 import { getRecord } from './pds.js'
-import { config } from '../config.js'
 import { NSID } from '../lexicons/nsids.js'
 import { describeError, log } from './logging.js'
 
@@ -64,9 +65,15 @@ export function membershipClaimRkey(schoolDid: string, subjectDid: string): stri
   return out
 }
 
-export async function isPublicRoleOptIn(did: string): Promise<boolean> {
-  const rows = await getDb().select({ publicRole: memberPrefs.publicRole }).from(memberPrefs).where(eq(memberPrefs.did, did)).limit(1)
-  return rows[0]?.publicRole ?? false
+/**
+ * PER SCHOOL, and it has to be: the claim this gates names the school it belongs to, so a
+ * global answer would let consent given to Boulder publish a naming in Denver the moment
+ * a Denver re-derivation fired (R9). `lib/membership.ts#publicRoleOptIn` reads
+ * `fs_membership.public_role`, falling back to the old global column for the LEGACY school
+ * alone while the backfill has not run.
+ */
+export async function isPublicRoleOptIn(did: string, schoolDid = legacySchoolDid()): Promise<boolean> {
+  return publicRoleOptIn(did, schoolDid)
 }
 
 /**
@@ -76,11 +83,21 @@ export async function isPublicRoleOptIn(did: string): Promise<boolean> {
  * caller may follow up with `publishRoleClaim` using the subject's current role, as
  * `http/routes/me.ts#PUT /public-role` does).
  */
-export async function setPublicRoleOptIn(did: string, publicRole: boolean, schoolDid = config().SCHOOL_DID): Promise<void> {
-  await getDb()
-    .insert(memberPrefs)
-    .values({ did, publicRole, updatedAt: new Date() })
-    .onConflictDoUpdate({ target: memberPrefs.did, set: { publicRole, updatedAt: new Date() } })
+export async function setPublicRoleOptIn(did: string, publicRole: boolean, schoolDid = legacySchoolDid()): Promise<void> {
+  // The per-school answer is the one every reader consults...
+  await setPublicRole(did, schoolDid, publicRole)
+  // ...and the old global column is written too, for the LEGACY school only, so a
+  // rollback to the pre-tenancy code path still sees the member's choice (MS §9 E).
+  // Writing it for any other school would re-create exactly the cross-school consent leak
+  // this change exists to close.
+  if (schoolDid === legacySchoolDid()) {
+    await getDb()
+      .insert(memberPrefs)
+      .values({ did, publicRole, updatedAt: new Date() })
+      .onConflictDoUpdate({ target: memberPrefs.did, set: { publicRole, updatedAt: new Date() } })
+  }
+  // Opting out retracts the claim for THIS school and no other: the member's consent in
+  // another school is untouched, and so is the record that consent supports.
   if (!publicRole && schoolDid) {
     await retractRoleClaim(schoolDid as Did, did as Did)
   }
@@ -101,7 +118,7 @@ export interface PublishResult {
  */
 export async function retractRoleClaim(schoolDid: Did, subjectDid: Did): Promise<void> {
   try {
-    await schoolActor().deleteRecordAsSchool({
+    await (await actorFor(schoolDid)).deleteRecordAsSchool({
       schoolDid,
       callerDid: subjectDid,
       scope: NSID.membership,
@@ -149,7 +166,7 @@ export async function publishRoleClaim(
     // worth attempting when the subject could plausibly have one (they opted in at
     // some point); skips the call entirely for the common case of a member who never
     // opted in at all.
-    if (await isPublicRoleOptIn(subjectDid)) {
+    if (await isPublicRoleOptIn(subjectDid, schoolDid)) {
       await retractRoleClaim(schoolDid, subjectDid)
     }
     return { published: false, reason: 'role-too-low' }
@@ -160,12 +177,12 @@ export async function publishRoleClaim(
   if (!thresholds.publishRoles) return { published: false, reason: 'policy-off' }
 
   // (b) the subject's own, explicit choice.
-  if (!(await isPublicRoleOptIn(subjectDid))) return { published: false, reason: 'not-opted-in' }
+  if (!(await isPublicRoleOptIn(subjectDid, schoolDid))) return { published: false, reason: 'not-opted-in' }
 
   try {
     const rkey = membershipClaimRkey(schoolDid, subjectDid)
     const existingCid = await (deps.fetchExistingCid ?? fetchExistingCid)(schoolDid, subjectDid)
-    const res = await schoolActor().putRecordAsSchool({
+    const res = await (await actorFor(schoolDid)).putRecordAsSchool({
       schoolDid,
       // The subject is the caller: they already qualify (role >= Host, just checked),
       // and they are the one who opted in. No steward involvement needed to publish a

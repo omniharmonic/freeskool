@@ -5,7 +5,7 @@ import { dayKey, formatDayStamp, groupByDay } from '../lib/dates';
 import { Screen } from '../components/Screen';
 import { ContentGrid } from '../components/ContentGrid';
 import { SchoolMark } from '../components/SchoolMark';
-import { useCalendar } from '../lib/queries';
+import { useCalendar, useMe } from '../lib/queries';
 import { api } from '../lib/api';
 import { CalendarViews } from '../components/CalendarViews';
 import { addDays, calendarRange, type CalendarView } from '../lib/calendar-range';
@@ -14,12 +14,20 @@ export function CalendarScreen() {
   const [month, setMonth] = useState(() => { const date = new URLSearchParams(window.location.search).get('date'); const parsed = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T12:00:00`) : new Date(); return Number.isNaN(parsed.getTime()) ? new Date() : parsed; });
   const [view, setView] = useState<CalendarView>(() => { const selected = new URLSearchParams(window.location.search).get('view'); return ['list','month','week','day'].includes(selected??'') ? selected as CalendarView : 'list'; });
   const [search, setSearch] = useState('');
+  // Where "Leave this school" lands (Me). Read in the initializer because the effect
+  // below rewrites the query string on mount, and a leaver should be told it worked
+  // rather than dropped silently on a calendar that no longer counts them.
+  const [leftNotice, setLeftNotice] = useState(() => new URLSearchParams(window.location.search).get('left') === '1');
   useEffect(()=>{const query=new URLSearchParams(window.location.search);query.set('view',view);query.set('date',dayKey(month));window.history.replaceState(window.history.state,'',`${window.location.pathname}?${query}`);},[view,month]);
   const [showPast, setShowPast] = useState(false);
   const range = useMemo(() => { const r = calendarRange(month, view); return { from: r.from.toISOString(), to: r.to.toISOString() }; }, [month, view]);
   const { data, isPending, isError, refetch } = useCalendar(range);
   const { data: info } = useQuery({ queryKey: ['school-info'], queryFn: () => api.school.howItWorks(), enabled: Boolean(api.school), staleTime: 300_000 });
+  // `GET /api/auth/me` names the school THIS HOST resolved to, which is the authority on
+  // whose calendar this is; `how-it-works` is the fallback for a signed-out visitor.
+  const { data: me } = useMe();
   const school = info?.school;
+  const schoolName = me?.school?.name ?? school?.name ?? 'Free School';
   const today = dayKey(new Date());
   const events = useMemo(() => (data?.events ?? []).filter(event => {
     const matches = `${event.name} ${event.neighborhood ?? ''} ${(event.tags ?? []).join(' ')}`.toLocaleLowerCase().includes(search.toLocaleLowerCase().trim());
@@ -31,7 +39,7 @@ export function CalendarScreen() {
   const monthLabel = view === 'day' ? month.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }) : view === 'week' ? `${new Date(range.from).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${addDays(new Date(range.to), -1).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}` : month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
   function moveMonth(amount: number) { setMonth(current => view === 'day' ? addDays(current, amount) : view === 'week' ? addDays(current, amount * 7) : new Date(current.getFullYear(), current.getMonth() + amount, 1)); }
   function jump(key: string) { dayRefs.current.get(key)?.scrollIntoView({ behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' }); }
-  return <Screen title={school?.name ?? 'Free School'} wide trailing={<Link to="/zine" className="header-print">Print zine</Link>} intro={
+  return <Screen title={schoolName} wide trailing={<Link to="/zine" className="header-print">Print zine</Link>} intro={
     <div className="calendar-intro">
       <div><p className="local-line"><span className="status-dot" />{school?.region || 'Your local learning commons'}</p>
         <h1>Everybody has<br />something to share.</h1>
@@ -41,6 +49,7 @@ export function CalendarScreen() {
       <div className="commons-drawing"><SchoolMark /><span>Built by all of us.</span></div>
     </div>
   }>
+    {leftNotice ? <div className="safe-x"><p role="status" className="mb-4 text-caption text-ink-soft">You’ve left this school. Classes you taught are still on this calendar. <button type="button" className="font-bold text-blue" onClick={() => setLeftNotice(false)}>Dismiss</button></p></div> : null}
     <div className="calendar-toolbar">
       <div className="month-control"><h2>{monthLabel}</h2><div><button type="button" aria-label={`Previous ${view === 'list' ? 'month' : view}`} onClick={() => moveMonth(-1)}>‹</button><button type="button" aria-label={`Next ${view === 'list' ? 'month' : view}`} onClick={() => moveMonth(1)}>›</button></div><button className="today-button" type="button" onClick={() => setMonth(new Date())}>Today</button></div>
       <label className="calendar-search"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke="currentColor"/><path d="m12 12 5 5" stroke="currentColor"/></svg><input type="search" placeholder="Find a class, skill or neighborhood" aria-label="Search classes" value={search} onChange={e => setSearch(e.target.value)} /></label>

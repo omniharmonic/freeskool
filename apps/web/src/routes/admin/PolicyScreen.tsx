@@ -82,6 +82,7 @@ export function PolicyScreen() {
       title="Policy"
       current="policy"
       standfirst="Who can join, when hosting unlocks, and how many stewards a removal needs."
+      help="These numbers decide when somebody can start hosting and how many stewards must agree before anything is removed. Roles are worked out fresh from what people have actually done, so raising a number can move a member back down the ladder and lowering one can move people up — nobody is told either way, and nothing they have posted changes."
     >
       {isError ? <PageState title="The policy couldn’t load." error action={<button className="primary-action" onClick={() => void refetch()}>Try again</button>}>Your changes have not been sent.</PageState> : isPending || !thresholds ? (
         <LoadingState label="Loading the current policy…" />

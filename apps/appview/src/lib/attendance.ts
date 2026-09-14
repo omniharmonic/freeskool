@@ -11,6 +11,8 @@ import { getDb } from '../db/index.js'
 import { attendance } from '../db/schema.js'
 import { rowId } from './ids.js'
 import { bumpTally } from './roles.js'
+import { legacySchoolDid } from './schools.js'
+import { schoolScope } from './school-scope.js'
 
 export type AttendeeRole = 'attendee' | 'assistant' | 'co-host'
 
@@ -27,6 +29,8 @@ export interface RecordAttendanceInput {
   attendees: AttendeeInput[]
   /** The class's own start, stored on each row so retention can collapse by age. */
   eventStartsAt?: Date | null
+  /** The school this class is on the calendar of — the tally it credits (MS §4). */
+  schoolDid?: string
 }
 
 /**
@@ -53,6 +57,7 @@ export interface RecordAttendanceInput {
  */
 export async function recordAttendance(input: RecordAttendanceInput): Promise<{ recorded: number; tallyChanged: number }> {
   const db = getDb()
+  const schoolDid = input.schoolDid ?? legacySchoolDid()
   let recorded = 0
   let tallyChanged = 0
 
@@ -62,7 +67,13 @@ export async function recordAttendance(input: RecordAttendanceInput): Promise<{ 
     const existing = await db
       .select({ participated: attendance.participated, voidedAt: attendance.voidedAt })
       .from(attendance)
-      .where(and(eq(attendance.eventUri, input.eventUri), eq(attendance.attendeeDid, a.did)))
+      .where(
+        and(
+          eq(attendance.eventUri, input.eventUri),
+          eq(attendance.attendeeDid, a.did),
+          schoolScope(attendance.schoolDid, schoolDid),
+        ),
+      )
       .limit(1)
     const wasVoided = existing.length > 0 && existing[0]!.voidedAt !== null
     const wasCounted = existing.length > 0 && existing[0]!.participated && !wasVoided
@@ -74,6 +85,7 @@ export async function recordAttendance(input: RecordAttendanceInput): Promise<{ 
         eventUri: input.eventUri,
         attendeeDid: a.did,
         attestedByDid: input.hostDid,
+        schoolDid,
         participated: a.participated,
         role: a.role,
         eventStartsAt: input.eventStartsAt ?? null,
@@ -81,17 +93,17 @@ export async function recordAttendance(input: RecordAttendanceInput): Promise<{ 
       .onConflictDoUpdate({
         target: [attendance.eventUri, attendance.attendeeDid],
         // `voidedAt` deliberately absent: the host path never un-voids a row.
-        set: { participated: a.participated, role: a.role, attestedByDid: input.hostDid },
+        set: { participated: a.participated, role: a.role, attestedByDid: input.hostDid, schoolDid },
       })
 
     if (wasVoided) {
       // No tally movement for a voided row, regardless of what the sheet says now.
     } else if (a.participated && !wasCounted) {
-      await bumpTally(a.did, { attendedConfirmed: 1 })
+      await bumpTally(a.did, { attendedConfirmed: 1 }, schoolDid)
       tallyChanged++
     } else if (!a.participated && wasCounted) {
       // The host un-ticked somebody. Take the credit back, floored at 0 by `bumpTally`.
-      await bumpTally(a.did, { attendedConfirmed: -1 })
+      await bumpTally(a.did, { attendedConfirmed: -1 }, schoolDid)
       tallyChanged--
     }
     if (a.participated) recorded++

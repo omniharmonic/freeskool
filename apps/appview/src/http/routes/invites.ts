@@ -39,6 +39,9 @@ import { config } from '../../config.js'
 import { hashToken, newInviteToken } from '../../lib/crypto.js'
 import { rowId } from '../../lib/ids.js'
 import { roleOf } from '../../lib/roles.js'
+import { legacySchoolDid } from '../../lib/schools.js'
+import { schoolScope } from '../../lib/school-scope.js'
+import { currentSchool } from '../school-context.js'
 
 export const invites = new Hono<AppEnv>()
 
@@ -63,11 +66,16 @@ export class MintPermissionError extends Error {
   }
 }
 
-export async function mintInviteLink(inviterDid: string, input: z.infer<typeof mintBody>): Promise<MintedInvite> {
+export async function mintInviteLink(
+  inviterDid: string,
+  input: z.infer<typeof mintBody>,
+  /** An invite admits you to ONE school (MS §2). */
+  schoolDid: string = legacySchoolDid(),
+): Promise<MintedInvite> {
   // Belt-and-braces: the route also gates on `requireRole(Role.Member)`, but this
   // function is called directly by tests (and could be called from elsewhere), so the
   // rule lives here too rather than only at the door.
-  if ((await roleOf(inviterDid)) < Role.Member) throw new MintPermissionError()
+  if ((await roleOf(inviterDid, schoolDid)) < Role.Member) throw new MintPermissionError()
 
   const token = newInviteToken()
   const expiresAt = new Date(Date.now() + (input.ttlDays ?? DEFAULT_TTL_DAYS) * 86_400_000)
@@ -75,7 +83,7 @@ export async function mintInviteLink(inviterDid: string, input: z.infer<typeof m
     id: rowId(),
     tokenHash: hashToken(token),
     inviterDid,
-    schoolDid: config().SCHOOL_DID,
+    schoolDid,
     eventUri: input.eventUri ?? null,
     usesLeft: input.uses ?? 1,
     expiresAt,
@@ -87,12 +95,21 @@ export type RedeemResult =
   | { ok: true; eventUri?: string; alreadyMember?: boolean }
   | { ok: false; status: number; error: string; message?: string }
 
-export async function redeemInviteLink(token: string, redeemerDid: string): Promise<RedeemResult> {
+export async function redeemInviteLink(
+  token: string,
+  redeemerDid: string,
+  schoolDid: string = legacySchoolDid(),
+): Promise<RedeemResult> {
   const db = getDb()
   const tokenHash = hashToken(token)
   const rows = await db.select().from(inviteLink).where(eq(inviteLink.tokenHash, tokenHash)).limit(1)
   const row = rows[0]
   if (!row) return { ok: false, status: 404, error: 'NotFound', message: 'unknown invite link' }
+  // A link minted for Boulder does not admit anybody to Denver, and must not even be
+  // legible there: 404, the same answer an unknown token gets (MS §10).
+  if (schoolDid && row.schoolDid && row.schoolDid !== schoolDid) {
+    return { ok: false, status: 404, error: 'NotFound', message: 'unknown invite link' }
+  }
   if (row.expiresAt.getTime() <= Date.now()) {
     return { ok: false, status: 410, error: 'InviteExpired', message: 'this invite link has expired' }
   }
@@ -110,7 +127,13 @@ export async function redeemInviteLink(token: string, redeemerDid: string): Prom
   const already = await db
     .select({ code: invite.code })
     .from(invite)
-    .where(and(eq(invite.usedByDid, redeemerDid), or(isNotNull(invite.inviterDid), isNotNull(invite.inviterPurgedAt))))
+    .where(
+      and(
+        eq(invite.usedByDid, redeemerDid),
+        schoolScope(invite.schoolDid, schoolDid),
+        or(isNotNull(invite.inviterDid), isNotNull(invite.inviterPurgedAt)),
+      ),
+    )
     .limit(1)
   if (already.length > 0) {
     return { ok: true, ...(row.eventUri ? { eventUri: row.eventUri } : {}), alreadyMember: true }
@@ -131,6 +154,7 @@ export async function redeemInviteLink(token: string, redeemerDid: string): Prom
   // redemption's own id, never a real PDS invite code.
   await db.insert(invite).values({
     code: rowId(),
+    schoolDid,
     inviterDid: claim.inviterDid,
     usedByDid: redeemerDid,
     usedAt: new Date(),
@@ -143,7 +167,7 @@ invites.post('/invites', requireViewer, requireRole(Role.Member), async (c) => {
   const parsed = mintBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
   try {
-    const minted = await mintInviteLink(c.var.viewer!.did, parsed.data)
+    const minted = await mintInviteLink(c.var.viewer!.did, parsed.data, currentSchool(c).did)
     return c.json(minted, 201)
   } catch (err) {
     if (err instanceof MintPermissionError) return c.json({ error: 'PermissionDenied', message: err.message }, 403)
@@ -153,7 +177,7 @@ invites.post('/invites', requireViewer, requireRole(Role.Member), async (c) => {
 
 invites.post('/invites/:token/redeem', requireViewer, async (c) => {
   const token = c.req.param('token')
-  const result = await redeemInviteLink(token, c.var.viewer!.did)
+  const result = await redeemInviteLink(token, c.var.viewer!.did, currentSchool(c).did)
   if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status as 404 | 409 | 410)
   return c.json({
     ok: true,

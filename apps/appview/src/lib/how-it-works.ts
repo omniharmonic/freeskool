@@ -8,7 +8,7 @@
  * exercises directly. `buildHowItWorks` is the thin live wiring the route calls.
  */
 import type { Thresholds } from '@freeschool/shared'
-import { config } from '../config.js'
+import { legacySchoolDid } from './schools.js'
 import { getRecord } from './pds.js'
 import { NSID } from '../lexicons/nsids.js'
 import { currentPolicyUri, getThresholds } from './policy.js'
@@ -97,7 +97,7 @@ export function renderHowItWorks(
   }
 }
 
-export async function buildHowItWorks(schoolDid = config().SCHOOL_DID): Promise<HowItWorksPayload> {
+export async function buildHowItWorks(schoolDid = legacySchoolDid()): Promise<HowItWorksPayload> {
   if (!schoolDid) return renderHowItWorks(null, (await getThresholds(schoolDid)) as Thresholds)
 
   const [thresholds, policyUri, school] = await Promise.all([

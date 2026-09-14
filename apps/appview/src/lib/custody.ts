@@ -22,6 +22,7 @@ import { sendMail } from './mail.js'
 import { registerEmailTarget } from '../notifications/dispatch.js'
 import { subscribe } from './newsletter-subscriptions.js'
 import { log } from './logging.js'
+import { legacySchoolDid, schoolHostFor } from './schools.js'
 
 export const VERIFY_TTL_MS = 24 * 3_600_000
 
@@ -51,7 +52,13 @@ type SignupOutcome =
   | { kind: 'resend'; did: string; handle: string }
   | { kind: 'created' | 'adopted'; did: string; handle: string }
 
-export async function signup(input: { email: string; inviterDid?: string; newsletter?: boolean }): Promise<SignupResult> {
+export async function signup(input: {
+  email: string
+  inviterDid?: string
+  newsletter?: boolean
+  /** The school being joined: the invite evidence and the digest are both per school. */
+  schoolDid?: string
+}): Promise<SignupResult> {
   const c = config()
   const email = input.email.trim().toLowerCase()
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -66,6 +73,9 @@ export async function signup(input: { email: string; inviterDid?: string; newsle
   // check -> mint-or-adopt -> insert sequence per email: the second request simply
   // waits for the lock, then sees the first request's now-committed row and takes the
   // ordinary resend path below. The lock is released automatically at transaction end.
+  /** The school this signup is FOR — the host's when the door was on one (MS §3). */
+  const schoolDid = input.schoolDid ?? legacySchoolDid()
+
   const outcome = await getDb().transaction(async (tx): Promise<SignupOutcome> => {
     await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${email}))`)
 
@@ -151,6 +161,7 @@ export async function signup(input: { email: string; inviterDid?: string; newsle
     if (!adopted) {
       await tx.insert(invite).values({
         code,
+        schoolDid,
         inviterDid: input.inviterDid ?? null,
         usedByDid: account.did,
         usedAt: new Date(),
@@ -159,16 +170,20 @@ export async function signup(input: { email: string; inviterDid?: string; newsle
     return { kind: adopted ? 'adopted' : 'created', did: account.did, handle: account.handle }
   })
 
+  // Where the school this signup is FOR is served — the magic link is built on that host
+  // so confirming it joins that school (see `verifyLinkBase`).
+  const schoolHost = await schoolHostFor(schoolDid).catch(() => '')
+
   if (outcome.kind === 'resend') {
-    const { url } = await sendVerificationEmail(outcome.did, email)
+    const { url } = await sendVerificationEmail(outcome.did, email, schoolHost)
     return { did: outcome.did, handle: outcome.handle, ...(c.SMTP_URL ? {} : { verifyUrl: url }) }
   }
 
   await registerEmailTarget(outcome.did, email)
   // Default false: only the signup form's own checkbox, ticked, subscribes.
-  if (input.newsletter === true) await subscribe(outcome.did, email)
+  if (input.newsletter === true) await subscribe(outcome.did, email, schoolDid)
 
-  const { url } = await sendVerificationEmail(outcome.did, email)
+  const { url } = await sendVerificationEmail(outcome.did, email, schoolHost)
   if (outcome.kind === 'adopted') {
     log.info('custodial account adopted')
   } else {
@@ -220,7 +235,28 @@ async function adoptOrphanedAccount(
   return { kind: 'adopted', did: found.did, handle: found.handle }
 }
 
-export async function sendVerificationEmail(did: string, email: string): Promise<{ url: string }> {
+/**
+ * The base the magic link is built on. Normally `webPublicUrl` verbatim — it is the one
+ * URL invite links, the newsletter and the OAuth client id already agree on, and in
+ * development it carries a port that a bare hostname would lose.
+ *
+ * With `MULTI_SCHOOL` on and a school served from a host of its own, the link is built on
+ * THAT host instead, so a person who signed up on `denver.freeskool.xyz` confirms there
+ * and their first session — which is what writes `fs_membership` — joins Denver rather
+ * than whichever school the apex happens to serve.
+ */
+function verifyLinkBase(schoolHost?: string): string {
+  const c = config()
+  if (!c.MULTI_SCHOOL || !schoolHost || schoolHost === c.webHost) return c.webPublicUrl
+  const scheme = c.webPublicUrl.startsWith('http://') ? 'http' : 'https'
+  return `${scheme}://${schoolHost}`
+}
+
+export async function sendVerificationEmail(
+  did: string,
+  email: string,
+  schoolHost?: string,
+): Promise<{ url: string }> {
   const token = newToken()
   await getDb().insert(emailVerification).values({
     tokenHash: hashToken(token),
@@ -232,7 +268,7 @@ export async function sendVerificationEmail(did: string, email: string): Promise
   // `GET /api/auth/verify` (and shows a human a page either way). Every link a person
   // clicks is on `webPublicUrl`; only the OAuth client metadata/jwks/callback, which are
   // fetched by a PDS rather than clicked, stay on `APPVIEW_PUBLIC_URL`.
-  const url = `${config().webPublicUrl}/verify?token=${encodeURIComponent(token)}`
+  const url = `${verifyLinkBase(schoolHost)}/verify?token=${encodeURIComponent(token)}`
   await sendMail({
     to: email,
     subject: 'Confirm your Free School account',

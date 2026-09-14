@@ -5,7 +5,8 @@ the AppView (indexer + API + jobs), Postgres, and the school's own reference PDS
 
 - `Dockerfile` — `appview` and `web` targets from one pnpm workspace layer
 - `infra/production/compose.yml` — the four services; only Caddy publishes ports
-- `infra/production/Caddyfile` — three site blocks: web+API, `www` redirect, PDS + handles
+- `infra/production/Caddyfile` — an `(app)` snippet and four names: web+API on the apex, the PDS
+  hostname, the `*.` wildcard (handles **and** schools), and the container-local TLS `ask`
 - `infra/production/.env.example` — every variable, with how to generate each secret
 - `infra/production/backup.sh` — nightly Postgres dump + PDS volume tarball, 14-day retention
 
@@ -30,9 +31,15 @@ Why Falkenstein and not a US location: Hetzner's CX line (CX33 €9.99/month, 20
 the US locations only offer CPX at roughly four to seven times the price. Boulder sees ~130 ms to
 Falkenstein, which the PWA's offline-first calendar absorbs. Move later with the runbook below.
 
-**Still open (R9):** the PDS hostname is `pds.freeskool.xyz`, which is not neutral — the hostname
-itself says what the school is. Changing it later means a new `PDS_HOSTNAME`, DNS, and a PLC
-operation per existing account to re-point the service endpoint, so decide before inviting members.
+**Decided (R9), 2026-09-14:** the PDS hostname `pds.freeskool.xyz` is not neutral — the hostname
+itself says what the school is, in a DID document that is world-readable forever. Benjamin
+registered **`freeskool.directory`**, and the PDS moves to `pds.freeskool.directory` with every
+handle to `<name>.freeskool.directory` (federation design §2, ruling 3). That is a PLC operation
+per existing account, plus a Caddy/env window in which both domains are served at once, so it has
+its own runbook: **`docs/runbooks/pds-hostname-migration.md`** — do it before the relay switch
+(`docs/runbooks/relay-switch.md`). `infra/production/{Caddyfile,compose.yml,.env.example}` already
+carry the `PDS_LEGACY_HOST` / `PDS_LEGACY_HANDLE_DOMAIN` overlap variables the runbook uses; they
+are empty except during that window.
 
 ## DNS
 
@@ -51,6 +58,68 @@ an MX plus SPF TXT on the `send` subdomain, and optionally `_dmarc`). `freeskool
 Resend domain (since 2026-09-13; `cosense.us` was removed to make room) and mail goes out as
 `Free School <hello@freeskool.xyz>`. Namecheap only keeps MX records once Mail Settings is set to
 **Custom MX** in its UI; the API silently drops them otherwise.
+
+## Caddy: handle hosts, school hosts, and the on-demand gate
+
+Since the federation branch the wildcard is **inverted** (multi-school design §3). It used to send
+everything on `*.freeskool.xyz` to the PDS, which made `boulder.freeskool.xyz` — the school
+account's handle — unusable as the school's web address. Now:
+
+| Name | What serves it |
+|---|---|
+| `freeskool.xyz` | the PWA, plus `/api/*` and the three `/oauth/*` documents on the AppView |
+| `www.freeskool.xyz` | 301 to the apex (from inside the wildcard block; see below) |
+| `pds.freeskool.xyz` | the PDS, whole and unchanged |
+| `*.freeskool.xyz` | `/.well-known/atproto-did` and `/xrpc/*` → the PDS; **every other path → the app** |
+
+So `boulder.freeskool.xyz` is both the Boulder school's web address and the Boulder school
+account's handle, and `calmalder301.freeskool.xyz/.well-known/atproto-did` keeps resolving exactly
+as before. The apex body lives in one Caddyfile snippet, `(app)`, imported by both the apex block
+and the wildcard block, so "the same app on another name" cannot drift into two apps.
+
+The consequence is that **school labels and member handles share one namespace**. One list,
+`RESERVED_LABELS` in `apps/appview/src/lib/handles.ts` (mirrored in the PWA's `HandleChooser.tsx`,
+which cannot import server code), is refused by the handle generator, by the handle chooser and by
+school creation: `admin www pds skills school help mail api app static assets internal denver
+boulder`, plus every label in `SCHOOL_LABELS`. A member who held a school's label would hold a
+school's origin — the session cookie is scoped to the registered domain — so this is a
+security rule, not a tidiness rule.
+
+**The on-demand `ask` now asks the AppView, not the PDS.** Caddy cannot get a wildcard certificate
+here (no DNS challenge), so every handle and school host is issued one name at a time and Caddy
+asks first. `http://127.0.0.1:9000` inside the Caddy container proxies to
+`appview:4000/internal/tls-check?domain=…`, which answers 200 for `www.$WEB_HOST`, 200 for a known
+school label under `SCHOOL_DOMAIN_SUFFIX`, and otherwise asks the PDS's own `/tls-check` (3-second
+timeout). **A PDS that does not answer is a 403**, never a yes: an unanswered check must not spend
+one of Let's Encrypt's 50 certificates per registered domain per week. The endpoint is never routed
+from a public host — the site blocks send only `/api/*` and the OAuth documents to the AppView — and
+it never logs the domain (R9: the ask carries a member's handle host).
+
+Two AppView variables belong in `infra/production/.env` (both have defaults that already match this
+deployment): `SCHOOL_DOMAIN_SUFFIX=freeskool.xyz` and `SCHOOL_LABELS=boulder`. The label of
+`SCHOOL_HANDLE` is added automatically when that handle sits directly under the suffix. Federation
+Task 2 replaces the `SCHOOL_LABELS` half with the `fs_school_domain` table.
+
+**Caddy gotchas that constrain all of the above.** Caddy never issues a certificate for a specific
+name it believes a configured wildcard covers, which is why `www` is served from inside the wildcard
+block (it would otherwise never get a certificate at all) and why `pds.freeskool.xyz` keeps
+`tls { on_demand }` even in its own block.
+
+### Validating the Caddyfile
+
+The Caddyfile uses `{$ENV}` placeholders, so validation needs them set — an unset placeholder
+becomes an empty hostname and the adapter's answer is meaningless:
+
+```sh
+docker run --rm \
+  -e WEB_HOST=freeskool.xyz -e PDS_HOST=pds.freeskool.xyz -e PDS_HANDLE_DOMAIN=freeskool.xyz \
+  -v "$PWD/infra/production/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+It ends in `Valid configuration`. Swap `validate` for `adapt` to read the JSON it becomes — the
+quickest way to check that the PDS paths still sit ahead of the app on the wildcard host, and that
+the on-demand policy still covers both `pds.` and `*.`.
 
 ## Email (Resend)
 
@@ -190,7 +259,79 @@ design doc (`docs/superpowers/specs/2026-09-13-multi-school-design.md` §3) flag
 causes: a `<city>.freeskool.xyz`-per-school URL scheme, which that doc proposes, would collide head-on
 with the member-handle namespace `PDS_HANDLE_DOMAIN=freeskool.xyz` already owns. Nothing to do for this
 release — it is a known, written-down constraint for whenever multi-school ships, not a bug in what
-shipped here.
+shipped here. **Resolved on branch `federation`** by the wildcard inversion — see "Caddy: handle
+hosts, school hosts, and the on-demand gate" above.
+
+## Federation release
+
+Everything the `federation` branch adds on top of "Releasing this refinement branch" above — a
+second city, a neutral PDS hostname, and (last, and separately decided) the Bluesky relay. Three
+runbooks carry the actual step-by-step for each; this section is the map between them and the
+order that keeps a deploy from happening ahead of a migration it depends on.
+
+- **`docs/runbooks/multi-school-rollout.md`** — migrations `0011`–`0013` (the primary-key
+  changes that make a rolling deploy unsafe — read the "one thing that matters" there before
+  scheduling this) plus the additive `0014`–`0015`, `backfill-school`, and when it is finally
+  safe to create a second school.
+- **`docs/runbooks/pds-hostname-migration.md`** — moving every account's DID document from
+  `pds.freeskool.xyz` to the neutral `pds.freeskool.directory` (R9), via
+  `migrate-pds-hostname`.
+- **`docs/runbooks/relay-switch.md`** — turning `PDS_CRAWLERS` on, a one-way door, done only
+  after the hostname migration so the relay only ever sees the neutral name.
+
+**New env keys this release introduces** (`.env.example` / `infra/production/.env.example`
+document all of these; `apps/appview/src/config.ts` is still the only thing that reads them):
+
+| Key | Default | What it does |
+|---|---|---|
+| `MULTI_SCHOOL` | `false`/`0` | Host-based tenancy switch (MS §11 Phase 3/4). `0` resolves every request to the one env-configured school regardless of Host. |
+| `SESSION_COOKIE_DOMAIN` | *(empty, host-only)* | `Domain` on the session cookie. `.freeskool.xyz` once a second city exists, so one sign-in is one identity across every city — see the cutover note below. |
+| `SCHOOL_DOMAIN_SUFFIX` | `freeskool.xyz` | The registered domain whose single labels are schools (`<label>.<suffix>` serves that school's app). |
+| `SCHOOL_LABELS` | `boulder` | The labels that are schools today, until `fs_school_domain` fully replaces this env list. |
+| `PDS_LEGACY_HANDLE_DOMAIN` / `PDS_HANDLE_DOMAINS` | empty | The hostname-migration overlap: the domain being moved off, and every domain (beyond `PDS_HANDLE_DOMAIN`) the PDS answers for at once. |
+| `SCHOOL_CREATION` | `closed` | MS §8 ruling 1: `closed`\|`invite`\|`open`. Only `closed` is implemented; the other two 501 rather than silently reading as closed. |
+| `OPERATOR_TOKEN` | *(empty)* | The `X-Operator-Token` an operator presents to create a school while `SCHOOL_CREATION=closed`. Empty refuses school creation unconditionally — required before a second city can ever be created. |
+
+**Order, end to end:**
+
+1. **Deploy the code with `MULTI_SCHOOL=0`.** Every new code path (host resolution, the
+   session's `current_school_did`, `SchoolActorPort` per school) is live either way; with the
+   flag off every request still resolves to the single legacy school, so this step is a normal
+   `release.sh` — no behaviour change a member would notice.
+2. **Migrations `0011`–`0015` run at boot**, as they do for every deploy — `0011`–`0013` are the
+   schools/memberships/credentials tables and the primary-key widening the rollout runbook
+   warns about (app DOWN for that one, not a rolling deploy); `0014` (school PDS endpoint,
+   custody mode, verification timestamps) and `0015` (`fs_request_asked_of`) are both additive
+   and safe either way.
+3. **`backfill-school`** (`docs/runbooks/multi-school-rollout.md` §"Order" steps 5–6) — stamps
+   `school_did` onto every pre-existing row and verifies zero rows are left unstamped. This has
+   to finish, and be verified, before step 4: a second school must never be able to see a row
+   the back-fill has not yet claimed for the first one.
+4. **Hostname migration** (`docs/runbooks/pds-hostname-migration.md`) — move every account's DID
+   document off `pds.freeskool.xyz` before any second school is created under it, so a second
+   city never has to be told to use the old name for even a day.
+5. **Flip `MULTI_SCHOOL=1` and set `OPERATOR_TOKEN` the first time a second city is actually
+   created.** Not before — see multi-school-rollout.md's "why the back-fill must precede the
+   second school". This is also the deploy that sets `SESSION_COOKIE_DOMAIN=.freeskool.xyz`
+   (below).
+6. **Relay switch, last, and by itself** (`docs/runbooks/relay-switch.md`) — a one-way door,
+   done only once the neutral hostname is the only one anybody's DID document names.
+
+**The cookie-domain cutover** (federation Task 4 report, concern 1): `SESSION_COOKIE_DOMAIN`
+must move from empty (host-only) to `.freeskool.xyz` in the SAME deploy that creates the second
+city — a school switcher that only ever sees one origin's cookie is not a school switcher. An
+existing member's browser is still holding a host-only cookie set before the cutover, and a
+`Cookie:` header says nothing about the scope a value came from, so the server cannot tell the
+two apart by looking.
+
+**It does not need to. There is no forced sign-out.** `apps/appview/src/http/session.ts`
+migrates on first sight: the first request after the flip re-issues the same cookie WITH the
+`Domain`, expires the host-only one (a deletion is scoped too, so it goes out without the
+domain — otherwise the browser keeps both and RFC 6265 ordering hands back the narrow one
+forever), and drops a `fs_session_d` marker so it happens once per browser rather than on every
+response. The member stays signed in throughout; `apps/appview/test/session-cookie-domain.test.ts`
+pins it. Do NOT rotate `SESSION_SECRET` or empty `fs_session` for this — both would sign
+everybody out for no reason.
 
 ## Moving the stack
 

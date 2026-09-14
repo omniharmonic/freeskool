@@ -14,7 +14,9 @@ import { bodyLimit } from 'hono/body-limit'
 import { cors } from 'hono/cors'
 import { config } from '../config.js'
 import { withViewer, type AppEnv } from './session.js'
+import { withSchool } from './school-context.js'
 import { health } from './routes/health.js'
+import { internal } from './routes/internal.js'
 import { auth } from './routes/auth.js'
 import { calendar } from './routes/calendar.js'
 import { events } from './routes/events.js'
@@ -29,6 +31,7 @@ import { oauthRoutes } from './routes/oauth.js'
 import { invites } from './routes/invites.js'
 import { zine } from './routes/zine.js'
 import { school } from './routes/school.js'
+import { schools } from './routes/schools.js'
 import { newsletterRoutes } from './routes/newsletter.js'
 import { knowledge } from './routes/knowledge.js'
 import { handoffRoutes } from './routes/handoff.js'
@@ -67,8 +70,14 @@ export function createApp() {
 
   app.use('/api/*', bodyLimit({ maxSize: 12 * 1024 * 1024, onError: c => c.json({ error: 'ImageTooLarge', message: 'Choose an image under 8 MB.' }, 413) }))
   app.use('*', withViewer)
+  // AFTER `withViewer`, because host-less resolution falls back to the session's current
+  // school; BEFORE every router, because `currentSchool(c)` is how a route names its
+  // tenant and there is no second place it could be set.
+  app.use('*', withSchool)
 
   app.route('/', health)
+  // Outside /api by design: the edge never routes /internal/* from a public host.
+  app.route('/', internal)
   app.route('/', oauthRoutes)
   app.route('/api/auth', auth)
   app.route('/api', calendar)
@@ -84,6 +93,7 @@ export function createApp() {
   app.route('/api', invites)
   app.route('/api', zine)
   app.route('/api', school)
+  app.route('/api', schools)
   app.route('/api', newsletterRoutes)
   app.route('/api', handoffRoutes)
   app.route('/api', attestations)

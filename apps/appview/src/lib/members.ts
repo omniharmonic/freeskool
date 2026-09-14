@@ -2,8 +2,11 @@
  * Members-only people directory (R9: the roster is never public — every caller into this
  * module is reached from a `requireViewer` route). Builds on Task 2/3's tables:
  *
- *   - `fs_member`             every DID that has ever signed in (see `http/session.ts`)
- *   - `fs_member_prefs`       `directoryListing` (default true) gates visibility
+ *   - `fs_membership`         every DID that has signed in TO THIS SCHOOL, and its
+ *                             `directoryListing` (default true), which gates visibility.
+ *                             PER SCHOOL, deliberately: a Boulder member has no more
+ *                             right to Denver's roster than a stranger does (MS §10), and
+ *                             hiding in one city says nothing about another (MS §2)
  *   - `fs_skill_claim_index`  a member's own claims, public AND school-visibility alike —
  *                             this is a members-only view, not a public one, so the
  *                             school-visibility claims are fair to show another member
@@ -13,10 +16,12 @@
  * reimplemented here: they are the same lookups `http/routes/me.ts` and
  * `http/routes/knowledge.ts` already do, exported from there rather than copied.
  */
-import { desc, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { Role, roleLabel } from '@freeschool/shared'
 import { getDb } from '../db/index.js'
-import { member, memberPrefs, skillClaimIndex } from '../db/schema.js'
+import { membership, skillClaimIndex } from '../db/schema.js'
+import { directoryListing } from './membership.js'
+import { legacySchoolDid } from './schools.js'
 import { getIndexer } from '../index/indexer.js'
 import { eventsInWindow, sidecarsForEvent } from '../index/queries.js'
 import { resolveHostDids } from './events.js'
@@ -59,15 +64,28 @@ function avatarUrlFor(did: string, profile: Profile): string | undefined {
   return profile.avatar ? `/api/members/${encodeURIComponent(did)}/avatar?v=${profile.avatar.revision}` : undefined
 }
 
-/** `directoryListing || did === viewerDid` — the one visibility rule for this whole module. */
-export async function memberVisible(did: string, viewerDid: string): Promise<boolean> {
+/**
+ * `member of THIS school && (directoryListing || did === viewerDid)` — the one visibility
+ * rule for this whole module.
+ *
+ * The membership half is what MS §10 requires: `GET /api/members/:did` must 404 (not 403)
+ * for a DID with no shared school, because a 403 confirms existence. A member always sees
+ * themselves, in any school they belong to.
+ */
+export async function memberVisible(did: string, viewerDid: string, schoolDid = legacySchoolDid()): Promise<boolean> {
+  if (!(await inSchool(did, schoolDid))) return false
   if (did === viewerDid) return true
+  return directoryListing(did, schoolDid)
+}
+
+/** Membership of one school, tolerant of the pre-`fs_membership` world (see `lib/membership.ts`). */
+async function inSchool(did: string, schoolDid: string): Promise<boolean> {
   const rows = await getDb()
-    .select({ directoryListing: memberPrefs.directoryListing })
-    .from(memberPrefs)
-    .where(eq(memberPrefs.did, did))
+    .select({ did: membership.did })
+    .from(membership)
+    .where(and(eq(membership.did, did), eq(membership.schoolDid, schoolDid), isNull(membership.leftAt)))
     .limit(1)
-  return rows[0]?.directoryListing ?? true
+  return rows.length > 0
 }
 
 async function claimCountsFor(dids: string[]): Promise<Map<string, number>> {
@@ -111,12 +129,15 @@ function isAfterCursor(row: { lastSeenAt: Date; did: string }, cursor: { lastSee
  * public firehose) and filtered/paginated in memory — simpler, and fast enough here, than
  * pushing a `displayName` substring match into SQL against a JSONB blob.
  */
-export async function listMembers(opts: {
-  q?: string
-  skill?: string
-  cursor?: string
-  limit?: number
-}): Promise<{ members: MemberSummary[]; cursor?: string }> {
+export async function listMembers(
+  opts: {
+    q?: string
+    skill?: string
+    cursor?: string
+    limit?: number
+  },
+  schoolDid = legacySchoolDid(),
+): Promise<{ members: MemberSummary[]; cursor?: string }> {
   const limit = Math.min(Math.max(opts.limit ?? 50, 1), 100)
   const db = getDb()
 
@@ -127,11 +148,13 @@ export async function listMembers(opts: {
     if (skillDids.size === 0) return { members: [] }
   }
 
+  // ONE school's roster. `left_at` hides a member who has left this school without
+  // touching their classes on its calendar (spec ruling 10).
   const rows = await db
-    .select({ did: member.did, lastSeenAt: member.lastSeenAt, directoryListing: memberPrefs.directoryListing })
-    .from(member)
-    .leftJoin(memberPrefs, eq(memberPrefs.did, member.did))
-    .orderBy(desc(member.lastSeenAt), desc(member.did))
+    .select({ did: membership.did, lastSeenAt: membership.lastSeenAt, directoryListing: membership.directoryListing })
+    .from(membership)
+    .where(and(eq(membership.schoolDid, schoolDid), isNull(membership.leftAt)))
+    .orderBy(desc(membership.lastSeenAt), desc(membership.did))
 
   let candidates = rows.filter((r) => r.directoryListing !== false && (!skillDids || skillDids.has(r.did)))
 
@@ -156,8 +179,8 @@ export async function listMembers(opts: {
     profilesFor(dids),
     handlesForDids(dids),
     claimCountsFor(dids),
-    vouchCountsForMany(dids),
-    Promise.all(dids.map((did) => roleOf(did))),
+    vouchCountsForMany(dids, schoolDid),
+    Promise.all(dids.map((did) => roleOf(did, schoolDid))),
   ])
 
   const members: MemberSummary[] = page.map((r, i) => {
@@ -212,10 +235,18 @@ async function hostingFor(did: string): Promise<Array<{ uri: string; name: strin
 }
 
 /** One member's directory profile, or `null` when not visible to this viewer / not a member. */
-export async function memberProfile(did: string, viewerDid: string): Promise<MemberProfile | null> {
-  if (!(await memberVisible(did, viewerDid))) return null
+export async function memberProfile(
+  did: string,
+  viewerDid: string,
+  schoolDid = legacySchoolDid(),
+): Promise<MemberProfile | null> {
+  if (!(await memberVisible(did, viewerDid, schoolDid))) return null
 
-  const memberRows = await getDb().select().from(member).where(eq(member.did, did)).limit(1)
+  const memberRows = await getDb()
+    .select()
+    .from(membership)
+    .where(and(eq(membership.did, did), eq(membership.schoolDid, schoolDid)))
+    .limit(1)
   const memberRow = memberRows[0]
   if (!memberRow) return null
 
@@ -224,10 +255,10 @@ export async function memberProfile(did: string, viewerDid: string): Promise<Mem
 
   const [profile, role, vouchBySkill, viewerVouchedSet, badges, handles, hosting, allResources, labels] = await Promise.all([
     loadProfile(did),
-    roleOf(did),
-    vouchCountsFor(did),
-    viewerVouches(viewerDid, did),
-    badgesFor(did),
+    roleOf(did, schoolDid),
+    vouchCountsFor(did, schoolDid),
+    viewerVouches(viewerDid, did, schoolDid),
+    badgesFor(did, schoolDid),
     handlesForDids([did]),
     hostingFor(did),
     resources(),
@@ -270,6 +301,7 @@ export async function memberProfile(did: string, viewerDid: string): Promise<Mem
 export async function peopleForSkill(
   skillUri: string,
   viewerDid: string,
+  schoolDid = legacySchoolDid(),
 ): Promise<{ count: number; members: Array<{ did: string; handle?: string; displayName?: string; avatarUrl?: string; level: string; vouchCount: number }> }> {
   const claimRows = await getDb()
     .select({ did: skillClaimIndex.did, level: skillClaimIndex.level })
@@ -278,20 +310,26 @@ export async function peopleForSkill(
   if (claimRows.length === 0) return { count: 0, members: [] }
 
   const dids = claimRows.map((r) => r.did)
-  const prefRows = await getDb()
-    .select({ did: memberPrefs.did, directoryListing: memberPrefs.directoryListing })
-    .from(memberPrefs)
-    .where(inArray(memberPrefs.did, dids))
-  const hidden = new Set(prefRows.filter((r) => r.directoryListing === false).map((r) => r.did))
+  /**
+   * `fs_skill_claim_index` is GLOBAL — a member's own statements about themselves travel
+   * with them (MS §2) — so "who claims welding" has to be narrowed to the viewer's own
+   * school HERE. MS §10: the claim itself is the one intentional cross-school read, and
+   * it is safe because the member wrote it; it must still never be a LIST across schools.
+   */
+  const memberRows = await getDb()
+    .select({ did: membership.did, directoryListing: membership.directoryListing })
+    .from(membership)
+    .where(and(inArray(membership.did, dids), eq(membership.schoolDid, schoolDid), isNull(membership.leftAt)))
+  const here = new Map(memberRows.map((r) => [r.did, r.directoryListing]))
 
-  const visible = claimRows.filter((r) => r.did === viewerDid || !hidden.has(r.did))
+  const visible = claimRows.filter((r) => here.has(r.did) && (r.did === viewerDid || here.get(r.did) !== false))
   const capped = visible.slice(0, 50)
   const cappedDids = capped.map((r) => r.did)
 
   const [profiles, handles, vouchCounts] = await Promise.all([
     profilesFor(cappedDids),
     handlesForDids(cappedDids),
-    vouchCountsForSkill(skillUri, cappedDids),
+    vouchCountsForSkill(skillUri, cappedDids, schoolDid),
   ])
 
   const members = capped.map((r) => {

@@ -17,7 +17,7 @@ Source: the screenshot audit (`apps/web/e2e/audit.spec.ts`, 128 captures at 430�
 
 ## Status after the fix rounds (13 September 2026, late)
 
-Fixed on the branch: controller findings 1 (seed public overviews, `aff9b4d`), 2–4 (`88cead5`); journey findings 1–2 (`56a083b`, `f8b5900`), 3 (multi-skill class editor, `be944e2`), 4 (`aff9b4d`), 5 (cancel a class, `e48d644`), 6, 8, 9, 11, 16 (`7d5ee49`), 10 (`88cead5`), 18 (ruling: a brand-new member lands on `/welcome`, then the needs board; `mvp.spec.ts` updated). Still open, listed for the next pass: controller 5–8; journey 7 (welcome cards could collapse), 12 (explain what a vouch is inline), 13 (a way to reach a person from their profile), 14–15 (admin vocabulary and newsletter preview), 17 (persona runs leave a class behind — by design of the journey; the seed's demo tags make them easy to spot).
+Fixed on the branch: controller findings 1 (seed public overviews, `aff9b4d`), 2–4 (`88cead5`); journey findings 1–2 (`56a083b`, `f8b5900`), 3 (multi-skill class editor, `be944e2`), 4 (`aff9b4d`), 5 (cancel a class, `e48d644`), 6, 8, 9, 11, 16 (`7d5ee49`), 10 (`88cead5`), 7, 12, 13, 15 (welcome steps, vouch explainer, ask-to-teach, admin help; `42a6845`), 14 (newsletter preview of the last issue; this wrap-up commit), 18 (ruling: a brand-new member lands on `/welcome`, then the needs board; `mvp.spec.ts` updated). Still open, listed for the next pass: controller 5–8; 17 (persona runs leave a class behind — by design of the journey; the seed's demo tags make them easy to spot).
 
 ## Findings from the persona journeys (e2e agent)
 
@@ -44,8 +44,8 @@ Numbered for the audit document. Only 1 and 2 are fixed; the rest are recorded, 
    last path segment to `/events/$id`, which needs the full AT-URI, so an old link lands on
    "Class not found" rather than the class. (The audit passes the full URI to get a picture.)
 7. **`/welcome` — "Step 1 of 3" over three cards that are all visible and editable at once.**
-   The counter reads like a wizard, gates nothing, and only moves when you act; on a phone it is
-   unclear whether the lower cards are "later" or already available.
+   *(fixed, `42a6845`)* The counter reads like a wizard, gates nothing, and only moves when you
+   act; on a phone it is unclear whether the lower cards are "later" or already available.
 8. **`/welcome` — revisiting it after onboarding offers the whole flow again, with empty
    fields.** "Save and continue" then writes an empty display name and bio over the real ones.
    There is no "you have already done this" state; the only ways out are Finish and the tab bar.
@@ -60,17 +60,21 @@ Numbered for the audit document. Only 1 and 2 are fixed; the rest are recorded, 
     by hand, and answers "That doesn't look like a DID — it starts with 'did:'". No member can
     do this. A handle field with resolution is the obvious want; the screen's own doc comment
     already records the deviation.
-12. **`/people/$did` — the Vouch button is unexplained.** Nothing says what a vouch is, that the
-    count is visible to the whole school, or that it can be withdrawn. The one explanatory line
-    ("Counts, never scores") is about the numbers, not the act.
-13. **`/people/$did` is the end of the road.** No way to contact the person, ask them to teach
-    something, or see what they have asked for — the profile links out only to their classes and
-    notes.
+12. **`/people/$did` — the Vouch button is unexplained.** *(fixed, `42a6845`)* Nothing says what
+    a vouch is, that the count is visible to the whole school, or that it can be withdrawn. The
+    one explanatory line ("Counts, never scores") is about the numbers, not the act.
+13. **`/people/$did` is the end of the road.** *(fixed, `42a6845`)* No way to contact the person,
+    ask them to teach something, or see what they have asked for — the profile links out only to
+    their classes and notes.
 14. **`/admin/newsletter` — "Preview" only exists after "Compose draft"**, and nothing on the
     screen says a draft will be generated from the month rather than written by hand.
-15. **`/admin/moderation` and `/admin/policy` assume the vocabulary.** "Open an item", "Queue",
-    "Role ladder", "Thresholds" — no line saying what an item is, or what moving a threshold
-    does to a member who is already on the ladder.
+    *(fixed, `42a6845` made the Preview section always visible with that explanation; fixed
+    fully by this wrap-up commit, which fills it with the last composed/sent issue so there is
+    something to read there before a steward composes anything this session — `GET
+    /api/admin/newsletter/last`, `useLastNewsletterIssue`.)*
+15. **`/admin/moderation` and `/admin/policy` assume the vocabulary.** *(fixed, `42a6845`)*
+    "Open an item", "Queue", "Role ladder", "Thresholds" — no line saying what an item is, or
+    what moving a threshold does to a member who is already on the ladder.
 16. **A member opening `/admin` logs a 403 as a console error** ("Failed to load resource…"),
     as does a non-host opening an attendance page. Harmless, but it is what any error-reporting
     tool will collect first. (`audit.spec.ts` filters 4xx explicitly and judges 5xx absolutely.)

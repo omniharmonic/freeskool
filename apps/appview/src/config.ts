@@ -39,11 +39,75 @@ const schema = z.object({
    * (`.localhost` IS reserved — see README "Local PDS handle domain").
    */
   PDS_HANDLE_DOMAIN: z.string().default('test'),
+  /**
+   * The handle domain this deployment is MOVING OFF (federation ruling 3: member handles
+   * move from `<name>.freeskool.xyz` to `<name>.freeskool.directory`, which is what frees
+   * `boulder.freeskool.xyz` to be the city app host).
+   *
+   * During the overlap BOTH names must keep resolving and both must keep getting
+   * certificates: a member whose DID document still says `calmotter417.freeskool.xyz`
+   * cannot be reached if the edge stops issuing for that name the moment
+   * `PDS_HANDLE_DOMAIN` flips. Set this to the old domain for the length of the
+   * migration and clear it afterwards. `PDS_HANDLE_DOMAINS` is the csv form for a
+   * deployment that serves more than two at once.
+   */
+  PDS_LEGACY_HANDLE_DOMAIN: z.string().default(''),
+  /** Every handle domain the PDS answers for, csv. `PDS_HANDLE_DOMAIN` is always included. */
+  PDS_HANDLE_DOMAINS: z.string().default('').transform(csv),
 
   /** The school DID the hosted service custodies in v1. */
   SCHOOL_DID: z.string().default(''),
   SCHOOL_HANDLE: z.string().default(''),
   SCHOOL_APP_PASSWORD: z.string().default(''),
+
+  /**
+   * The registered domain whose single labels are SCHOOLS: `<label>.<suffix>` serves
+   * that school's app (MS §3's wildcard inversion). It is usually the same domain as
+   * `PDS_HANDLE_DOMAIN` — `boulder.freeskool.xyz` is both the Boulder school's host and
+   * the Boulder school account's handle — which is exactly why school labels are
+   * reserved against the handle namespace (`lib/handles.ts`).
+   */
+  SCHOOL_DOMAIN_SUFFIX: z.string().default('freeskool.xyz'),
+  /**
+   * The labels that are schools, until `fs_school_domain` lands (federation Task 2) and
+   * answers the question from the table. Read by the reserved-label list and by the
+   * on-demand TLS gate, which must never answer from a pattern.
+   */
+  SCHOOL_LABELS: z.string().default('boulder').transform(csv),
+
+  /**
+   * MS §11 Phase 3/4's flag. `0` (the default) means this AppView serves exactly ONE
+   * school — the env-configured legacy school — and `http/school-context.ts` resolves
+   * every request to it without touching the Host header or the session. `1` turns on
+   * host-based resolution (`fs_school_domain`), the session's `current_school_did`, and
+   * a 404 `UnknownSchool` for a host that names no school.
+   *
+   * The new code paths are LIVE either way: with the flag off they simply all resolve to
+   * the same school, which is what makes "MULTI_SCHOOL=0 behaves exactly as before" a
+   * property of one resolution function rather than of every call site.
+   */
+  MULTI_SCHOOL: z.stringbool().default(false),
+
+  /** How long a school's `SchoolActorPort` stays cached (MS §5 and Appendix B). */
+  SCHOOL_ACTOR_CACHE_TTL_MS: z.coerce.number().int().positive().default(1_800_000),
+
+  /**
+   * MS §8 ruling 1: who may create a school. `closed` (the default) means an operator
+   * holding `OPERATOR_TOKEN`, and nobody else — there is no self-serve door in this
+   * phase, because a name minted under the shared domain is a reputational surface for
+   * every other city on it. `invite` and `open` are the values MS §8 anticipates;
+   * `routes/schools.ts` answers 501 for them rather than silently reading as closed.
+   */
+  SCHOOL_CREATION: z.enum(['closed', 'invite', 'open']).default('closed'),
+  /**
+   * The token an operator presents (`X-Operator-Token`) to mint a school while
+   * `SCHOOL_CREATION=closed`. Empty by default, which `routes/schools.ts`' `isOperator`
+   * treats as "no token configured" and refuses unconditionally — a deployment that never
+   * set this must not be one empty header away from letting anyone mint a city. Because
+   * this now lives in the memoized `config()`, rotating it is a restart, not just an env
+   * change; `redactedConfig()` never includes it.
+   */
+  OPERATOR_TOKEN: z.string().default(''),
 
   /** Taxonomy authority DID: when set, the skill tree/detail routes ignore skill records from any other DID. */
   AUTHORITY_DID: z.string().default(''),
@@ -74,6 +138,20 @@ const schema = z.object({
   /** Signed-cookie session secret. Sessions themselves live in Postgres. */
   SESSION_SECRET: z.string().min(16).default('dev-only-session-secret-change-me'),
   SESSION_COOKIE: z.string().default('fs_session'),
+  /**
+   * `Domain` on the session cookie. EMPTY BY DEFAULT, which means host-only: the cookie
+   * set on `freeskool.xyz` is sent to `freeskool.xyz` and nowhere else — exactly what a
+   * single-school deployment (and every test) has today.
+   *
+   * Production sets `.freeskool.xyz` once cities live at `<city>.freeskool.xyz`, so ONE
+   * sign-in is one identity across every city (MS §3). Widening the scope is only safe
+   * because every host under the suffix is ours and served by this same AppView, which is
+   * what the reserved-label rule in `lib/handles.ts` exists to guarantee: a member who
+   * could mint the handle `denver` would otherwise own a school's origin.
+   *
+   * NEVER set this to a domain that serves member-controlled content.
+   */
+  SESSION_COOKIE_DOMAIN: z.string().default(''),
   SESSION_TTL_DAYS: z.coerce.number().int().positive().default(30),
 
   /** Versioned AES-256-GCM keys for custodial account passwords: `v1:<base64>,v2:<base64>`. */
@@ -139,6 +217,19 @@ export type Config = z.infer<typeof schema> & {
   isProd: boolean
   /** WEB_PUBLIC_URL, or APPVIEW_PUBLIC_URL when the PWA is not given its own origin. */
   webPublicUrl: string
+  /** Just the hostname of `webPublicUrl`, e.g. `freeskool.xyz`. The apex; `www.` of it redirects here. */
+  webHost: string
+  /** `SCHOOL_DOMAIN_SUFFIX`, lowercased, with any leading dot stripped. */
+  schoolDomainSuffix: string
+  /**
+   * Every handle domain the PDS answers for, deduplicated and normalised, current one
+   * first: `PDS_HANDLE_DOMAIN`, then `PDS_HANDLE_DOMAINS`, then
+   * `PDS_LEGACY_HANDLE_DOMAIN`. `lib/tls-check.ts` vouches for a single label under ANY
+   * of them, which is what keeps old handles reachable across the hostname migration.
+   */
+  handleDomains: string[]
+  /** `SESSION_COOKIE_DOMAIN`, lowercased and trimmed; `''` means a host-only cookie. */
+  sessionCookieDomain: string
   /** Resolved `DEV_MAIL_LOG`: where `lib/mail.ts` appends mail when SMTP is unset. */
   devMailLog: string
 }
@@ -162,6 +253,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         'transport, and the dev file sink would write magic links to disk instead of sending them.',
     )
   }
+  const webPublicUrl = (parsed.WEB_PUBLIC_URL ?? publicUrl).replace(/\/$/, '')
   return {
     ...parsed,
     APPVIEW_PUBLIC_URL: publicUrl,
@@ -170,9 +262,36 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // A confidential client's client_id IS the metadata URL.
     oauthClientId: `${publicUrl}/oauth/client-metadata.json`,
     isProd: parsed.NODE_ENV === 'production',
-    webPublicUrl: (parsed.WEB_PUBLIC_URL ?? publicUrl).replace(/\/$/, ''),
+    webPublicUrl,
+    webHost: hostnameOf(webPublicUrl),
+    schoolDomainSuffix: parsed.SCHOOL_DOMAIN_SUFFIX.trim().toLowerCase().replace(/^\./, ''),
+    handleDomains: dedupe([
+      parsed.PDS_HANDLE_DOMAIN,
+      ...parsed.PDS_HANDLE_DOMAINS,
+      parsed.PDS_LEGACY_HANDLE_DOMAIN,
+    ]),
+    sessionCookieDomain: parsed.SESSION_COOKIE_DOMAIN.trim().toLowerCase(),
     // `src/config.ts` -> `apps/appview/.dev-mail.log`.
     devMailLog: parsed.DEV_MAIL_LOG || fileURLToPath(new URL('../.dev-mail.log', import.meta.url)),
+  }
+}
+
+/** Lowercased, dot-stripped, deduplicated, empties dropped — order preserved. */
+function dedupe(domains: string[]): string[] {
+  const out: string[] = []
+  for (const raw of domains) {
+    const d = raw.trim().toLowerCase().replace(/^\./, '').replace(/\.$/, '')
+    if (d && !out.includes(d)) out.push(d)
+  }
+  return out
+}
+
+/** The hostname of a URL, or the string itself when it is not one (never throws at boot). */
+function hostnameOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase()
+  } catch {
+    return url.toLowerCase()
   }
 }
 
@@ -198,6 +317,7 @@ export function redactedConfig(c: Config) {
     handleDomain: c.handleDomain,
     peers: c.PEER_PDS_HOSTS.length,
     schoolConfigured: Boolean(c.SCHOOL_DID && c.SCHOOL_APP_PASSWORD),
+    multiSchool: c.MULTI_SCHOOL,
     liveIngest: c.CONTRAIL_LIVE_INGEST,
     peerLiveSync: c.PEER_LIVE_SYNC,
     custodyKeyVersion: c.CUSTODY_KEY_VERSION,

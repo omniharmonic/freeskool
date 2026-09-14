@@ -18,6 +18,7 @@ import { syncPeersFromSchoolRecord } from './peers.js'
 import { enqueueNotification } from '../notifications/dispatch.js'
 import { openFeedbackWindow } from '../lib/feedback.js'
 import { rsvpDidsFor } from '../lib/rsvp.js'
+import { schoolOfEvent } from '../lib/event-school.js'
 
 export interface OutboxResult {
   claimed: number
@@ -70,7 +71,10 @@ async function handleChange(
       return
     }
     case NSID.policy: {
-      await refreshPolicyCache()
+      // The policy that changed belongs to the repo it was written in — that repo IS the
+      // school. Refreshing "the" cache from the environment would be the wrong school's.
+      const owner = uri.slice('at://'.length).split('/')[0]
+      await refreshPolicyCache(owner || undefined)
       return
     }
     case NSID.event: {
@@ -105,6 +109,8 @@ async function handleChange(
           title: 'Welcome to Free School',
           body: 'Your membership is recorded.',
           navigate: '/me',
+          // A `coop.lexicon.membership` record names the school it belongs to.
+          ...(typeof value.school === 'string' ? { schoolDid: value.school } : {}),
         })
       }
       return
@@ -117,6 +123,8 @@ async function handleChange(
 /** Notify everyone who RSVP'd app-side. RSVPs never leave our tables to do this. */
 async function fanOut(eventUri: string, category: 'event.changed' | 'event.cancelled' | 'offering.published', title: string): Promise<void> {
   const dids = await rsvpDidsFor(eventUri)
+  // The feed row says WHICH school this was about: the one whose calendar the class is on.
+  const schoolDid = await schoolOfEvent(eventUri)
   for (const did of dids) {
     await enqueueNotification({
       did,
@@ -125,6 +133,7 @@ async function fanOut(eventUri: string, category: 'event.changed' | 'event.cance
       title,
       body: category === 'event.cancelled' ? 'This class was cancelled.' : 'Details changed.',
       navigate: `/events/${encodeURIComponent(eventUri)}`,
+      schoolDid,
     })
   }
 }

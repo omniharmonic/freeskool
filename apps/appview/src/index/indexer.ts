@@ -17,7 +17,7 @@ import type { Database } from '@atmo-dev/contrail'
 import { config } from '../config.js'
 import { buildContrailConfig } from '../contrail.config.js'
 import { getPool } from '../db/index.js'
-import { activePeerHosts, seedPeersFromEnv } from './peers.js'
+import { indexerPeerHosts, seedPeersFromEnv } from './peers.js'
 import { seedBackfillsFromListRepos } from './discovery-fallback.js'
 import { quietLogger } from '../lib/logging.js'
 
@@ -46,7 +46,7 @@ export async function createIndexer(options?: { peers?: string[] }): Promise<Ind
   await seedPeersFromEnv().catch(() => {
     /* first boot: the table may not exist yet; init() will create it */
   })
-  const peers = options?.peers ?? (await activePeerHosts().catch(() => c.PEER_PDS_HOSTS))
+  const peers = options?.peers ?? (await indexerPeerHosts().catch(() => c.PEER_PDS_HOSTS))
   const db = createPostgresDatabase(getPool())
   const contrail = new Contrail({
     ...buildContrailConfig({

@@ -27,7 +27,9 @@ import type { Agent } from '@atproto/api'
 import type { Did, SchoolAction } from '@freeschool/school-actor'
 import { NSID } from '../lexicons/nsids.js'
 import { tid } from './ids.js'
-import { schoolActor, schoolDid } from './school-actor.js'
+import { actorFor, asDid } from './school-actors.js'
+import { legacySchoolDid } from './schools.js'
+import { stampEventSchool } from './event-school.js'
 import { getIndexer } from '../index/indexer.js'
 import type { Viewer } from '../http/session.js'
 import { actorAgent } from './actor-agent.js'
@@ -206,9 +208,9 @@ export function routesOnTags(eventTags: string[], schoolTags: string[]): boolean
   return eventTags.some((t) => routing.has(t.toLowerCase()))
 }
 
-export async function schoolRoutingTags(): Promise<string[]> {
+export async function schoolRoutingTags(schoolDid = legacySchoolDid()): Promise<string[]> {
   try {
-    const school = await getRecord(schoolDid(), NSID.school, 'self')
+    const school = await getRecord(schoolDid, NSID.school, 'self')
     const tags = school?.value?.tags
     if (Array.isArray(tags) && tags.length > 0) {
       const strings = tags.filter((t): t is string => typeof t === 'string')
@@ -241,15 +243,18 @@ export interface RouteListingInput {
   action?: SchoolAction
   /** Audit reason override; defaults to `host published "<name>"`. */
   auditReason?: string
+  /** WHICH SCHOOL is curating. Defaults to the legacy school for scripts and tests. */
+  schoolDid?: string
 }
 
 /** Writes the school's curation listing, as the school, only when tags + visibility route. */
 export async function routeListing(input: RouteListingInput): Promise<{ uri: string; cid: string } | undefined> {
   if ((input.visibility ?? 'listed') !== 'listed') return undefined
-  const schoolTags = input.schoolTags ?? (await schoolRoutingTags())
+  const school = input.schoolDid ?? legacySchoolDid()
+  const schoolTags = input.schoolTags ?? (await schoolRoutingTags(school))
   if (!routesOnTags(input.tags, schoolTags)) return undefined
-  const res = await schoolActor().putRecordAsSchool({
-    schoolDid: schoolDid(),
+  const res = await (await actorFor(school)).putRecordAsSchool({
+    schoolDid: asDid(school),
     callerDid: input.callerDid,
     scope: NSID.eventListing,
     action: input.action ?? 'publish-event',
@@ -258,7 +263,7 @@ export async function routeListing(input: RouteListingInput): Promise<{ uri: str
     record: {
       $type: NSID.eventListing,
       event: input.event,
-      school: schoolDid(),
+      school,
       status: 'listed',
       tags: input.tags,
       createdAt: new Date().toISOString(),
@@ -326,7 +331,12 @@ function text(value?: string): string | undefined {
   return trimmed ? trimmed : undefined
 }
 
-export async function createEventAsHost(viewer: Viewer, input: CreateEventInput): Promise<CreatedEvent> {
+export async function createEventAsHost(
+  viewer: Viewer,
+  input: CreateEventInput,
+  /** The school this class goes on the calendar of — stamped into `fs_event_school`. */
+  schoolDid: string = legacySchoolDid(),
+): Promise<CreatedEvent> {
   const cover = input.cover ? await normalizeImage(input.cover) : undefined
   const agent = await actorAgent(viewer)
   const now = new Date().toISOString()
@@ -365,7 +375,7 @@ export async function createEventAsHost(viewer: Viewer, input: CreateEventInput)
     visibility: input.visibility ?? 'listed',
     ...(input.neighborhood ? { neighborhood: input.neighborhood } : {}),
     rsvpRequired: input.rsvpRequired ?? true,
-    school: schoolDid(),
+    school: schoolDid,
     tags,
     createdAt: now,
   }
@@ -414,7 +424,15 @@ export async function createEventAsHost(viewer: Viewer, input: CreateEventInput)
     tags,
     visibility: input.visibility,
     callerDid: viewer.did as Did,
+    schoolDid,
   })
+
+  /**
+   * WHICH CALENDAR this class is on, recorded at creation (MS §4). Authorship stopped
+   * identifying the calendar the moment a host could belong to two schools. The event
+   * record itself is untouched — sidecar composition only.
+   */
+  await stampEventSchool(event.uri, schoolDid)
 
   await setEventExtra(event.uri, {
     materials: input.materials ?? [],
@@ -424,7 +442,7 @@ export async function createEventAsHost(viewer: Viewer, input: CreateEventInput)
   })
   await savePresentation(event.uri, { cover, venueNeeded: input.venueNeeded, publicOverview: input.publicOverview })
 
-  await bumpTally(viewer.did, { hostedEvents: 1 })
+  await bumpTally(viewer.did, { hostedEvents: 1 }, schoolDid)
   if (input.endsAt ?? input.startsAt) await openFeedbackWindow(event.uri, input.endsAt ?? input.startsAt)
 
   // Read-your-writes: pull what we just wrote into the index immediately.
@@ -495,7 +513,12 @@ export class SeriesEditNotSupportedError extends Error {
  * Steward), so a detagging host who is not themselves a steward gets `unlisted: false`
  * back and the event stays listed until a steward acts.
  */
-export async function updateEventAsHost(viewer: Viewer, eventUri: string, input: UpdateEventInput): Promise<UpdatedEvent> {
+export async function updateEventAsHost(
+  viewer: Viewer,
+  eventUri: string,
+  input: UpdateEventInput,
+  schoolDid: string = legacySchoolDid(),
+): Promise<UpdatedEvent> {
   if (input.series !== undefined) throw new SeriesEditNotSupportedError()
 
   const indexer = await getIndexer()
@@ -558,7 +581,7 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
     visibility: newVisibility,
     ...(input.neighborhood !== undefined ? { neighborhood: input.neighborhood } : {}),
     rsvpRequired: input.rsvpRequired ?? existingConfig?.value.rsvpRequired ?? true,
-    school: schoolDid(),
+    school: schoolDid,
     tags: newTags,
     createdAt: existingConfig?.value.createdAt ?? new Date().toISOString(),
   }
@@ -632,12 +655,12 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
   // decide whether WE already have a curation record — a peer's listing of this event
   // (once inbound exchange exists) is not ours to re-route.
   const listingRows = await sidecarsForEvent<EventListing>(indexer, 'eventListing', eventUri)
-  const ourListings = listingRows.map((r) => r.value).filter((l) => l.school === schoolDid())
+  const ourListings = listingRows.map((r) => r.value).filter((l) => l.school === schoolDid)
   // "ever listed" (any status, including removed) vs "actively listed right now" are
   // DELIBERATELY different checks — see `decideListingEdit`'s doc comment.
   const everListedByUs = ourListings.length > 0
   const isActivelyListedByUs = isListed({ listings: ourListings, configs: [] })
-  const schoolTags = await schoolRoutingTags()
+  const schoolTags = await schoolRoutingTags(schoolDid)
   const routesNow = newVisibility === 'listed' && routesOnTags(newTags, schoolTags)
   const action = decideListingEdit({ everListedByUs, isActivelyListedByUs, routesNow })
 
@@ -650,12 +673,14 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
       tags: newTags,
       visibility: newVisibility,
       callerDid: viewer.did as Did,
+      schoolDid,
     })
   } else if (action === 'remove') {
     unlisted = await withdrawListing({
       event: { uri: event.uri, cid: event.cid },
       callerDid: viewer.did as Did,
       reason: `host retagged "${String(mergedEvent.name ?? '')}" away from a routed tag`,
+      schoolDid,
     })
   }
 
@@ -747,10 +772,15 @@ export interface CancelledEvent {
  * own record, which the host always controls. Never throws: losing the listing race must
  * not cost the host the cancellation itself.
  */
-async function withdrawListing(input: { event: { uri: string; cid: string }; callerDid: Did; reason: string }): Promise<boolean> {
+async function withdrawListing(input: {
+  event: { uri: string; cid: string }
+  callerDid: Did
+  reason: string
+  schoolDid: string
+}): Promise<boolean> {
   try {
-    await schoolActor().putRecordAsSchool({
-      schoolDid: schoolDid(),
+    await (await actorFor(input.schoolDid)).putRecordAsSchool({
+      schoolDid: asDid(input.schoolDid),
       callerDid: input.callerDid,
       scope: NSID.eventListing,
       action: 'remove-listing',
@@ -759,7 +789,7 @@ async function withdrawListing(input: { event: { uri: string; cid: string }; cal
       record: {
         $type: NSID.eventListing,
         event: input.event,
-        school: schoolDid(),
+        school: input.schoolDid,
         status: 'removed',
         createdAt: new Date().toISOString(),
       },
@@ -787,14 +817,15 @@ async function writeCancelledStatus(
   record: { did: string; value: Record<string, unknown> },
   rkey: string,
   auditReason: string,
+  schoolDid: string,
 ): Promise<{ uri: string; cid: string }> {
   const merged = { ...record.value, status: CANCELLED_STATUS }
   if (record.did === viewer.did) {
     const agent = await actorAgent(viewer)
     return put(agent, viewer.did, NSID.event, rkey, merged)
   }
-  const res = await schoolActor().putRecordAsSchool({
-    schoolDid: schoolDid(),
+  const res = await (await actorFor(schoolDid)).putRecordAsSchool({
+    schoolDid: asDid(schoolDid),
     callerDid: viewer.did as Did,
     scope: NSID.event,
     action: 'materialize-occurrence',
@@ -807,7 +838,7 @@ async function writeCancelledStatus(
 }
 
 /** Everyone who said they were coming, told once (the dedup ledger enforces the "once"). */
-async function notifyCancelled(eventUri: string, name: string, reason?: string): Promise<number> {
+async function notifyCancelled(eventUri: string, name: string, reason?: string, schoolDid?: string): Promise<number> {
   let notified = 0
   for (const r of await rsvpRoster(eventUri)) {
     const res = await enqueueNotification({
@@ -817,6 +848,7 @@ async function notifyCancelled(eventUri: string, name: string, reason?: string):
       title: `"${name}" has been cancelled`,
       ...(reason ? { body: reason } : {}),
       navigate: `/events/${encodeURIComponent(eventUri)}`,
+      ...(schoolDid ? { schoolDid } : {}),
     }).catch(() => ({ claimed: false }))
     if (res.claimed) notified++
   }
@@ -824,10 +856,10 @@ async function notifyCancelled(eventUri: string, name: string, reason?: string):
 }
 
 /** Does the school currently list this event? (Nothing to withdraw if it never did.) */
-async function isListedByUs(eventUri: string): Promise<boolean> {
+async function isListedByUs(eventUri: string, schoolDid: string): Promise<boolean> {
   const indexer = await getIndexer()
   const rows = await sidecarsForEvent<EventListing>(indexer, 'eventListing', eventUri)
-  const ours = rows.map((r) => r.value).filter((l) => l.school === schoolDid())
+  const ours = rows.map((r) => r.value).filter((l) => l.school === schoolDid)
   return ours.length > 0 && isListed({ listings: ours, configs: [] })
 }
 
@@ -848,6 +880,7 @@ export async function cancelEventAsHost(
   viewer: Viewer,
   eventUri: string,
   input: CancelEventInput = {},
+  schoolDid: string = legacySchoolDid(),
 ): Promise<CancelledEvent> {
   const scope = input.scope ?? 'this'
   const indexer = await getIndexer()
@@ -869,26 +902,27 @@ export async function cancelEventAsHost(
   const seriesLink = scope === 'following' ? await resolveSeriesLink(viewer, eventUri, current) : undefined
   if (scope === 'following' && !seriesLink) throw new NotRecurringError()
 
-  const event = await writeCancelledStatus(viewer, current, parts.rkey, `host cancelled "${name}"`)
+  const event = await writeCancelledStatus(viewer, current, parts.rkey, `host cancelled "${name}"`, schoolDid)
 
   // The reason, app-side, merged onto whatever else the class already carries.
   const existingExtra = await getEventExtra(eventUri)
   await setEventExtra(eventUri, { ...existingExtra, ...(reason ? { cancelReason: reason } : {}) })
 
-  const unlisted = (await isListedByUs(eventUri))
+  const unlisted = (await isListedByUs(eventUri, schoolDid))
     ? await withdrawListing({
         event: { uri: event.uri, cid: event.cid },
         callerDid: viewer.did as Did,
         reason: `host cancelled "${name}"`,
+        schoolDid,
       })
     : undefined
 
   // A class that did not happen is not a class hosted. Only ever debited for a record the
   // host wrote themselves — materialized occurrences never credited the tally in the
   // first place (`jobs/materialize-series.ts` does not call `bumpTally`).
-  if (!alreadyCancelled && current.did === viewer.did) await bumpTally(viewer.did, { hostedEvents: -1 })
+  if (!alreadyCancelled && current.did === viewer.did) await bumpTally(viewer.did, { hostedEvents: -1 }, schoolDid)
 
-  const notified = alreadyCancelled ? 0 : await notifyCancelled(eventUri, name, reason)
+  const notified = alreadyCancelled ? 0 : await notifyCancelled(eventUri, name, reason, schoolDid)
 
   const touched = [event.uri]
   const alsoCancelled: string[] = []
@@ -903,15 +937,22 @@ export async function cancelEventAsHost(
       if (!laterParts) continue
       const laterName = String(row.value.name ?? name)
       const wasCancelled = isCancelledStatus(row.value.status)
-      const written = await writeCancelledStatus(viewer, row, laterParts.rkey, `host cancelled "${laterName}" and everything after it`)
-      if (await isListedByUs(later)) {
+      const written = await writeCancelledStatus(
+        viewer,
+        row,
+        laterParts.rkey,
+        `host cancelled "${laterName}" and everything after it`,
+        schoolDid,
+      )
+      if (await isListedByUs(later, schoolDid)) {
         await withdrawListing({
           event: { uri: written.uri, cid: written.cid },
           callerDid: viewer.did as Did,
           reason: `host cancelled "${laterName}" and everything after it`,
+          schoolDid,
         })
       }
-      if (!wasCancelled) await notifyCancelled(later, laterName, reason)
+      if (!wasCancelled) await notifyCancelled(later, laterName, reason, schoolDid)
       alsoCancelled.push(later)
       touched.push(written.uri)
     }

@@ -12,12 +12,24 @@ const HOST = 'did:plc:host000000000000000000'
 const MEMBER = 'did:plc:member00000000000000000'
 const STEWARD = 'did:plc:steward0000000000000000'
 
+const OTHER_SCHOOL = 'did:plc:other0000000000000000000'
+
+/**
+ * Both consent gates are PER SCHOOL (federation phase): `publishRoles` and the opt-in set
+ * are keyed by the school whose repo holds the claim. `at` is the shorthand these tests
+ * use for "these gates, in THIS school"; `facts()` with neither means nothing is exempt.
+ */
 const facts = (over: Partial<ConsentFacts> = {}): ConsentFacts => ({
-  schoolDids: new Set([SCHOOL]),
-  publishRoles: false,
-  publicRoleOptIn: new Set(),
+  schoolDids: new Set([SCHOOL, OTHER_SCHOOL]),
+  publishRoles: new Map(),
+  publicRoleOptIn: new Map(),
   attestationConsentTable: false,
   ...over,
+})
+
+const at = (schoolDid: string, options: { publishRoles?: boolean; optIn?: string[] }): Partial<ConsentFacts> => ({
+  ...(options.publishRoles === undefined ? {} : { publishRoles: new Map([[schoolDid, options.publishRoles]]) }),
+  ...(options.optIn ? { publicRoleOptIn: new Map([[schoolDid, new Set(options.optIn)]]) } : {}),
 })
 
 describe('namedDids', () => {
@@ -151,16 +163,52 @@ describe('verdictFor', () => {
   it('allows a membership claim only with publishRoles AND the member’s opt-in', () => {
     const named = { path: 'subject', did: MEMBER }
     expect(verdictFor(NSID.membership, SCHOOL, named, facts()).allowed).toBe(false)
-    expect(verdictFor(NSID.membership, SCHOOL, named, facts({ publishRoles: true })).allowed).toBe(false)
+    expect(verdictFor(NSID.membership, SCHOOL, named, facts(at(SCHOOL, { publishRoles: true }))).allowed).toBe(false)
     expect(
-      verdictFor(NSID.membership, SCHOOL, named, facts({ publishRoles: true, publicRoleOptIn: new Set([MEMBER]) }))
-        .allowed,
+      verdictFor(NSID.membership, SCHOOL, named, facts(at(SCHOOL, { publishRoles: true, optIn: [MEMBER] }))).allowed,
     ).toBe(true)
   })
 
   it('refuses a membership claim in a repo that is not a school’s', () => {
-    const both = facts({ publishRoles: true, publicRoleOptIn: new Set([MEMBER]) })
+    const both = facts(at(SCHOOL, { publishRoles: true, optIn: [MEMBER] }))
     expect(verdictFor(NSID.membership, HOST, { path: 'subject', did: MEMBER }, both).allowed).toBe(false)
+  })
+
+  /**
+   * THE BUG THIS REPLACED (Task 3 re-review, fixed in Task 11). Both gates used to be
+   * read from the GLOBAL `fs_member_prefs.public_role` and the HOME school's policy, for
+   * every repo the audit looked at — so consent given to Boulder cleared a claim written
+   * by Denver, and Boulder's `publishRoles` cleared a claim in a school whose own policy
+   * had it off. The repo the claim lives in IS the school it is about, and that is what
+   * decides now.
+   */
+  it('reads BOTH gates from the school whose repo holds the claim, not from another one', () => {
+    const named = { path: 'subject', did: MEMBER }
+    // Consent and a policy in SCHOOL exempt nothing in OTHER_SCHOOL's repo.
+    const inSchoolOnly = facts(at(SCHOOL, { publishRoles: true, optIn: [MEMBER] }))
+    expect(verdictFor(NSID.membership, OTHER_SCHOOL, named, inSchoolOnly).allowed).toBe(false)
+
+    // The member opted in HERE but this school's policy does not publish roles.
+    const optedInNoPolicy = facts({
+      publishRoles: new Map([[OTHER_SCHOOL, false]]),
+      publicRoleOptIn: new Map([[OTHER_SCHOOL, new Set([MEMBER])]]),
+    })
+    expect(verdictFor(NSID.membership, OTHER_SCHOOL, named, optedInNoPolicy).reason).toContain('publishRoles')
+
+    // This school publishes roles, but this member opted in somewhere else.
+    const policyNoOptIn = facts({
+      publishRoles: new Map([[OTHER_SCHOOL, true]]),
+      publicRoleOptIn: new Map([[SCHOOL, new Set([MEMBER])]]),
+    })
+    const verdict = verdictFor(NSID.membership, OTHER_SCHOOL, named, policyNoOptIn)
+    expect(verdict.allowed).toBe(false)
+    expect(verdict.reason).toContain('IN THIS SCHOOL')
+
+    // Both gates, in the right school.
+    expect(
+      verdictFor(NSID.membership, OTHER_SCHOOL, named, facts(at(OTHER_SCHOOL, { publishRoles: true, optIn: [MEMBER] })))
+        .allowed,
+    ).toBe(true)
   })
 
   it('allows steward DIDs in a moderation record’s actors[], and nowhere else', () => {

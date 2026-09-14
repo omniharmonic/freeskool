@@ -11,11 +11,13 @@ import { Button, SkillChip, Toggle } from '../components/bits';
 import { Sheet } from '../components/Sheet';
 import { SkillPicker } from '../components/SkillPicker';
 import { HandleChooser } from '../components/HandleChooser';
+import { SchoolSwitcher } from '../components/SchoolSwitcher';
 import { flattenSkills } from '../lib/skills';
 import { useInstallFlow } from '../components/InstallNudge';
 import { api, ApiError } from '../lib/api';
 import {
   useImportBskyProfileMutation,
+  useLeaveSchoolMutation,
   useMe,
   useMeBadges,
   useMeProfile,
@@ -129,6 +131,35 @@ function MeContent() {
    */
   const [linkageConfirm, setLinkageConfirm] = useState<null | 'profile' | 'claims'>(null);
   const [bskyNotice, setBskyNotice] = useState<string | null>(null);
+
+  // ── leaving this school (Task 5, ruling 10) ───────────────────────────
+  const leaveSchoolMutation = useLeaveSchoolMutation();
+  const [leaveConfirmOpen, setLeaveConfirmOpen] = useState(false);
+  const [leaveError, setLeaveError] = useState<string | null>(null);
+  const currentSchool = me?.school;
+  /**
+   * Leaving ends this membership, so the way back is the way out of a session:
+   * drop every cached answer and LOAD the calendar fresh, rather than repaint
+   * screens whose data the viewer may no longer be entitled to. `?left=1` is
+   * what makes the calendar say so when it arrives.
+   */
+  const leaveSchool = async () => {
+    if (!currentSchool) return;
+    setLeaveError(null);
+    try {
+      await leaveSchoolMutation.mutateAsync(currentSchool.did);
+      await queryClient.cancelQueries();
+      queryClient.clear();
+      window.location.assign('/?left=1');
+    } catch (err) {
+      setLeaveConfirmOpen(false);
+      setLeaveError(
+        err instanceof ApiError && err.status === 404
+          ? 'You are not a member of this school.'
+          : 'Could not leave this school. Check your connection and try again.',
+      );
+    }
+  };
 
   const oauthLocked = visibilityDefaults?.oauthDoor ?? false;
 
@@ -310,7 +341,25 @@ function MeContent() {
   if (profileLoadError || claimsLoadError || visibilityError) return <Screen title="Me" layout="account"><div className="safe-x"><PageState title="Your notebook couldn’t load." error action={<Button onClick={() => { void refetchProfile(); void refetchClaims(); void refetchVisibility(); }}>Try again</Button>}>Your saved profile and skills are still there. Please try again before making changes.</PageState></div></Screen>;
 
   return (
-    <Screen title="Me" layout="account" standfirst="Your own corner of the school. What you’re learning, what you can share, and how you want to stay connected.">
+    <Screen
+      title="Me"
+      layout="account"
+      standfirst="Your own corner of the school. What you’re learning, what you can share, and how you want to stay connected."
+      // The switcher renders nothing for a member of one school, which is everybody until a
+      // second city exists (components/SchoolSwitcher.tsx); the directory link appears
+      // beside it on exactly the same condition — a member with one school has no
+      // directory to want, and the page is public for anybody who does.
+      trailing={
+        <>
+          <SchoolSwitcher me={me} />
+          {(me?.schools?.length ?? 0) > 1 ? (
+            <a href="/schools" className="text-caption font-bold text-blue">
+              All schools
+            </a>
+          ) : null}
+        </>
+      }
+    >
       <nav className="safe-x editor-nav" aria-label="Account sections"><a href="#my-profile">Profile</a><a href="#my-skills">Skills</a><a href="#my-badges">Badges</a><a href="#my-settings">Settings</a></nav>
       <div className="safe-x account-layout"><div className="account-main">
         <div className="profile-card" id="my-profile">
@@ -711,6 +760,24 @@ function MeContent() {
         {me && me.role >= 40 ? <a href="/admin" className="context-link mt-5">Open steward tools</a> : null}
         {me?.isCustodial ? <TakeOwnershipSection /> : null}
 
+        {currentSchool ? (
+          <div className="mt-6">
+            {leaveError ? <p role="alert" className="mb-3 text-caption text-pink">{leaveError}</p> : null}
+            <Button
+              wide
+              variant="quiet"
+              ink="ink"
+              disabled={leaveSchoolMutation.isPending}
+              onClick={() => {
+                setLeaveError(null);
+                setLeaveConfirmOpen(true);
+              }}
+            >
+              Leave this school
+            </Button>
+          </div>
+        ) : null}
+
         <div className="mt-6 mb-2">
           {signoutError ? <p role="alert" className="mb-3 text-caption">{signoutError}</p> : null}
           <Button
@@ -755,6 +822,32 @@ function MeContent() {
           Publishing from an account you already had links this account to the school for good. Anyone can
           see the connection, and there is no way to take it back later.
         </p>
+      </Sheet>
+
+      {/* Ruling 10, said plainly BEFORE it happens: what leaving takes away, and what it
+          deliberately does not. The classes sentence matters most — a host who leaves does
+          not un-teach what they taught, and the city's calendar keeps it. */}
+      <Sheet
+        open={leaveConfirmOpen}
+        onClose={() => setLeaveConfirmOpen(false)}
+        title={currentSchool ? `Leave ${currentSchool.name}?` : 'Leave this school?'}
+        footer={
+          <div className="flex gap-3 pb-1">
+            <Button ink="pink" disabled={leaveSchoolMutation.isPending} onClick={() => void leaveSchool()}>
+              {leaveSchoolMutation.isPending ? 'Leaving…' : 'Leave this school'}
+            </Button>
+            <Button ink="ink" variant="quiet" onClick={() => setLeaveConfirmOpen(false)}>
+              Stay
+            </Button>
+          </div>
+        }
+      >
+        <ul className="space-y-2 text-body">
+          <li>You come off the members directory here, so nobody at this school sees you in it.</li>
+          <li>If you published that you are a member of this school, that public record is taken back.</li>
+          <li>Classes you taught stay on this school’s calendar, and so do their notes.</li>
+          <li>Nothing about any other school you belong to changes, and you can join again later.</li>
+        </ul>
       </Sheet>
 
       <Sheet

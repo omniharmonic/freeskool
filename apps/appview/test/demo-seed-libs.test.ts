@@ -32,7 +32,7 @@ import { loadDirectoryPrefs, loadProfile, saveProfile } from '../src/lib/profile
 import { recordAttendance } from '../src/lib/attendance.js'
 import { attendance, attendanceTally } from '../src/db/schema.js'
 import { DEMO_EMAIL_DOMAIN, PERSONAS, emailFor, identiconSvg } from '../scripts/demo-personas.js'
-import { demoClasses, planClassRepair, type ClassRepairState } from '../scripts/seed-demo.js'
+import { demoClasses, parseSchools, planClassRepair, type ClassRepairState } from '../scripts/seed-demo.js'
 
 let available = false
 
@@ -323,5 +323,30 @@ describe('scripts/seed-demo.ts demo classes (post-19c fields)', () => {
     expect(online[0]!.input.meetingLink).toMatch(/^https:\/\//)
     // The link is the app-side, after-RSVP half — never a `uris` entry on the record.
     expect(online[0]!.input.uris).toBeUndefined()
+  })
+})
+
+/**
+ * `--schools boulder,denver` (federation phase, Task 11). Boulder is the env-configured
+ * school of the local stack and is always seeded first — Maya has to exist in Boulder
+ * before she can be the same person in Denver — so it is implied rather than optional.
+ */
+describe('scripts/seed-demo.ts#parseSchools', () => {
+  it('defaults to Boulder alone, which is what the seed has always done', () => {
+    expect(parseSchools([])).toEqual(['boulder'])
+  })
+
+  it('takes both forms of the flag', () => {
+    expect(parseSchools(['--schools=boulder,denver'])).toEqual(['boulder', 'denver'])
+    expect(parseSchools(['--schools', 'boulder,denver'])).toEqual(['boulder', 'denver'])
+  })
+
+  it('always seeds Boulder first, and each school once', () => {
+    expect(parseSchools(['--schools=denver'])).toEqual(['boulder', 'denver'])
+    expect(parseSchools(['--schools=denver,boulder,denver'])).toEqual(['boulder', 'denver'])
+  })
+
+  it('refuses a school it has no cast for, rather than silently seeding nothing', () => {
+    expect(() => parseSchools(['--schools=atlantis'])).toThrow(/atlantis/)
   })
 })

@@ -8,6 +8,23 @@ import { useHandleCheck, useSetHandleMutation } from '../lib/queries';
  * happily give out, and a client that is looser sends requests that can only 400. */
 export const HANDLE_PREFIX_RE = /^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])?$/;
 
+/**
+ * Mirror of the server's reserved list — `RESERVED_LABELS` in
+ * `apps/appview/src/lib/handles.ts`. The PWA cannot import server code, so this is a
+ * copy; keep the two identical (`HandleChooser.test.tsx` and `handles.test.ts` both
+ * pin the same array).
+ *
+ * These are labels the edge may hand to a school (`boulder.freeskool.xyz` serves
+ * Boulder) or to infrastructure, so they can never be a member's handle host. The
+ * server is still the authority — it also knows the school labels this deployment
+ * runs, which are config, not a constant. This copy only answers the obvious ones
+ * sooner, without a round trip.
+ */
+export const RESERVED_LABELS = [
+  'admin', 'www', 'pds', 'skills', 'school', 'help', 'mail', 'api',
+  'app', 'static', 'assets', 'internal', 'denver', 'boulder',
+];
+
 /** That rule said the way a person would say it. Shown for a prefix that doesn't fit. */
 export const HANDLE_RULE = '3 to 20 characters, lowercase letters, numbers and dashes.';
 
@@ -75,18 +92,21 @@ export function HandleChooser({
   // normalized prefix throughout.
   const typed = prefix;
   const wellFormed = HANDLE_PREFIX_RE.test(typed);
+  const isReserved = RESERVED_LABELS.includes(typed);
 
   // Only a syntactically valid prefix is worth asking the server about: "is this
   // spelled right" is answerable here, and answering it here means no request per
   // keystroke while someone is still halfway through typing.
   useEffect(() => {
-    if (!wellFormed) {
+    // A reserved label is answerable here too, and asking about one would only spend a
+    // request to be told what this file already knows.
+    if (!wellFormed || isReserved) {
       setDebounced('');
       return;
     }
     const timer = setTimeout(() => setDebounced(typed), 300);
     return () => clearTimeout(timer);
-  }, [typed, wellFormed]);
+  }, [typed, wellFormed, isReserved]);
 
   const check = useHandleCheck(debounced);
   const setHandle = useSetHandleMutation();
@@ -94,6 +114,7 @@ export function HandleChooser({
   let state: CheckState = 'idle';
   if (typed.length === 0) state = 'idle';
   else if (!wellFormed) state = 'invalid';
+  else if (isReserved) state = 'reserved';
   else if (typed !== debounced || check.isPending || check.isFetching) state = 'checking';
   else if (check.isError) state = 'error';
   else if (check.data?.available) state = 'available';

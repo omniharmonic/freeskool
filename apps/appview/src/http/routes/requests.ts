@@ -37,7 +37,8 @@ import { getRecordByUri, listCollection, parseAtUri, sidecarsForEvent } from '..
 import { getRecord } from '../../lib/pds.js'
 import { resolvePdsEndpoint } from '../../lib/identity.js'
 import { countInterested, isInterested, meetsThreshold, toggleInterest } from '../../lib/request-rsvp.js'
-import { createRequest } from '../../lib/requests.js'
+import { createRequest, TooManyAsksError } from '../../lib/requests.js'
+import { currentSchool } from '../school-context.js'
 
 export const requests = new Hono<AppEnv>()
 
@@ -63,7 +64,8 @@ requests.get('/requests', async (c) => {
   // `withViewer` for a signed-in caller and absent otherwise — the route itself is not
   // gated. One role lookup for the page, not one per row.
   const viewer = c.var.viewer
-  const viewerIsSteward = viewer ? (await roleOf(viewer.did)) >= Role.Steward : false
+  const schoolDid = currentSchool(c).did
+  const viewerIsSteward = viewer ? (await roleOf(viewer.did, schoolDid)) >= Role.Steward : false
   const items = await Promise.all(records.map(async r => {
     const claims = await sidecarsForEvent<{ event?: { uri: string } }>(indexer, 'claim', r.uri, 'request.uri')
     const scheduled = claims.find(claim => claim.value.event?.uri)
@@ -78,8 +80,8 @@ requests.get('/requests', async (c) => {
       claims: claims.length,
       ...(scheduled ? { scheduledEventUri: scheduled.value.event!.uri } : {}),
       viewerClaimed: claims.some(claim => claim.did === viewer?.did),
-      rsvpCount: await countInterested(r.uri),
-      viewerInterested: viewer ? await isInterested(r.uri, viewer.did) : false,
+      rsvpCount: await countInterested(r.uri, schoolDid),
+      viewerInterested: viewer ? await isInterested(r.uri, viewer.did, schoolDid) : false,
     }
   }))
   return c.json({ cursor, requests: items })
@@ -87,7 +89,7 @@ requests.get('/requests', async (c) => {
 
 requests.post('/requests/:id/rsvp', requireViewer, async (c) => {
   const requestUri = decodeURIComponent(c.req.param('id'))
-  const result = await toggleInterest(requestUri, c.var.viewer!.did)
+  const result = await toggleInterest(requestUri, c.var.viewer!.did, currentSchool(c).did)
   return c.json(result)
 })
 
@@ -96,15 +98,29 @@ const createBody = z.object({
   description: z.string().max(20_000).optional(),
   skill: z.string().startsWith('at://').optional(),
   threshold: z.number().int().min(1).max(1000).optional(),
+  /**
+   * "Ask <name> to teach this" (UX audit journey finding 13). APP-SIDE: `createRequest`
+   * strips it before writing the record and keeps it in `fs_request_asked_of`, and the
+   * only person who ever learns of it is the member named — through their own
+   * notifications. It is never served back by `GET /requests`.
+   */
+  askedOf: z.string().startsWith('did:').max(255).optional(),
 })
 
+/**
+ * 201 for a request that was written, 200 for an ask that MERGED into one that already
+ * existed (`{ merged: true }`, and the `uri` is the older request's — the caller should
+ * show the member where their interest landed rather than claim a new row).
+ */
 requests.post('/requests', requireViewer, async (c) => {
   const parsed = createBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
   const viewer = c.var.viewer!
   try {
-    return c.json(await createRequest(viewer, parsed.data), 201)
+    const result = await createRequest(viewer, parsed.data, { schoolDid: currentSchool(c).did })
+    return c.json(result, result.merged ? 200 : 201)
   } catch (err) {
+    if (err instanceof TooManyAsksError) return c.json({ error: err.code, message: err.message }, 429)
     if (err instanceof NoActorCredentialError) return c.json({ error: 'ReauthRequired' }, 401)
     throw err
   }
@@ -129,7 +145,7 @@ requests.post('/requests/:id/claim', requireViewer, requireRole(Role.Host), asyn
   if (request?.value.status === 'closed') return c.json({ error: 'RequestClosed' }, 409)
 
   const threshold = request?.value.threshold
-  const interested = await countInterested(requestUri)
+  const interested = await countInterested(requestUri, currentSchool(c).did)
   if (!meetsThreshold(interested, threshold)) {
     return c.json(
       { error: 'ThresholdNotMet', message: `this request needs ${threshold} interested people; has ${interested}` },

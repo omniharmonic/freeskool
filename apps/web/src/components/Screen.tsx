@@ -4,6 +4,11 @@ import { useRouter } from '@tanstack/react-router';
 
 interface ScreenProps {
   title: string;
+  /**
+   * A small line ABOVE the large title, for the school this screen is showing. Only
+   * rendered when there is something to distinguish — see `lib/school.ts#schoolHeading`.
+   */
+  eyebrow?: string;
   wide?: boolean;
   layout?: 'standard' | 'library' | 'detail' | 'form' | 'account' | 'reading' | 'admin';
   intro?: ReactNode;
@@ -23,7 +28,7 @@ const COLLAPSE_AT = 28;
  * iOS large-title screen: the big title lives in the scroll content and slides
  * under a frosted nav bar, which fades its own compact title in as it goes.
  */
-export function Screen({ title, standfirst, trailing, back, beneathTitle, children, wide = false, intro, layout = 'standard' }: ScreenProps) {
+export function Screen({ title, eyebrow, standfirst, trailing, back, beneathTitle, children, wide = false, intro, layout = 'standard' }: ScreenProps) {
   useEffect(() => { document.title = `${title} · Free School`; }, [title]);
   const [collapsed, setCollapsed] = useState(false);
   const frame = useRef<number | null>(null);
@@ -70,6 +75,7 @@ export function Screen({ title, standfirst, trailing, back, beneathTitle, childr
         <div className="pad-header" />
         <main className="screen-content" id="main-content" tabIndex={-1}>
         {intro ?? <div className="page-heading safe-x">
+          {eyebrow ? <p className="page-eyebrow">{eyebrow}</p> : null}
           <h1 className="lt-title text-large font-extrabold">{title}</h1>
           {standfirst ? <p className="page-standfirst">{standfirst}</p> : null}
         </div>
