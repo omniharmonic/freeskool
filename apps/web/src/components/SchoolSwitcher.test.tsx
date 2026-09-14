@@ -48,13 +48,14 @@ function renderSwitcher(viewer: AuthMe | undefined) {
 /** `window.location.assign` is not implemented in jsdom; this is what the switch does. */
 const assign = vi.fn();
 
+function standingOn(location: { protocol: string; hostname: string; port: string }) {
+  Object.defineProperty(window, 'location', { configurable: true, value: { ...location, assign } });
+}
+
 beforeEach(() => {
   vi.mocked(api.auth.switchSchool).mockReset();
   assign.mockReset();
-  Object.defineProperty(window, 'location', {
-    configurable: true,
-    value: { protocol: 'https:', assign },
-  });
+  standingOn({ protocol: 'https:', hostname: 'boulder.freeskool.xyz', port: '' });
 });
 
 describe('SchoolSwitcher', () => {
@@ -92,6 +93,36 @@ describe('SchoolSwitcher', () => {
     // The SERVER's host, not the one the client already had: only it knows which
     // `fs_school_domain` row is canonical, and a city may bring its own domain.
     await waitFor(() => expect(assign).toHaveBeenCalledWith('https://denver.example.org/'));
+  });
+
+  it('forces https even from a page that somehow loaded over http', async () => {
+    // The session cookie is `Secure`; a plain-http hop would arrive signed out, and a
+    // downgrade must not be able to travel from one city to the next.
+    standingOn({ protocol: 'http:', hostname: 'boulder.freeskool.xyz', port: '' });
+    vi.mocked(api.auth.switchSchool).mockResolvedValue({
+      school: { did: DENVER.did, label: DENVER.label, name: DENVER.name },
+      host: DENVER.host,
+    });
+    renderSwitcher(me([BOULDER, DENVER]));
+
+    fireEvent.click(screen.getByRole('button', { name: /Boulder Free School/ }));
+    fireEvent.click(screen.getByRole('option', { name: 'Denver Free School' }));
+
+    await waitFor(() => expect(assign).toHaveBeenCalledWith(`https://${DENVER.host}/`));
+  });
+
+  it('keeps the dev scheme and port on localhost, where there is no https and no :443', async () => {
+    standingOn({ protocol: 'http:', hostname: 'localhost', port: '5173' });
+    vi.mocked(api.auth.switchSchool).mockResolvedValue({
+      school: { did: DENVER.did, label: DENVER.label, name: DENVER.name },
+      host: 'denver.localhost',
+    });
+    renderSwitcher(me([BOULDER, DENVER]));
+
+    fireEvent.click(screen.getByRole('button', { name: /Boulder Free School/ }));
+    fireEvent.click(screen.getByRole('option', { name: 'Denver Free School' }));
+
+    await waitFor(() => expect(assign).toHaveBeenCalledWith('http://denver.localhost:5173/'));
   });
 
   it('does not navigate when the member picks the school they are already in', async () => {

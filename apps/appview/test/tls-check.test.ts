@@ -6,9 +6,15 @@
  * yes to `*.freeskool.xyz` burns the 50-certificates-per-registered-domain-per-week
  * ceiling the first time a bot dials random SNIs at the box (MS §3).
  *
- * Three answers, in order: `www`, a school host (`<known label>.<SCHOOL_DOMAIN_SUFFIX>`),
- * and otherwise whatever the PDS says about the handle it issued. A PDS that does not
+ * Three answers, in order: `www`, a school host (a known label under
+ * `SCHOOL_DOMAIN_SUFFIX`, or any host in `fs_school_domain`), and otherwise whatever the
+ * PDS says about the handle it issued. A PDS that does not
  * answer is a NO, never a yes — an unanswered check must not mint a certificate.
+ *
+ * The second rule asks TWO closed sets, config then table, because a city created through
+ * `POST /api/schools` exists only in `fs_school_domain` — answering from the env alone
+ * would mean no new city could be served until somebody edited `SCHOOL_LABELS` and
+ * redeployed, which is exactly what MS §8 step 6 promises it does not take.
  *
  * The third rule spans EVERY handle domain this deployment serves, not one: ruling 3
  * moves member handles from `freeskool.xyz` to `freeskool.directory`, and a handle that
@@ -30,9 +36,11 @@ process.env.SESSION_SECRET ??= 'tls-check-test-session-secret'
 process.env.CUSTODY_KEYS ??= `v1:${Buffer.alloc(32, 5).toString('base64')}`
 process.env.FEEDBACK_BALLOT_PEPPER ??= 'tls-check-test-pepper'
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { internal } from '../src/http/routes/internal.js'
 import { createApp } from '../src/http/app.js'
+import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
+import { school, schoolDomain } from '../src/db/schema.js'
 
 /** A PDS that vouches for exactly these names and 404s everything else. */
 function fakePds(known: string[], opts: { status?: number; throws?: boolean } = {}) {
@@ -56,6 +64,17 @@ async function ask(domain: string | null) {
 }
 
 let consoleSpies: ReturnType<typeof vi.spyOn>[] = []
+/** Only the `fs_school_domain` cases need a database; everything else answers from config. */
+let available = false
+
+beforeAll(async () => {
+  available = await pgAvailable()
+  if (!available) console.warn(SKIP_MESSAGE)
+})
+
+afterAll(async () => {
+  if (available) await closeTestDb()
+})
 
 beforeEach(() => {
   consoleSpies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
@@ -143,6 +162,48 @@ describe('GET /internal/tls-check', () => {
   it('still asks the PDS about the legacy domain rather than assuming: an unknown name is no', async () => {
     vi.stubGlobal('fetch', fakePds(['calmotter417.old.test']))
     expect((await ask('nobody.old.test')).status).toBe(403)
+  })
+
+  it('says yes to a school that exists only in fs_school_domain, without asking the PDS', async () => {
+    if (!available) return
+    await truncate('fs_school', 'fs_school_domain')
+    await testDb()
+      .insert(school)
+      .values({ did: 'did:plc:tls-runtime', label: 'aurora', name: 'Aurora Free School', handle: 'aurora.test' })
+    await testDb()
+      .insert(schoolDomain)
+      .values({ host: 'aurora.freeskool.test', schoolDid: 'did:plc:tls-runtime', kind: 'canonical' })
+
+    // `aurora` is NOT in SCHOOL_LABELS: a city created through `POST /api/schools` must be
+    // servable the moment its row exists, without an env edit and a redeploy.
+    const pds = fakePds([])
+    vi.stubGlobal('fetch', pds)
+    expect((await ask('aurora.freeskool.test')).status).toBe(200)
+    expect(pds).not.toHaveBeenCalled()
+  })
+
+  it('says yes to a city\u2019s own domain, which no pattern under our suffix could match', async () => {
+    if (!available) return
+    await truncate('fs_school', 'fs_school_domain')
+    await testDb()
+      .insert(school)
+      .values({ did: 'did:plc:tls-custom', label: 'aurora', name: 'Aurora Free School', handle: 'aurora.test' })
+    await testDb()
+      .insert(schoolDomain)
+      .values({ host: 'aurorafreeskool.org', schoolDid: 'did:plc:tls-custom', kind: 'alias' })
+
+    const pds = fakePds([])
+    vi.stubGlobal('fetch', pds)
+    expect((await ask('aurorafreeskool.org')).status).toBe(200)
+    expect(pds).not.toHaveBeenCalled()
+  })
+
+  it('says no to a host under the suffix that no school has claimed', async () => {
+    if (!available) return
+    await truncate('fs_school', 'fs_school_domain')
+    // In neither SCHOOL_LABELS nor fs_school_domain, and the PDS does not know it either.
+    vi.stubGlobal('fetch', fakePds([]))
+    expect((await ask('aurora.freeskool.test')).status).toBe(403)
   })
 
   it('says no to a name outside both the web host and the school suffix', async () => {

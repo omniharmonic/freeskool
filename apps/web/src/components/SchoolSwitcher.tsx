@@ -20,6 +20,24 @@ import { useEffect, useRef, useState } from 'react';
 import type { AuthMe, ViewerSchool } from '../lib/types';
 import { useSwitchSchoolMutation } from '../lib/queries';
 
+/**
+ * Where to send the browser for a school host.
+ *
+ * ALWAYS `https:` for a real host, never the current page's scheme. The session cookie is
+ * `Secure`, so a plain-http hop would arrive signed out; and a page that somehow loaded
+ * over http must not be able to carry that downgrade into the next city.
+ *
+ * Development is the one exception, and it is recognised by the host rather than by a
+ * build flag: on `localhost`/`127.0.0.1` the scheme and the port are kept, because that
+ * is where the PWA is served from `:5173` over http and a hard-coded `https://host/`
+ * would land nowhere. A host that already carries its own port keeps it.
+ */
+function urlForHost(host: string): string {
+  const { hostname, protocol, port } = window.location;
+  if (hostname !== 'localhost' && hostname !== '127.0.0.1') return `https://${host}/`;
+  return `${protocol}//${host.includes(':') || !port ? host : `${host}:${port}`}/`;
+}
+
 export function SchoolSwitcher({ me }: { me: AuthMe | undefined }) {
   const schools = me?.schools ?? [];
   const currentDid = me?.school?.did;
@@ -57,7 +75,7 @@ export function SchoolSwitcher({ me }: { me: AuthMe | undefined }) {
       }
       // A full navigation on purpose: the new origin loads its own app, its own service
       // worker scope and its own cache. `assign`, not `replace`, so Back still works.
-      window.location.assign(`${window.location.protocol}//${host}/`);
+      window.location.assign(urlForHost(host));
     } catch {
       setError('Could not switch schools. Try again.');
     }
