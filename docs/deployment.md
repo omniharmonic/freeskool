@@ -122,6 +122,63 @@ images are deliberately retained, never pruned by the release script. The deploy
 Roll back with `git checkout <previous commit> && $C build && $C up -d`. A release that changes the
 schema also needs the pre-release dump to roll back to; never delete a volume.
 
+## Releasing this refinement branch
+
+Beyond the usual `release.sh` above, this branch adds the taxonomy authority, the skill index, and a
+one-off record repair, none of which `release.sh` or the AppView's own boot-time migration runs for you.
+In order, against the production server (`ssh -i ~/.ssh/frontrange-twin root@167.233.100.123`, checkout
+at `/opt/freeskool`, `C="docker compose --env-file infra/production/.env -f infra/production/compose.yml"`):
+
+1. **Merge `refinement` to `main`**, then `/opt/freeskool/infra/production/release.sh` as usual (see
+   "Releasing a change" above) — this pulls, backs up, rebuilds and recreates `appview` + `web`.
+2. **Add `AUTHORITY_DID`, `AUTHORITY_HANDLE`, `AUTHORITY_PASSWORD` to `infra/production/.env` and
+   recreate the appview container.** Production holds these today in
+   `/opt/freeskool/infra/production/.authority.env`, a file the appview container never reads — only
+   `.env` (passed as `env_file`) does. Copy the three values across, then
+   `$C up -d --no-deps --force-recreate appview` to pick them up. Skipping this step leaves
+   `POST /api/skills` (propose-a-skill) answering `503 AuthorityUnavailable` and the skill tree unscoped
+   to the authority.
+3. **Reseed the taxonomy against production** (745 records, up from the 525 seeded 2026-09-13):
+   ```sh
+   $C run --rm -e AUTHORITY_HANDLE=skills.freeskool.xyz -e AUTHORITY_PASSWORD=… \
+      -e PDS_URL=https://pds.freeskool.xyz appview pnpm --filter @freeschool/lexicons seed:skills
+   ```
+4. **`reindex-skills`** — `$C run --rm -e AUTHORITY_DID=did:plc:… appview pnpm --filter @freeschool/appview reindex-skills`.
+   Contrail backfills a repo once and then only follows its live stream from "head"; the reseed in step 3
+   wrote records the running indexer will otherwise never see. Without this, the skill tree and
+   propose-a-skill both look empty or stale even though the records exist on the PDS.
+5. **`backfill-skill-claims`, once** — `$C run --rm appview pnpm --filter @freeschool/appview backfill-skill-claims`.
+   Fills `fs_skill_claim_index` for every member who saved a school-visibility skill claim before the
+   index existed. Idempotent, but there is no reason to run it more than once per deployment.
+6. **`migrate-event-notes`, dry run then real** — the one-off repair that moves attendee notes and meeting
+   links off the public event record (task 19c):
+   ```sh
+   $C run --rm appview pnpm --filter @freeschool/appview migrate-event-notes -- --dry-run
+   $C run --rm appview pnpm --filter @freeschool/appview migrate-event-notes
+   ```
+   Read the dry-run counts before running for real; the script is idempotent (a second run finds nothing
+   to do) and prints counts only, never a DID, a handle, or the text of anybody's notes.
+7. **Verify:**
+   - `curl -s https://freeskool.xyz/api/health` → `{"status":"ok",...,"school":true}`.
+   - `curl -s https://freeskool.xyz/api/calendar.ics` returns a `text/calendar` feed.
+   - A skill page loads (`https://freeskool.xyz/skills/<any-seeded-slug>`) and shows people who claim it.
+   - `/people` loads as a signed-in member (it is members-only; a signed-out or unauthenticated request
+     should 401/redirect, not show the directory).
+   - `pnpm --filter @freeschool/appview privacy-audit` against `PDS_URL=https://pds.freeskool.xyz` ends in
+     `PRIVACY AUDIT OK` — zero violations.
+
+**The test-database change (`freeschool_test`, pinned by Vitest) does not apply here.** That isolation
+exists only for `pnpm -r test`; production always runs against `DATABASE_URL` in `infra/production/.env`,
+unchanged by this branch.
+
+**`boulder.freeskool.xyz` is the school's own handle**, not yet a distinct subdomain the web app serves —
+today it resolves through the PDS's wildcard handle domain like any member's handle. The multi-school
+design doc (`docs/superpowers/specs/2026-09-13-multi-school-design.md` §3) flags the exact collision this
+causes: a `<city>.freeskool.xyz`-per-school URL scheme, which that doc proposes, would collide head-on
+with the member-handle namespace `PDS_HANDLE_DOMAIN=freeskool.xyz` already owns. Nothing to do for this
+release — it is a known, written-down constraint for whenever multi-school ships, not a bug in what
+shipped here.
+
 ## Moving the stack
 
 Everything that moves: the two volumes (`postgres`, `pds`) and `infra/production/.env`. Stop the

@@ -7,14 +7,16 @@ Built by Benjamin Life ([@omniharmonic](https://github.com/omniharmonic)) with F
 ## What it is
 - A public calendar of classes on `community.lexicon.calendar.event` (interoperable with atmo.rsvp, Dandelion, Beacon) with Free School sidecars (`freeschool.draft.*`) attached by strongRef — never by adding fields to somebody else's record.
 - Profiles with skill claims; a needs board ("I want to learn X" → "I can teach that"); host-attested attendance; badges and roles derived from attestations, never scores.
+- A members-only People tab and member profiles; app-side skill vouching (counts and evidence, never averages, from `/api/attestations`); a type-ahead skill picker with propose-a-skill, reviewed by stewards at `/admin/skills`.
+- Onboarding: continue-with-email for new and returning members (adopting an orphaned PDS account when one already exists), handle choice, Bluesky profile import on sign-in with explicit public-linkage confirmation, and a `/welcome` flow to pick skills.
 - Federation without a firehose: each AppView follows a registry of peer PDS hosts directly.
-- An installable PWA (Calendar · Skills · Requests · Me) with a printable monthly zine.
+- An installable PWA (Calendar · Skills · Requests · Me) with a printable monthly zine, and a public `.ics` calendar feed for anyone who isn't on ATProto at all.
 
 ## Layout
 ```
 apps/web            PWA (Vite + React, iOS idiom) + the Playwright e2e suite
 apps/appview        Hono + @atproto/xrpc-server + @atproto/sync + pg-boss + contrail index
-packages/lexicons   freeschool.draft.* lexicon JSON (CC0) + the 525-node skill seed
+packages/lexicons   freeschool.draft.* lexicon JSON (CC0) + the 745-node skill seed
 packages/spaces-shim  Spaces-shaped interface (v1: Postgres; later: the Spaces alpha SDK)
 packages/school-actor SchoolActorPort — every write as the school goes through it
 packages/shared     role ladder, k-anonymity aggregator, shared types
@@ -59,13 +61,24 @@ pnpm --filter @freeschool/appview db:migrate       # fs_* via drizzle, then cont
 
 The school account and its `freeschool.draft.school` + `freeschool.draft.policy` records are the **only** writes in the codebase that use the school's own session directly instead of `SchoolActorPort`: the port authorizes against the policy record, which does not exist yet.
 
-### 4. Seed the skill taxonomy (optional, but the Skills tab is empty without it)
+### 4. Seed the skill taxonomy (optional, but the Skills tab is empty without it, and propose-a-skill needs it)
 
 ```bash
-# infra/seed/.authority.env holds the authority account this repo seeded under (gitignored).
+# infra/seed/.authority.env holds the authority account this repo seeds under (gitignored; never
+# commit it). It already has AUTHORITY_HANDLE and AUTHORITY_PASSWORD.
 set -a; . ./infra/seed/.authority.env; set +a
-pnpm --filter @freeschool/lexicons seed:skills     # 525 freeschool.draft.skill records
+pnpm --filter @freeschool/lexicons seed:skills     # 745 freeschool.draft.skill records; prints {did, ok, failed, total}
+
+pnpm --filter @freeschool/appview reindex-skills   # tell the indexer about every record just seeded
 ```
+
+Add `AUTHORITY_DID` (the `did` the seed just printed), `AUTHORITY_HANDLE` and `AUTHORITY_PASSWORD` to `.env`
+and re-export it (`set -a; . ./.env; set +a`) so the AppView itself sees them. Without all three, the
+skill tree is unscoped to an authority and `POST /api/skills` (propose-a-skill) answers `503 AuthorityUnavailable`.
+
+`reindex-skills` matters because contrail backfills a repo once, at first boot, and then only follows its
+live stream from "head" — records written to the authority *before* the AppView last started (a reseed,
+for instance) land in neither the backfill nor the live stream. Run it after any reseed of the taxonomy.
 
 ### 5. Run it
 
@@ -100,10 +113,10 @@ Running a second stack beside a first (the e2e suite does this): `APPVIEW_PORT=4
 
 **Signing in with an existing ATProto account cannot work on `http://localhost`** — a confidential OAuth client needs an `https:` `client_id` with a real hostname — so those routes answer `503 OAuthNotConfigured` locally, by design. See `apps/appview/README.md` §5. The primary door (a new Free School identity) is unaffected, and is the door the project wants people to use.
 
-### 6. Check it
+### 7. Check it
 
 ```bash
-pnpm -r test            # unit/integration (live Postgres; see docs/plans/final-polish.md for the latest verification)
+pnpm -r test            # unit/integration (see docs/plans/final-polish.md for the latest verification)
 pnpm -r typecheck
 pnpm lexicons:validate
 
@@ -111,6 +124,12 @@ pnpm --filter @freeschool/appview smoke           # 11 steps against the live st
 pnpm --filter @freeschool/appview privacy-audit   # every public record on the PDS; exits 1 on a violation
 pnpm e2e                                          # the browser loop (see below)
 ```
+
+**Tests run on their own database.** `apps/appview`'s Vitest config pins `DATABASE_URL` to
+`postgres://freeschool:freeschool@localhost:5434/freeschool_test` unconditionally — a `.env` you sourced
+into your shell is ignored for the test run, on purpose, so the suite can never truncate your dev data.
+Set `TEST_DATABASE_URL` to point it somewhere else (CI, say); the database itself is created if missing
+and migrated fresh by `test/global-setup.ts`.
 
 The privacy audit reads every repo on the PDS as a stranger would and fails on any public record that names a DID its holder did not write — structurally (a `subject`, a strongRef) and in free text (an `@handle` or a `did:` written into a `reason`, `note`, `description` or `suppliesNote`). A clean run ends in `PRIVACY AUDIT OK`.
 
@@ -127,6 +146,7 @@ Production hosting and launch checks: [deployment guide](docs/deployment.md). Th
 - Classes (one-off and recurring), location tiers (neighbourhood public, address to people who RSVP), capacity and waitlist, materials, invite links, `.ics`.
 - Skill taxonomy with Tier A/B visibility rules, skill claims, the needs board with interest thresholds and "I can teach this".
 - App-side RSVPs, attendance attestation, anonymous host feedback with a k-anonymous summary, derived roles and badges (counts and presence, never averages).
+- Members-only People tab and member profiles (`GET /api/members*`); app-side skill vouching with counts and evidence; a type-ahead skill picker with propose-a-skill (published `status: 'proposed'` under the taxonomy authority) and a steward screen to deprecate or move proposals.
 - Steward surface: policy editor, moderation queue with approvals and an audit trail, peer registry, monthly newsletter, steward hand-off.
 - PWA: installable, offline calendar for 30 days, declarative push reminders, printable monthly zine, a plain-language "how it works" page.
 - Federation: a peer registry of PDS hosts followed directly (`subscribeRepos` live, a 15-minute backfill beneath it), tag-routed listings so another school's calendar can carry our classes.
@@ -136,7 +156,7 @@ Production hosting and launch checks: [deployment guide](docs/deployment.md). Th
 - Real Spaces (the interface is there — `packages/spaces-shim` — the Postgres implementation stands in), elections or any voting, labelers, a wiki adapter, one-click self-hosting.
 - Money of any kind. No payments, no donations, no sponsorships.
 - Private records on the protocol: v1 public records are genuinely public, and everything that should not be public is app-side instead.
-- Skill attestations ("vouches") are read but never written yet — the double opt-in they need does not exist, so the privacy audit treats any attestation naming another DID as a violation on purpose.
+- Skill vouches are app-side counts and evidence (`fs_attestation`, never a public average); the protocol-level, portable version — a double opt-in `freeschool.draft.skillAttestation` pair that would travel with a member off this AppView — is drafted but not written in v1 (`docs/interop-audit.md` gap 15).
 - The secondary door (OAuth with an existing account) is implemented but cannot be exercised on `http://localhost`, and an OAuth session may not publish public skill claims in v1.
 - Multi-school hosting from one AppView, a migration path off the custodial PDS for the *school* DID, and moderation federation.
 
