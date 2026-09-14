@@ -14,7 +14,7 @@ PR #2 is merged and released (see `docs/deployment.md`). This phase builds MS §
 |---|---|---|
 | 1 | Who may start a school | `SCHOOL_CREATION=closed`: operator script only. No self-serve in this phase. |
 | 2 | Apex Boulder or network | Apex `freeskool.xyz` stays Boulder's app. `boulder.freeskool.xyz` serves the handle well-known AND the Boulder app (MS §3 inversion). New cities get `<city>.freeskool.xyz`. A network front door is a later phase. |
-| 3 | Move the handle domain | Yes, with the PDS: one neutral domain hosts the PDS (`pds.<neutral>`) and member handles (`<name>.<neutral>`). Benjamin picks the domain; the migration is designed and scripted here (MS §3, §9) and executed when the domain exists. Existing DIDs are updated through the PDS's own PLC signing path. |
+| 3 | Move the handle domain | Yes, with the PDS. Benjamin registered **`freeskool.directory`** (2026-09-14): the PDS moves to `pds.freeskool.directory`, member handles to `<name>.freeskool.directory`, the school account's handle to `boulder.freeskool.directory`, which frees `boulder.freeskool.xyz` for the city app host. The migration is designed and scripted here (MS §3, §9), rehearsed on the dev PDS, then executed on production. Existing DIDs are updated through the PDS's own PLC signing path. |
 | 4 | Per-school handle domains | Refused in this phase. One neutral handle domain. |
 | 5 | Cross-school vouches | Scoped per school (R9). No double-opt-in record yet. |
 | 6 | Taxonomy power | Stewards keep "deprecate/move" (the taxonomy operator is Benjamin's own schools for now). Per-school "hide here" is Phase 7, deferred. |
