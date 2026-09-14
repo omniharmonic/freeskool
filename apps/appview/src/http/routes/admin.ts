@@ -30,6 +30,8 @@ import { SchoolActError, type Approval, type SchoolAction } from '@freeschool/sc
 import { NSID } from '../../lexicons/nsids.js'
 import { currentPolicyUri, getThresholds, refreshPolicyCache } from '../../lib/policy.js'
 import { getRecord } from '../../lib/pds.js'
+import { getRecordByUri, parseAtUri } from '../../index/queries.js'
+import { resolvePdsEndpoint } from '../../lib/identity.js'
 import { addPeer, disablePeer, listPeers, probePeer } from '../../index/peers.js'
 import { getIndexer, resetIndexer } from '../../index/indexer.js'
 import { composeNewsletterIssue, sendNewsletterIssue } from '../../jobs/newsletter.js'
@@ -272,6 +274,31 @@ admin.post('/moderation/:id/execute', async (c) => {
   if (row.status !== 'open') return c.json({ error: 'AlreadyResolved', status: row.status }, 409)
 
   if ((row.action === 'remove-resource' || row.action === 'restore-resource') && !row.subjectUri?.includes(`/${NSID.resource}/`)) return c.json({error:'InvalidRequest',message:'Choose a resource record to moderate.'},400)
+
+  /**
+   * INTEROP GAP 3. A `coop.lexicon.event.listing`'s `event` is a
+   * `com.atproto.repo.strongRef`, which requires BOTH `uri` and `cid`. We used to write
+   * the uri alone, so a peer that validates the record dropped it — and a dropped
+   * removal leaves a moderated class listed on someone else's calendar, the worst
+   * possible direction for a moderation failure.
+   *
+   * The ref is resolved BEFORE anything is written (index first, the host's PDS second)
+   * and the whole action is refused if neither answers: a decision record whose effect
+   * cannot be published is worse than an item that stays open and can be retried.
+   */
+  let eventRef: { uri: string; cid: string } | undefined
+  if ((row.action === 'remove-listing' || row.action === 'restore-listing') && row.subjectUri) {
+    const cid = await resolveEventCid(row.subjectUri)
+    if (!cid)
+      return c.json(
+        {
+          error: 'UnresolvableSubject',
+          message: 'Could not read the current version of that class record, so the listing would be invalid. Try again once it is reachable.',
+        },
+        409,
+      )
+    eventRef = { uri: row.subjectUri, cid }
+  }
   const approvals = asApprovals(row.approvals)
   try {
     const result = await schoolActor().putRecordAsSchool({
@@ -298,7 +325,7 @@ admin.post('/moderation/:id/execute', async (c) => {
     // `restore-listing` are the same write with a different `status` — and because
     // `isListed` takes the NEWEST listing (`http/visibility.ts`), appending a `listed`
     // record genuinely un-hides the class.
-    if ((row.action === 'remove-listing' || row.action === 'restore-listing') && row.subjectUri) {
+    if (eventRef && (row.action === 'remove-listing' || row.action === 'restore-listing')) {
       const status = row.action === 'remove-listing' ? 'removed' : 'listed'
       const listing = await schoolActor()
         .putRecordAsSchool({
@@ -310,7 +337,7 @@ admin.post('/moderation/:id/execute', async (c) => {
           rkey: tid(),
           record: {
             $type: NSID.eventListing,
-            event: { uri: row.subjectUri },
+            event: eventRef,
             school: schoolDid(),
             status,
             createdAt: new Date().toISOString(),
@@ -610,4 +637,27 @@ function asApprovals(raw: unknown): Approval[] {
       },
     ]
   })
+}
+
+/**
+ * The current cid of an event record: the indexed copy first (no network), the host's
+ * own PDS second. `null` means we cannot build a valid strongRef for it — see the
+ * refusal in `POST /moderation/:id/execute`.
+ */
+async function resolveEventCid(uri: string): Promise<string | null> {
+  try {
+    const indexed = await getRecordByUri(await getIndexer(), 'event', uri)
+    if (indexed?.cid) return indexed.cid
+  } catch {
+    /* the index is not the only source; fall through to the PDS */
+  }
+  try {
+    const parts = parseAtUri(uri)
+    if (!parts) return null
+    const endpoint = await resolvePdsEndpoint(parts.did)
+    if (!endpoint) return null
+    return (await getRecord(parts.did, parts.collection, parts.rkey, endpoint))?.cid ?? null
+  } catch {
+    return null
+  }
 }

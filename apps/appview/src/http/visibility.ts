@@ -10,10 +10,13 @@
  *      status WINS over the host's own config: that is what moderation means, and it is
  *      also what makes `restore-listing` work at all.
  *
- *   2. HOW MUCH OF IT?  Everyone sees title / time / neighborhood. The full location —
- *      street address, venue name, coordinates, join URL — is only ever sent to a viewer
- *      who is the host, has RSVP'd, has confirmed attendance, or is a steward. Someone's
- *      living room is not public information just because the class is.
+ *   2. HOW MUCH OF IT?  For a LISTED class everyone sees what the host's own public
+ *      record says — title, time, mode, description, links, host — plus a neighborhood.
+ *      The precise LOCATION (street address, venue name, coordinates) is only ever sent
+ *      to a viewer who is the host, has RSVP'd, has confirmed attendance, or is a
+ *      steward. Someone's living room is not public information just because the class
+ *      is; a class description, published by its host into a world-readable repo,
+ *      already is (see `publicRecordFields`).
  */
 import type { EventConfig, EventListing } from '../lexicons/coop.js'
 
@@ -161,6 +164,34 @@ export interface FullCalendarEntry extends PublicCalendarEntry {
   hostDid: string
 }
 
+/**
+ * The fields that are ALREADY PUBLIC in the `community.lexicon.calendar.event` record
+ * itself, and so are not ours to withhold from a listed class (interop gap 5).
+ *
+ * Why this is not a privacy regression: the event lives in the HOST'S OWN REPO and is
+ * world-readable over `com.atproto.repo.listRecords` by anyone who knows the PDS — the
+ * host published it, deliberately, as a public record. Hiding `description`, `uris` and
+ * `hostDid` from our own API therefore protected nothing (one `listRecords` away) while
+ * making every site syndicating our calendar show titles with no descriptions and
+ * virtual classes with no join link.
+ *
+ * `locations` is the exception and stays gated: the street address is the R9 harm —
+ * someone's living room is not public information just because the class is — and it is
+ * coarsened to a neighborhood rather than omitted. `hostDid` is likewise already inside
+ * the event's own AT-URI, so naming it adds no identity the record did not carry.
+ *
+ * These fields are released only for a class that is actually LISTED. An unlisted,
+ * private or moderated-away event tells a stranger nothing beyond what the calendar
+ * routes already refuse to show them.
+ */
+function publicRecordFields(event: CalendarEvent) {
+  return {
+    hostDid: event.hostDid,
+    ...(event.description ? { description: event.description } : {}),
+    ...(event.uris ? { uris: event.uris } : {}),
+  }
+}
+
 export function projectEvent(
   event: CalendarEvent,
   inputs: ListingInputs,
@@ -181,14 +212,15 @@ export function projectEvent(
     venueNeeded: isVenueNeeded(event, inputs),
     tags: tagsOf(inputs),
   }
-  if (!seesFullLocation(relation)) return base
+  if (!seesFullLocation(relation)) {
+    // Listed and public: the record's own public fields, minus the precise location.
+    return isListed(inputs) ? { ...base, ...publicRecordFields(event) } : base
+  }
   return {
     ...base,
     locationRedacted: false,
-    hostDid: event.hostDid,
-    ...(event.description ? { description: event.description } : {}),
+    ...publicRecordFields(event),
     ...(event.locations ? { locations: event.locations } : {}),
-    ...(event.uris ? { uris: event.uris } : {}),
   }
 }
 

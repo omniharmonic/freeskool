@@ -250,7 +250,23 @@ describe('image privacy', () => {
 
 
 describe('public class overview', () => {
-  it('serves the public invitation without disclosing legacy attendee details or exact locations', async () => {
+  /**
+   * INTEROP GAP 5, as ruled: for a LISTED class the API now returns the fields the
+   * host's own `community.lexicon.calendar.event` already carries in a world-readable
+   * repo — `description`, `uris`, `hostDid` — because withholding them protected
+   * nothing one `listRecords` away. `locations` is still coarsened to a neighborhood:
+   * the street address is the R9 harm.
+   *
+   * The fixture keeps its alarming `description` on purpose. **The PWA's class form
+   * labels that field "Extra notes for people attending. Shown after RSVP on this
+   * school's pages." and the meeting link "Available to attendees after they RSVP" —
+   * and then writes both into the PUBLIC record.** That promise was never true on the
+   * protocol, and this assertion is where it shows. Either the host-facing copy changes
+   * to "anything you type here is a public record", or those two fields stop being
+   * written to the event record and become app-side like `publicOverview` — see
+   * `docs/interop-audit.md` §6.
+   */
+  it('serves the public record’s own fields for a listed class, and never the exact location', async () => {
     if (!available) return
     fixtureListed = true
     eventRecord.description = 'Private entry code 1234'
@@ -263,9 +279,11 @@ describe('public class overview', () => {
     const body = await res.json()
     expect(body.publicOverview).toEqual({ description: 'Learn to grow mushrooms', audience: 'Beginners', accessibility: 'Seating available' })
     expect(body.locationRedacted).toBe(true)
-    expect(body.description).toBeUndefined()
+    expect(body.description).toBe('Private entry code 1234')
+    expect(body.uris).toEqual([{ uri: 'https://example.com/private-meeting' }])
+    // The one thing that is genuinely ours to withhold, and still is.
     expect(body.locations).toBeUndefined()
-    expect(body.uris).toBeUndefined()
+    expect(JSON.stringify(body)).not.toContain('Secret Lane')
     fixtureListed = false
     expect((await createApp().request(`/api/events/${encodeURIComponent(EVENT_URI)}`)).status).toBe(404)
   })

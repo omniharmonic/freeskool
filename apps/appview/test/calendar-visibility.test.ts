@@ -156,7 +156,15 @@ describe('how much of it does this viewer see?', () => {
     configs: [{ event: ref, visibility: 'listed', neighborhood: 'North Boulder' }],
   }
 
-  it('the public gets title, time, mode and neighborhood — and nothing else', () => {
+  /**
+   * INTEROP GAP 5. `description`, `uris` and `hostDid` are fields of the public
+   * `community.lexicon.calendar.event` record itself — any ATProto client can read them
+   * straight from the host's repo — so withholding them from our own public API bought
+   * no privacy at all and made every site syndicating our calendar look broken. What is
+   * still withheld is `locations`: the street address is the thing R9 protects, and it
+   * is the only one of these fields that is genuinely coarsened rather than omitted.
+   */
+  it('the public gets the public record: title, time, mode, neighborhood, description, uris and host — never the street', () => {
     const out = projectEvent(event, listed, 'public')
     expect(out).toEqual({
       uri: event.uri,
@@ -169,19 +177,33 @@ describe('how much of it does this viewer see?', () => {
       locationRedacted: true,
       venueNeeded: false,
       tags: [],
+      description: 'Bring a jar.',
+      uris: [{ uri: 'https://meet.example.org/abc', name: 'Video link' }],
+      hostDid: 'did:plc:host',
     })
     const serialized = JSON.stringify(out)
     expect(serialized).not.toContain('Juniper')
     expect(serialized).not.toContain('80304')
     expect(serialized).not.toContain("Dana's kitchen")
-    expect(serialized).not.toContain('meet.example.org')
-    // `hostDid` is not a field on the public projection. The host's DID is still inside the
-    // event's own AT-URI, which is unavoidable and already public — the event record lives
-    // in their repo. What matters is that we add no identity of our own.
-    expect(out).not.toHaveProperty('hostDid')
-    expect(out).not.toHaveProperty('description')
     expect(out).not.toHaveProperty('locations')
+    // Still redacted: the viewer is being shown a coarsened location, not a full one.
+    expect(out.locationRedacted).toBe(true)
+  })
+
+  it('a stranger looking at an UNLISTED event gets none of those fields', () => {
+    const unlisted: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'unlisted', neighborhood: 'North Boulder' }] }
+    const out = projectEvent(event, unlisted, 'public')
+    expect(out).not.toHaveProperty('description')
     expect(out).not.toHaveProperty('uris')
+    expect(out).not.toHaveProperty('hostDid')
+    expect(out).not.toHaveProperty('locations')
+    expect(JSON.stringify(out)).not.toContain('meet.example.org')
+    // A removed (moderated) listing is the same case, whatever the host's config says.
+    const removed: ListingInputs = {
+      listings: [{ event: ref, school: 'did:plc:school', status: 'removed' }],
+      configs: [{ event: ref, visibility: 'listed' }],
+    }
+    expect(projectEvent(event, removed, 'public')).not.toHaveProperty('description')
   })
 
   it.each(['rsvp', 'attendee', 'host', 'steward'] as const)('a %s viewer gets the precise location', (relation) => {

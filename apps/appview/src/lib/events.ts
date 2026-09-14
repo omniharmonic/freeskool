@@ -24,7 +24,7 @@
 import { normalizeImage, type ImageInput } from './images.js'
 import { getPresentation, savePresentation, type PublicOverview } from './event-presentation.js'
 import type { Agent } from '@atproto/api'
-import type { Did } from '@freeschool/school-actor'
+import type { Did, SchoolAction } from '@freeschool/school-actor'
 import { NSID } from '../lexicons/nsids.js'
 import { tid } from './ids.js'
 import { schoolActor, schoolDid } from './school-actor.js'
@@ -195,6 +195,15 @@ export interface RouteListingInput {
    * array to keep a unit test hermetic (no network, no warning log).
    */
   schoolTags?: string[]
+  /**
+   * The audited `SchoolAction` this listing belongs to. Defaults to `publish-event` (a
+   * host publishing a class); the series job passes `materialize-occurrence` so the
+   * audit row says which job wrote it — the ROUTING RULE is identical either way, which
+   * is the entire point of routing occurrences through here (interop gap 2).
+   */
+  action?: SchoolAction
+  /** Audit reason override; defaults to `host published "<name>"`. */
+  auditReason?: string
 }
 
 /** Writes the school's curation listing, as the school, only when tags + visibility route. */
@@ -206,7 +215,7 @@ export async function routeListing(input: RouteListingInput): Promise<{ uri: str
     schoolDid: schoolDid(),
     callerDid: input.callerDid,
     scope: NSID.eventListing,
-    action: 'publish-event',
+    action: input.action ?? 'publish-event',
     collection: NSID.eventListing,
     rkey: tid(),
     record: {
@@ -217,7 +226,7 @@ export async function routeListing(input: RouteListingInput): Promise<{ uri: str
       tags: input.tags,
       createdAt: new Date().toISOString(),
     },
-    audit: { reason: `host published "${input.name}"` },
+    audit: { reason: input.auditReason ?? `host published "${input.name}"` },
   })
   return { uri: res.uri, cid: res.cid }
 }

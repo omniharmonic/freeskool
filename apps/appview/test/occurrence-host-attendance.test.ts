@@ -237,7 +237,12 @@ describe('A8: a stranger still cannot', () => {
     const body = (await get.json()) as Record<string, unknown>
     expect(body.viewerRelation).toBe('public')
     expect('visibility' in body).toBe(false)
-    expect('hostDid' in body).toBe(false)
+    // `hostDid` IS returned now (interop gap 5): for a listed class it is already public
+    // — an ordinary class carries it in its own AT-URI, and an occurrence's public
+    // `freeschool.draft.occurrence` back-pointer names the series, whose URI is the
+    // host's. What a stranger still cannot have is the roster, the attendance sheet, the
+    // raw visibility enum, or the street.
+    expect(body.hostDid).toBe(HOST)
     expect(body.locationRedacted).toBe(true)
   })
 

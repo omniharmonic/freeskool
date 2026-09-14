@@ -322,17 +322,28 @@ knowledge.get('/profiles/:did/avatar', async (c) => {
   c.header('Content-Type', 'image/webp')
   return c.body(new Uint8Array(Buffer.from(profile.avatar.data, 'base64')))
 })
+/**
+ * Who publicly claims this skill. INTEROP GAP 10: this used to scan the first 1000
+ * `skillClaim` records in the whole index and filter them in memory, so the list
+ * silently went wrong (and then empty) once claims outgrew that window. `skillClaim`
+ * declares `skill` queryable in the projection, so the index answers the question
+ * directly — the same `filters:` push-down `me.ts` uses for attestations.
+ *
+ * The `publicListing` opt-in join below is unchanged: an indexed claim is a public
+ * record, but appearing in a directory is a separate, explicit choice (R9).
+ */
 knowledge.get('/practitioners', async (c) => {
   c.header('X-Robots-Tag', 'noindex, nofollow')
   const skill = c.req.query('skill')
   if (!skill) return c.json({ profiles: [] })
   const { records } = await listCollection(await getIndexer(), 'skillClaim', {
+    filters: { skill },
     limit: 1000,
   })
-  const valid = records.filter((r) => publicClaim.safeParse(r.value).success)
-  const dids = [
-    ...new Set(valid.filter((r) => r.value.skill === skill).map((r) => r.did)),
-  ]
+  const valid = records.filter(
+    (r) => publicClaim.safeParse(r.value).success && r.value.skill === skill,
+  )
+  const dids = [...new Set(valid.map((r) => r.did))]
   const summaries = await publicSummaries(dids)
   const profiles = []
   for (const did of dids) {
@@ -342,8 +353,7 @@ knowledge.get('/practitioners', async (c) => {
         did,
         displayName: p.displayName || 'Community contributor',
         bio: p.bio || '',
-        level: valid.find((r) => r.did === did && r.value.skill === skill)
-          ?.value.level,
+        level: valid.find((r) => r.did === did)?.value.level,
       })
   }
   return c.json({ profiles })

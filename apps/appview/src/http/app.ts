@@ -35,6 +35,9 @@ import { handoffRoutes } from './routes/handoff.js'
 import { attestations } from './routes/attestations.js'
 import { members } from './routes/members.js'
 
+/** Paths that set their own `Cache-Control` because they are the same for everyone. */
+const PUBLIC_CACHEABLE: ReadonlySet<string> = new Set(['/api/calendar', '/api/calendar.ics'])
+
 export function createApp() {
   const app = new Hono<AppEnv>()
 
@@ -44,9 +47,11 @@ export function createApp() {
     c.header('X-Content-Type-Options', 'nosniff')
     c.header('Cross-Origin-Opener-Policy', 'same-origin')
     c.header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'")
-    // Only the public calendar is deliberately kept offline. Session-specific
-    // details, rosters, profiles and magic-link responses must not survive sign-out.
-    if (c.req.path !== '/api/calendar') c.header('Cache-Control', 'private, no-store')
+    // Only the public calendar is deliberately kept offline (and its `.ics` twin, which
+    // sets its own `public, max-age` — a subscribable feed that every client re-fetches
+    // uncached is a feed nobody can subscribe to). Session-specific details, rosters,
+    // profiles and magic-link responses must not survive sign-out.
+    if (!PUBLIC_CACHEABLE.has(c.req.path)) c.header('Cache-Control', 'private, no-store')
   })
 
   // The PWA is a separate origin in development; it must send its session cookie.

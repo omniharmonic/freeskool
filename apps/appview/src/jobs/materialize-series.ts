@@ -33,10 +33,11 @@ import { eq } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { seriesOccurrence } from '../db/schema.js'
 import { getIndexer } from '../index/indexer.js'
-import { listCollection, parseAtUri } from '../index/queries.js'
+import { listCollection, parseAtUri, sidecarsForEvent } from '../index/queries.js'
+import type { EventConfig } from '../lexicons/coop.js'
+import { routeListing, schoolRoutingTags } from '../lib/events.js'
 import { NSID } from '../lexicons/nsids.js'
 import { normalizeInstant, occurrenceRkey } from '../lib/crypto.js'
-import { tid } from '../lib/ids.js'
 import { schoolActor, schoolDid } from '../lib/school-actor.js'
 import { getRecord } from '../lib/pds.js'
 import { resolvePdsEndpoint } from '../lib/identity.js'
@@ -159,6 +160,35 @@ export async function materializeAllSeries(now = new Date()): Promise<Materializ
   return out
 }
 
+/**
+ * TAG ROUTING FOR OCCURRENCES (interop gap 2). An occurrence is a copy of its template
+ * class, so it must be routed to peers on exactly the same terms as the template: the
+ * tags and visibility the host set on the template's own `coop.lexicon.event.config`.
+ * Before this, occurrences were listed unconditionally and with NO tags — so a peer that
+ * filters incoming listings by tag (COhere) dropped every instance of every recurring
+ * class, while occurrences of a series that never routed were published anyway.
+ *
+ * The config lives in the HOST's repo and is read from the index. A host may in
+ * principle have written more than one config sidecar; we take the union of their tags
+ * and the first declared visibility, and fall back to "listed with no tags" — which
+ * `routeListing` turns into NO listing at all, never a silent default.
+ */
+async function templateRouting(
+  templateUri: string,
+): Promise<{ tags: string[]; visibility: 'listed' | 'unlisted' | 'private' }> {
+  try {
+    const configs = await sidecarsForEvent<EventConfig>(await getIndexer(), 'eventConfig', templateUri)
+    const tags = [...new Set(configs.flatMap((c) => c.value.tags ?? []).filter((t): t is string => typeof t === 'string'))]
+    const visibility = configs.map((c) => c.value.visibility).find((v) => v) ?? 'listed'
+    return { tags, visibility }
+  } catch (err) {
+    // An unreachable index must not stop the class from being materialized; it only
+    // means we cannot prove the series routes, and an unproven route writes no listing.
+    log.warn('could not read the series template config; occurrences will not be listed', { detail: describeError(err) })
+    return { tags: [], visibility: 'listed' }
+  }
+}
+
 export async function materializeSeries(
   seriesUri: string,
   seriesAuthorDid: string,
@@ -179,6 +209,11 @@ export async function materializeSeries(
       : 0
 
   const [presentation, extra] = await Promise.all([getPresentation(series.firstEvent.uri), getEventExtra(series.firstEvent.uri)])
+  const routing = await templateRouting(series.firstEvent.uri)
+  // Fetched at most once per series, and only if something might actually be listed:
+  // `schoolRoutingTags()` is a live read of the school's own record.
+  let schoolTags: string[] | undefined
+  const routingTags = async () => (schoolTags ??= await schoolRoutingTags())
   const db = getDb()
   const existing = new Set(
     (
@@ -251,27 +286,23 @@ export async function materializeSeries(
       audit: { reason: `back-pointer for occurrence ${i + 1}` },
     })
 
-    // Put it on the calendar, as the school.
-    await schoolActor()
-      .putRecordAsSchool({
-        schoolDid: schoolDid(),
+    // Route it to peers, as the school — through the SAME gate a directly created class
+    // goes through (`lib/events.ts#routeListing`), with the template's own tags. No
+    // routed tag, or an unlisted/private series, means no listing at all.
+    if (routing.tags.length > 0 && routing.visibility === 'listed') {
+      await routeListing({
+        event: { uri: event.uri, cid: event.cid },
+        name: String(template.value.name ?? 'class'),
+        tags: routing.tags,
+        visibility: routing.visibility,
         callerDid: seriesAuthorDid as `did:${string}`,
-        scope: NSID.eventListing,
+        schoolTags: await routingTags(),
         action: 'materialize-occurrence',
-        collection: NSID.eventListing,
-        rkey: tid(),
-        record: {
-          $type: NSID.eventListing,
-          event: { uri: event.uri, cid: event.cid },
-          school: schoolDid(),
-          status: 'listed',
-          createdAt: new Date().toISOString(),
-        },
-        audit: { reason: `list occurrence ${i + 1}` },
-      })
-      .catch(() => {
+        auditReason: `list occurrence ${i + 1}`,
+      }).catch(() => {
         /* the occurrence exists; listing can be retried */
       })
+    }
 
     await db
       .insert(seriesOccurrence)
