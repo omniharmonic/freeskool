@@ -15,6 +15,10 @@ Source: the screenshot audit (`apps/web/e2e/audit.spec.ts`, 128 captures at 430�
 | 7 | `/welcome` · newcomer | Reads well. "← Browse classes" at the top is the only escape and skips onboarding silently; acceptable, but the three cards are long on a phone. | P3 | Consider collapsing cards 2 and 3 behind "Next". |
 | 8 | `/skills/:id` · member | Clear taxonomy navigation; the people section sits below classes, so on a phone a member has to scroll past every class to find who knows this. | P3 | Move "People with this skill" above the class list, or add a count chip near the title that jumps to it. |
 
+## Status after the fix rounds (13 September 2026, late)
+
+Fixed on the branch: controller findings 1 (seed public overviews, `aff9b4d`), 2–4 (`88cead5`); journey findings 1–2 (`56a083b`, `f8b5900`), 3 (multi-skill class editor, `be944e2`), 4 (`aff9b4d`), 5 (cancel a class, `e48d644`), 6, 8, 9, 11, 16 (`7d5ee49`), 10 (`88cead5`), 18 (ruling: a brand-new member lands on `/welcome`, then the needs board; `mvp.spec.ts` updated). Still open, listed for the next pass: controller 5–8; journey 7 (welcome cards could collapse), 12 (explain what a vouch is inline), 13 (a way to reach a person from their profile), 14–15 (admin vocabulary and newsletter preview), 17 (persona runs leave a class behind — by design of the journey; the seed's demo tags make them easy to spot).
+
 ## Findings from the persona journeys (e2e agent)
 
 Numbered for the audit document. Only 1 and 2 are fixed; the rest are recorded, not touched.
