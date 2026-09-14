@@ -39,16 +39,23 @@ import { signup, verifyEmailToken } from '../src/lib/custody.js'
 import { saveProfile } from '../src/lib/profile.js'
 import { setChosenHandle } from '../src/lib/handle-change.js'
 import { setSkillClaims } from '../src/lib/skill-claims.js'
-import { createEventAsHost, type CreateEventInput } from '../src/lib/events.js'
+import { createEventAsHost, putInActorRepo, routeListing, type CreateEventInput } from '../src/lib/events.js'
+import { actorAgent } from '../src/lib/actor-agent.js'
+import { schoolDid } from '../src/lib/school-actor.js'
+import { NSID } from '../src/lexicons/nsids.js'
+import { tid } from '../src/lib/ids.js'
+import type { EventListing } from '../src/lexicons/coop.js'
+import type { Did } from '@freeschool/school-actor'
 import { recordAttendance } from '../src/lib/attendance.js'
 import { upsertRsvp } from '../src/lib/rsvp.js'
 import { createRequest } from '../src/lib/requests.js'
 import { toggleInterest, isInterested } from '../src/lib/request-rsvp.js'
 import { createAttestation, AttestationError } from '../src/lib/attestations.js'
 import { createResource } from '../src/lib/resources.js'
-import { materializeSeries } from '../src/jobs/materialize-series.js'
+import { materializeSeries, type SeriesRecord } from '../src/jobs/materialize-series.js'
 import { getIndexer } from '../src/index/indexer.js'
-import { listCollection } from '../src/index/queries.js'
+import { getRecordByUri, listCollection, sidecarsForEvent } from '../src/index/queries.js'
+import { seriesOccurrence } from '../src/db/schema.js'
 import { getThresholds } from '../src/lib/policy.js'
 import { appointSteward } from './appoint-steward.js'
 import { PERSONAS, SKILL, emailFor, identiconSvg, type Persona } from './demo-personas.js'
@@ -80,6 +87,8 @@ export interface SeedCounts {
   vouches: number
   notes: number
   stewards: number
+  /** Artifacts a previous half-finished run lost, put back on this one. */
+  repairs: number
 }
 
 /* ------------------------------------------------------------------------- *
@@ -425,6 +434,166 @@ const DEMO_NOTES: Array<{ author: string; title: string; description: string; sk
  * The run
  * ------------------------------------------------------------------------- */
 
+/**
+ * A class is not one record but four: the event, its config, the school's curation
+ * listing, and (for a recurring one) a `freeschool.draft.series` plus the occurrences the
+ * materializer writes from it. A run that dies part-way through `createEventAsHost` — the
+ * hosting bar left raised by a crashed `pnpm e2e` is the way this actually happens — can
+ * therefore leave a class that EXISTS but has no listing and no series, and a
+ * skip-if-the-name-is-taken check would then leave it that way forever.
+ *
+ * So the decision is per-ARTIFACT, not per-class. Pure, so the four cases are testable
+ * without a PDS, an indexer or a database.
+ */
+export interface ClassRepairState {
+  /** Does OUR school already have a curation listing for this event? */
+  hasListing: boolean
+  /** Would a fresh class with these tags/visibility get one at all? */
+  routes: boolean
+  /** Does the persona's definition ask for recurrence? */
+  wantsSeries: boolean
+  /** Is there already a `freeschool.draft.series` pointing at this event? */
+  hasSeries: boolean
+  /** How many occurrences `fs_series_occurrence` holds for that series. */
+  occurrences: number
+}
+
+export interface ClassRepairPlan {
+  listing: boolean
+  series: boolean
+  materialize: boolean
+}
+
+export function planClassRepair(state: ClassRepairState): ClassRepairPlan {
+  const series = state.wantsSeries && !state.hasSeries
+  return {
+    // Only ever CREATE a missing one. A listing our school does have is left alone —
+    // including one a steward has since removed, which is not ours to recreate.
+    listing: state.routes && !state.hasListing,
+    series,
+    // A series with zero occurrences never got materialized (or was just now recreated);
+    // one that already has them is left alone, so a second run writes nothing.
+    materialize: state.wantsSeries && (series || state.occurrences === 0),
+  }
+}
+
+/** The `freeschool.draft.series` record body, shared by the create and repair paths. */
+function seriesRecordFor(demo: DemoClass, firstEvent: { uri: string; cid: string }): SeriesRecord {
+  const series = demo.input.series!
+  return {
+    firstEvent,
+    rrule: series.rrule,
+    freq: series.freq,
+    interval: series.interval ?? 1,
+    ...(series.byDay?.length ? { byDay: series.byDay } : {}),
+    ...(series.until ? { until: series.until } : {}),
+    ...(series.count ? { count: series.count } : {}),
+    ...(series.exdates?.length ? { exdates: series.exdates } : {}),
+    timezone: series.timezone,
+    materializeAhead: series.materializeAhead ?? 90,
+  }
+}
+
+/** The host's own `freeschool.draft.series` pointing at this event, if they wrote one. */
+async function existingSeriesUri(hostDid: string, eventUri: string): Promise<string | undefined> {
+  try {
+    const indexer = await getIndexer()
+    const { records } = await listCollection<{ firstEvent?: { uri?: string } }>(indexer, 'series', {
+      did: hostDid,
+      limit: 200,
+    })
+    return records.find((r) => r.value.firstEvent?.uri === eventUri)?.uri
+  } catch {
+    return undefined
+  }
+}
+
+async function occurrenceCount(seriesUri: string): Promise<number> {
+  const rows = await getDb().select({ rkey: seriesOccurrence.occurrenceRkey }).from(seriesOccurrence).where(eq(seriesOccurrence.seriesUri, seriesUri))
+  return rows.length
+}
+
+/** Does our school already hold a curation listing for this event? */
+async function hasOurListing(eventUri: string): Promise<boolean> {
+  try {
+    const indexer = await getIndexer()
+    const rows = await sidecarsForEvent<EventListing>(indexer, 'eventListing', eventUri)
+    return rows.some((r) => r.value.school === schoolDid())
+  } catch {
+    // Cannot prove it is missing, so do not write a second one.
+    return true
+  }
+}
+
+/**
+ * Put back whatever a half-finished earlier run lost, using the SAME calls a fresh class
+ * makes (`routeListing`, the series `putRecord`, `materializeSeries`) rather than a
+ * repair-only path that could drift from them. Returns what it actually did, so a second
+ * run reports zeroes.
+ */
+async function repairClass(
+  viewer: Viewer,
+  demo: DemoClass,
+  eventUri: string,
+): Promise<{ occurrences: number; repairs: number }> {
+  const indexer = await getIndexer()
+  const record = await getRecordByUri(indexer, 'event', eventUri)
+  if (!record?.cid) return { occurrences: 0, repairs: 0 }
+  const firstEvent = { uri: eventUri, cid: record.cid }
+
+  const wantsSeries = Boolean(demo.input.series)
+  const seriesUri = wantsSeries ? await existingSeriesUri(viewer.did, eventUri) : undefined
+  const plan = planClassRepair({
+    hasListing: await hasOurListing(eventUri),
+    // `routeListing` makes the real decision (it also checks the school's own routing
+    // tags); this only asks whether a listing is possible in principle.
+    routes: (demo.input.visibility ?? 'listed') === 'listed' && (demo.input.tags?.length ?? 0) > 0,
+    wantsSeries,
+    hasSeries: Boolean(seriesUri),
+    occurrences: seriesUri ? await occurrenceCount(seriesUri) : 0,
+  })
+
+  let occurrences = 0
+  let repairs = 0
+  const notify: string[] = []
+
+  if (plan.listing) {
+    const listing = await routeListing({
+      event: firstEvent,
+      name: demo.input.name,
+      tags: demo.input.tags ?? [],
+      visibility: demo.input.visibility,
+      callerDid: viewer.did as Did,
+      auditReason: `restored the listing for "${demo.input.name}" after an interrupted seed run`,
+    })
+    if (listing) {
+      notify.push(listing.uri)
+      repairs++
+    }
+  }
+
+  let uri = seriesUri
+  if (plan.series) {
+    const written = await putInActorRepo(await actorAgent(viewer), viewer.did, NSID.series, tid(), {
+      $type: NSID.series,
+      ...seriesRecordFor(demo, firstEvent),
+      createdAt: new Date().toISOString(),
+    })
+    uri = written.uri
+    notify.push(written.uri)
+    repairs++
+  }
+
+  if (notify.length > 0) await indexer.notify(notify).catch(() => {})
+
+  if (plan.materialize && uri) {
+    const res = await materializeSeries(uri, viewer.did, seriesRecordFor(demo, firstEvent))
+    occurrences += res.written
+  }
+
+  return { occurrences, repairs }
+}
+
 /** Already on the calendar under this name and host? (Idempotence, per the brief.) */
 async function existingClassUri(hostDid: string, name: string): Promise<string | undefined> {
   try {
@@ -495,6 +664,7 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
     vouches: 0,
     notes: 0,
     stewards: 0,
+    repairs: 0,
   }
 
   // 1. MEMBERS — the primary door, profile, chosen handle.
@@ -561,6 +731,11 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
     const already = await existingClassUri(viewer.did, demo.input.name)
     if (already) {
       classUris.set(demo.input.name, already)
+      // The class is here, but an interrupted run may have died before its listing or its
+      // series ever got written — repair per artifact rather than skipping wholesale.
+      const repaired = await repairClass(viewer, demo, already)
+      counts.occurrences += repaired.occurrences
+      counts.repairs += repaired.repairs
       continue
     }
     const created = await createEventAsHost(viewer, demo.input)
@@ -571,15 +746,11 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
     // simply before the next daily run) a recurring class would show exactly one date.
     // Run it here so the calendar is honest the moment the seed finishes.
     if (created.series) {
-      const res = await materializeSeries(created.series.uri, viewer.did, {
-        firstEvent: { uri: created.event.uri, cid: created.event.cid },
-        rrule: demo.input.series!.rrule,
-        freq: demo.input.series!.freq,
-        interval: demo.input.series!.interval ?? 1,
-        ...(demo.input.series!.byDay ? { byDay: demo.input.series!.byDay } : {}),
-        ...(demo.input.series!.count ? { count: demo.input.series!.count } : {}),
-        timezone: demo.input.series!.timezone,
-      })
+      const res = await materializeSeries(
+        created.series.uri,
+        viewer.did,
+        seriesRecordFor(demo, { uri: created.event.uri, cid: created.event.cid }),
+      )
       counts.occurrences += res.written
     }
   }

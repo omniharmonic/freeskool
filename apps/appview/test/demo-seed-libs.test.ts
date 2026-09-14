@@ -32,6 +32,7 @@ import { loadDirectoryPrefs, loadProfile, saveProfile } from '../src/lib/profile
 import { recordAttendance } from '../src/lib/attendance.js'
 import { attendance, attendanceTally } from '../src/db/schema.js'
 import { DEMO_EMAIL_DOMAIN, PERSONAS, emailFor, identiconSvg } from '../scripts/demo-personas.js'
+import { planClassRepair, type ClassRepairState } from '../scripts/seed-demo.js'
 
 let available = false
 
@@ -209,5 +210,65 @@ describe('scripts/demo-personas.ts', () => {
     const meta = await sharp(png).metadata()
     expect(meta.format).toBe('png')
     expect(meta.width).toBe(240)
+  })
+})
+
+/**
+ * A class is four records, not one, so an interrupted run can leave one that EXISTS but
+ * has no listing and no series. `planClassRepair` is the per-artifact decision that
+ * replaced the old skip-if-the-name-is-taken check.
+ */
+describe('scripts/seed-demo.ts#planClassRepair', () => {
+  const state = (over: Partial<ClassRepairState> = {}): ClassRepairState => ({
+    hasListing: true,
+    routes: true,
+    wantsSeries: false,
+    hasSeries: false,
+    occurrences: 0,
+    ...over,
+  })
+
+  it('does nothing for a class that came through a complete run', () => {
+    expect(planClassRepair(state({ wantsSeries: true, hasSeries: true, occurrences: 6 }))).toEqual({
+      listing: false,
+      series: false,
+      materialize: false,
+    })
+  })
+
+  it('is a no-op for a complete one-off class', () => {
+    expect(planClassRepair(state())).toEqual({ listing: false, series: false, materialize: false })
+  })
+
+  // The exact shape the crashed run left behind: the event was written, then
+  // `routeListing` threw, so neither the listing nor the series ever happened.
+  it('restores the listing and the series when the run died right after the event', () => {
+    expect(planClassRepair(state({ hasListing: false, wantsSeries: true }))).toEqual({
+      listing: true,
+      series: true,
+      materialize: true,
+    })
+  })
+
+  it('materializes a series that exists but never got its occurrences', () => {
+    expect(planClassRepair(state({ wantsSeries: true, hasSeries: true, occurrences: 0 }))).toEqual({
+      listing: false,
+      series: false,
+      materialize: true,
+    })
+  })
+
+  it('leaves a listing alone once we have one — a steward removal is not ours to undo', () => {
+    expect(planClassRepair(state({ hasListing: true, routes: true })).listing).toBe(false)
+  })
+
+  it('writes no listing for a class that would not route anyway (unlisted, or untagged)', () => {
+    expect(planClassRepair(state({ hasListing: false, routes: false })).listing).toBe(false)
+  })
+
+  it('never invents recurrence for a class the persona defines as one-off', () => {
+    const plan = planClassRepair(state({ hasListing: false, wantsSeries: false, occurrences: 0 }))
+    expect(plan.series).toBe(false)
+    expect(plan.materialize).toBe(false)
   })
 })
