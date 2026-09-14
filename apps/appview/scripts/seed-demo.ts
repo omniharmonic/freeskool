@@ -39,7 +39,8 @@ import { signup, verifyEmailToken } from '../src/lib/custody.js'
 import { saveProfile } from '../src/lib/profile.js'
 import { setChosenHandle } from '../src/lib/handle-change.js'
 import { setSkillClaims } from '../src/lib/skill-claims.js'
-import { createEventAsHost, putInActorRepo, routeListing, type CreateEventInput } from '../src/lib/events.js'
+import { createEventAsHost, putInActorRepo, routeListing, updateEventAsHost, type CreateEventInput } from '../src/lib/events.js'
+import { getPresentation } from '../src/lib/event-presentation.js'
 import { actorAgent } from '../src/lib/actor-agent.js'
 import { schoolDid } from '../src/lib/school-actor.js'
 import { NSID } from '../src/lexicons/nsids.js'
@@ -156,7 +157,7 @@ async function avatarFor(slug: string): Promise<{ data: string; alt: string }> {
  * Classes
  * ------------------------------------------------------------------------- */
 
-interface DemoClass {
+export interface DemoClass {
   /** Which persona hosts it. */
   host: string
   input: CreateEventInput
@@ -178,13 +179,19 @@ const at = (offsetMs: number) => new Date(Date.now() + offsetMs).toISOString()
  * `lib/events.ts#routeListing`. The unlisted and private ones deliberately carry it too,
  * so the test is that VISIBILITY suppresses the listing, not that a missing tag did.
  */
-function demoClasses(): DemoClass[] {
+export function demoClasses(): DemoClass[] {
   return [
     {
       host: 'amir',
       input: {
         name: 'Saturday bike repair table',
-        description: 'Bring the bike and the problem. We will find the tool between us.',
+        publicOverview: {
+          description:
+            'Bring the bike and the problem — a brake that rubs, a chain that skips, a wheel that will not true — and we will work through it together on a proper stand. You do the wrenching; I hover and explain what the tool is actually doing. Most weeks somebody arrives certain their bike is finished and rides it home.',
+          audience: 'Complete beginners welcome. No tools of your own needed.',
+          accessibility: 'Flat ground-floor garage, wide doorway, seating available.',
+        },
+        attendeeNotes: 'Come down the alley to the open garage door — the house number is hard to read from the street. If the gate is latched, text me and I will come out.',
         startsAt: at(3 * DAY),
         endsAt: at(3 * DAY + 3 * HOUR),
         neighborhood: 'Whittier',
@@ -202,7 +209,12 @@ function demoClasses(): DemoClass[] {
       host: 'maya',
       input: {
         name: 'Kimchi from one cabbage',
-        description: 'Salt, time and a jar you already own. Leave with something bubbling.',
+        publicOverview: {
+          description:
+            'We salt, rinse, mix a paste and pack a jar, start to finish, in about two hours. You leave with a full jar of your own and a clear sense of why each step is there — which is what lets you stop following recipes. I will bring more cabbage than we need, so nobody has to share.',
+          audience: 'Anyone who has never fermented anything. Children welcome with an adult.',
+        },
+        attendeeNotes: 'Kitchen is up one flight at the back of the building; the front buzzer is broken, so use the side door.',
         startsAt: at(5 * DAY),
         endsAt: at(5 * DAY + 2 * HOUR),
         neighborhood: 'Goss-Grove',
@@ -218,7 +230,12 @@ function demoClasses(): DemoClass[] {
       host: 'maya',
       input: {
         name: 'Sourdough, slowly',
-        description: 'A starter to take home and four weeks of company while you learn its moods.',
+        publicOverview: {
+          description:
+            'Four weeks, one evening a week, and a starter you take home after the first. We bake together, compare what everyone\u2019s week produced, and work out what the dough was telling you. The point is to stop measuring and start reading — by week four most people have given up the timer.',
+          audience: 'For people who have tried sourdough alone and found it went strange on them.',
+        },
+        attendeeNotes: 'We are still looking for a kitchen with an oven big enough — I will email everyone the address as soon as it is settled.',
         startsAt: at(7 * DAY),
         endsAt: at(7 * DAY + 2 * HOUR),
         timezone: 'America/Denver',
@@ -233,13 +250,18 @@ function demoClasses(): DemoClass[] {
       host: 'jonah',
       input: {
         name: 'Three chords and a singalong',
-        description: 'If you can hold a shape for four beats you can play with us.',
+        publicOverview: {
+          description:
+            'G, C and D will carry most of a room, and we will spend the first half getting them clean and the second half actually playing something. Bring any guitar, however cheap or badly tuned — I have spare picks and a capo or two. If you can hold a shape for four beats you can play with us.',
+          audience: 'Absolute beginners, and anyone who learned once and stopped.',
+        },
         startsAt: at(4 * DAY),
         endsAt: at(4 * DAY + 2 * HOUR),
         neighborhood: 'Martin Acres',
         timezone: 'America/Denver',
         tags: ['skillshare', 'demo'],
         skills: [{ skill: skillUri(SKILL.guitar), level: 1 }],
+        materials: ['A guitar, if you have one'],
       },
       going: ['lina', 'eli'],
     },
@@ -247,7 +269,12 @@ function demoClasses(): DemoClass[] {
       host: 'jonah',
       input: {
         name: 'Monthly song circle',
-        description: 'No lead, no setlist. Bring one song you half know.',
+        publicOverview: {
+          description:
+            'No lead, no setlist, no audience — we sit in a ring and take turns starting something. Bring one song you half know and let the room carry the rest of it. Listeners are as welcome as players, and nobody is ever made to take a turn.',
+          audience: 'Any instrument, any voice, any level. Come alone; you will not stay a stranger.',
+        },
+        attendeeNotes: 'Room details go out the week before — we rotate between a few front rooms depending on who has space.',
         startsAt: at(10 * DAY),
         endsAt: at(10 * DAY + 2 * HOUR),
         timezone: 'America/Denver',
@@ -258,14 +285,23 @@ function demoClasses(): DemoClass[] {
       },
       going: ['eli', 'ines'],
     },
+    // The one that meets online — so the "meeting link, revealed after you RSVP" gate has
+    // something real behind it.
     {
       host: 'priya',
       input: {
         name: 'Spanish conversation hour',
-        description: 'Half an hour of listening, half an hour of trying. No textbooks.',
+        publicOverview: {
+          description:
+            'An hour of actual talking, online: half spent listening to each other and half spent trying, with me steering gently and translating only when we are properly stuck. No textbook, no grammar drills, no homework. Come with something you did this week that you would like to be able to describe.',
+          audience: 'Anyone past the first few hundred words who needs practice more than instruction.',
+          accessibility: 'Online, captions on, and the recording is never kept.',
+        },
+        attendeeNotes: 'The room opens ten minutes early if you want to test your microphone. If you drop out, just rejoin — it happens to all of us.',
+        meetingLink: 'https://meet.jit.si/freeskool-demo-spanish-hour',
+        mode: 'community.lexicon.calendar.event#virtual',
         startsAt: at(2 * DAY),
         endsAt: at(2 * DAY + HOUR),
-        neighborhood: 'North Boulder',
         timezone: 'America/Denver',
         capacity: 6,
         tags: ['skillshare', 'demo'],
@@ -277,7 +313,11 @@ function demoClasses(): DemoClass[] {
       host: 'priya',
       input: {
         name: 'Facilitation practice (members only)',
-        description: 'A closed session for people who already run meetings here.',
+        publicOverview: {
+          description:
+            'A closed session for people who already run meetings here. We each bring a moment that went badly, replay it with the room, and try a different move. Expect to be in the hot seat once and in the circle the rest of the time.',
+          audience: 'Members who have facilitated at least one gathering for this school.',
+        },
         startsAt: at(6 * DAY),
         endsAt: at(6 * DAY + 2 * HOUR),
         timezone: 'America/Denver',
@@ -293,13 +333,19 @@ function demoClasses(): DemoClass[] {
       host: 'eli',
       input: {
         name: 'Mending evening',
-        description: 'Darning, patches and the small repairs that keep a coat going.',
+        publicOverview: {
+          description:
+            'Darning, patches, a dropped hem and the small repairs that keep a coat going another winter. Bring the thing you have been meaning to fix for a year. We supply needles, thread, scrap fabric and the company that makes it bearable.',
+          audience: 'No sewing experience assumed. Machines available but not required.',
+        },
+        attendeeNotes: 'Side entrance off the parking lot — the main door locks at six.',
         startsAt: at(-21 * DAY),
         endsAt: at(-21 * DAY + 2 * HOUR),
         neighborhood: 'Whittier',
         timezone: 'America/Denver',
         tags: ['skillshare', 'demo'],
         skills: [{ skill: skillUri(SKILL.facilitation), level: 1 }],
+        materials: ['Something that needs mending'],
       },
       going: ['rosa', 'noor', 'sam'],
       attended: ['rosa', 'noor', 'sam'],
@@ -308,7 +354,11 @@ function demoClasses(): DemoClass[] {
       host: 'ines',
       input: {
         name: 'How we decide things here',
-        description: 'A walk through the school’s own policy, and how to change it.',
+        publicOverview: {
+          description:
+            'A walk through this school\u2019s own policy record — who may host, how a role is derived rather than granted, what a steward can and cannot do — and then the part that matters: how you change any of it. Bring a rule you think is wrong and we will look up where it actually lives.',
+          audience: 'Anyone who has joined and wants to know what they have joined.',
+        },
         startsAt: at(-10 * DAY),
         endsAt: at(-10 * DAY + 90 * 60_000),
         timezone: 'America/Denver',
@@ -442,10 +492,18 @@ const DEMO_NOTES: Array<{ author: string; title: string; description: string; sk
  * therefore leave a class that EXISTS but has no listing and no series, and a
  * skip-if-the-name-is-taken check would then leave it that way forever.
  *
- * So the decision is per-ARTIFACT, not per-class. Pure, so the four cases are testable
- * without a PDS, an indexer or a database.
+ * Task 19c added a fifth: the class record's own `description` is now the PUBLIC
+ * overview, so a class seeded before that change has none and its page reads "The host
+ * hasn't added a public overview yet."
+ *
+ * So the decision is per-ARTIFACT, not per-class. Pure, so every case is testable without
+ * a PDS, an indexer or a database.
  */
 export interface ClassRepairState {
+  /** Does the app-side presentation already carry a `publicOverview.description`? */
+  hasOverview: boolean
+  /** Does the persona's definition supply one to write? */
+  wantsOverview: boolean
   /** Does OUR school already have a curation listing for this event? */
   hasListing: boolean
   /** Would a fresh class with these tags/visibility get one at all? */
@@ -459,6 +517,8 @@ export interface ClassRepairState {
 }
 
 export interface ClassRepairPlan {
+  /** Write the public overview through `updateEventAsHost`, the host's own edit path. */
+  overview: boolean
   listing: boolean
   series: boolean
   materialize: boolean
@@ -467,6 +527,7 @@ export interface ClassRepairPlan {
 export function planClassRepair(state: ClassRepairState): ClassRepairPlan {
   const series = state.wantsSeries && !state.hasSeries
   return {
+    overview: state.wantsOverview && !state.hasOverview,
     // Only ever CREATE a missing one. A listing our school does have is left alone —
     // including one a steward has since removed, which is not ours to recreate.
     listing: state.routes && !state.hasListing,
@@ -543,7 +604,10 @@ async function repairClass(
 
   const wantsSeries = Boolean(demo.input.series)
   const seriesUri = wantsSeries ? await existingSeriesUri(viewer.did, eventUri) : undefined
+  const presentation = await getPresentation(eventUri)
   const plan = planClassRepair({
+    hasOverview: Boolean(presentation.publicOverview?.description),
+    wantsOverview: Boolean(demo.input.publicOverview?.description),
     hasListing: await hasOurListing(eventUri),
     // `routeListing` makes the real decision (it also checks the school's own routing
     // tags); this only asks whether a listing is possible in principle.
@@ -555,9 +619,31 @@ async function repairClass(
 
   let occurrences = 0
   let repairs = 0
+  let listed = false
   const notify: string[] = []
 
-  if (plan.listing) {
+  /**
+   * The host's own edit path, so the overview lands on the RECORD (19c) exactly as it
+   * would if they had opened the class and typed it. `updateEventAsHost` re-runs tag
+   * routing as part of that, so it may write the missing curation listing too — which is
+   * why its result is checked before `routeListing` is considered below, rather than both
+   * firing and leaving two listings behind.
+   */
+  if (plan.overview) {
+    const updated = await updateEventAsHost(viewer, eventUri, {
+      publicOverview: demo.input.publicOverview,
+      ...(demo.input.attendeeNotes ? { attendeeNotes: demo.input.attendeeNotes } : {}),
+      ...(demo.input.meetingLink ? { meetingLink: demo.input.meetingLink } : {}),
+    })
+    notify.push(updated.event.uri)
+    if (updated.listing) {
+      notify.push(updated.listing.uri)
+      listed = true
+    }
+    repairs++
+  }
+
+  if (plan.listing && !listed) {
     const listing = await routeListing({
       event: firstEvent,
       name: demo.input.name,

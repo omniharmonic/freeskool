@@ -32,7 +32,7 @@ import { loadDirectoryPrefs, loadProfile, saveProfile } from '../src/lib/profile
 import { recordAttendance } from '../src/lib/attendance.js'
 import { attendance, attendanceTally } from '../src/db/schema.js'
 import { DEMO_EMAIL_DOMAIN, PERSONAS, emailFor, identiconSvg } from '../scripts/demo-personas.js'
-import { planClassRepair, type ClassRepairState } from '../scripts/seed-demo.js'
+import { demoClasses, planClassRepair, type ClassRepairState } from '../scripts/seed-demo.js'
 
 let available = false
 
@@ -220,6 +220,8 @@ describe('scripts/demo-personas.ts', () => {
  */
 describe('scripts/seed-demo.ts#planClassRepair', () => {
   const state = (over: Partial<ClassRepairState> = {}): ClassRepairState => ({
+    hasOverview: true,
+    wantsOverview: true,
     hasListing: true,
     routes: true,
     wantsSeries: false,
@@ -230,6 +232,7 @@ describe('scripts/seed-demo.ts#planClassRepair', () => {
 
   it('does nothing for a class that came through a complete run', () => {
     expect(planClassRepair(state({ wantsSeries: true, hasSeries: true, occurrences: 6 }))).toEqual({
+      overview: false,
       listing: false,
       series: false,
       materialize: false,
@@ -237,13 +240,28 @@ describe('scripts/seed-demo.ts#planClassRepair', () => {
   })
 
   it('is a no-op for a complete one-off class', () => {
-    expect(planClassRepair(state())).toEqual({ listing: false, series: false, materialize: false })
+    expect(planClassRepair(state())).toEqual({ overview: false, listing: false, series: false, materialize: false })
+  })
+
+  // Task 19c moved the public overview onto the record's own `description`; classes
+  // seeded before it have none, and their page reads "no public overview yet".
+  it('writes the public overview when the class predates 19c', () => {
+    expect(planClassRepair(state({ hasOverview: false })).overview).toBe(true)
+  })
+
+  it('leaves an overview that is already there alone, so a second run writes nothing', () => {
+    expect(planClassRepair(state({ hasOverview: true })).overview).toBe(false)
+  })
+
+  it('writes no overview when the persona definition supplies none', () => {
+    expect(planClassRepair(state({ hasOverview: false, wantsOverview: false })).overview).toBe(false)
   })
 
   // The exact shape the crashed run left behind: the event was written, then
   // `routeListing` threw, so neither the listing nor the series ever happened.
   it('restores the listing and the series when the run died right after the event', () => {
-    expect(planClassRepair(state({ hasListing: false, wantsSeries: true }))).toEqual({
+    expect(planClassRepair(state({ hasOverview: false, hasListing: false, wantsSeries: true }))).toEqual({
+      overview: true,
       listing: true,
       series: true,
       materialize: true,
@@ -252,6 +270,7 @@ describe('scripts/seed-demo.ts#planClassRepair', () => {
 
   it('materializes a series that exists but never got its occurrences', () => {
     expect(planClassRepair(state({ wantsSeries: true, hasSeries: true, occurrences: 0 }))).toEqual({
+      overview: false,
       listing: false,
       series: false,
       materialize: true,
@@ -270,5 +289,39 @@ describe('scripts/seed-demo.ts#planClassRepair', () => {
     const plan = planClassRepair(state({ hasListing: false, wantsSeries: false, occurrences: 0 }))
     expect(plan.series).toBe(false)
     expect(plan.materialize).toBe(false)
+  })
+})
+
+/**
+ * Post-19c the class RECORD's `description` is the public overview, and `attendeeNotes` /
+ * `meetingLink` are the app-side half revealed after an RSVP. A seeded class with no
+ * overview renders "The host hasn't added a public overview yet." on its own page.
+ */
+describe('scripts/seed-demo.ts demo classes (post-19c fields)', () => {
+  it('gives every class a public overview of real length', () => {
+    for (const demo of demoClasses()) {
+      const description = demo.input.publicOverview?.description ?? ''
+      expect(description.length, `${demo.input.name} has no public overview`).toBeGreaterThan(120)
+    }
+  })
+
+  it('never uses the deprecated pre-19c `description` / `uris` inputs', () => {
+    for (const demo of demoClasses()) {
+      expect(demo.input.description, `${demo.input.name} still uses the deprecated description`).toBeUndefined()
+      expect(demo.input.uris, `${demo.input.name} still uses the deprecated uris`).toBeUndefined()
+    }
+  })
+
+  it('carries attendee notes on the classes where a meeting point actually matters', () => {
+    const withNotes = demoClasses().filter((d) => d.input.attendeeNotes)
+    expect(withNotes.length).toBeGreaterThanOrEqual(4)
+  })
+
+  it('has exactly one online class, and it is the one with the meeting link', () => {
+    const online = demoClasses().filter((d) => d.input.mode?.endsWith('#virtual'))
+    expect(online).toHaveLength(1)
+    expect(online[0]!.input.meetingLink).toMatch(/^https:\/\//)
+    // The link is the app-side, after-RSVP half — never a `uris` entry on the record.
+    expect(online[0]!.input.uris).toBeUndefined()
   })
 })
