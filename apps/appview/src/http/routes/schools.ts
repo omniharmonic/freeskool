@@ -2,6 +2,7 @@
  * `/api/schools` — the school lifecycle (MS §8, spec rulings 1, 7 and 10).
  *
  *   GET  /api/schools            public: every school this AppView hosts
+ *   GET  /api/schools/nearby     public: the peer schools THIS school federates with
  *   POST /api/schools            operator only, `X-Operator-Token`
  *   POST /api/schools/:did/leave a member leaving one of their schools
  *
@@ -26,6 +27,8 @@ import { z } from 'zod'
 import type { AppEnv } from '../session.js'
 import { requireViewer } from '../session.js'
 import { createSchool, listPublicSchools, SchoolCreationError } from '../../lib/schools.js'
+import { peerSchools } from '../../lib/peers.js'
+import { currentSchool } from '../school-context.js'
 import { isMemberOf, leaveSchool } from '../../lib/membership.js'
 import { retractRoleClaim } from '../../lib/membership-claims.js'
 import type { Did } from '@freeschool/school-actor'
@@ -57,6 +60,23 @@ function isOperator(presented: string | undefined): boolean {
 
 schools.get('/schools', async (c) => {
   return c.json({ schools: await listPublicSchools() })
+})
+
+/**
+ * NEARBY SCHOOLS (MS §7, ruling 9). The current school's peers, read from the
+ * `freeschool.draft.school` records we have INDEXED from that school's peer PDS hosts —
+ * public records written by those schools themselves, never a row of ours about them.
+ *
+ * Ordered before `/schools/:did/leave` on purpose: `nearby` is not a DID, and a literal
+ * segment registered after a parameterised one at the same depth would still match here,
+ * but keeping the literal first makes that independent of Hono's matcher.
+ *
+ * NO COUNTS (ruling 7), and no membership of ours is implied: this is a directory of
+ * other cities, which is a public fact, not an aggregate over their rosters.
+ */
+schools.get('/schools/nearby', async (c) => {
+  const did = currentSchool(c).did
+  return c.json({ schools: await peerSchools(did) })
 })
 
 const createBody = z.object({

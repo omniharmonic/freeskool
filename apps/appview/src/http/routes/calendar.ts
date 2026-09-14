@@ -20,7 +20,7 @@ import { config } from '../../config.js'
 import { getIndexer } from '../../index/indexer.js'
 import { eventsInWindow, sidecarsForEvent } from '../../index/queries.js'
 import { isOwnMemberSet } from '../../lib/roles.js'
-import { schoolsOfEvents } from '../../lib/event-school.js'
+import { stampedSchoolsOfEvents } from '../../lib/event-school.js'
 import { legacySchoolDid } from '../../lib/schools.js'
 import { currentSchool } from '../school-context.js'
 import { resolveHostDids } from '../../lib/events.js'
@@ -29,6 +29,7 @@ import type { EventConfig, EventListing } from '../../lexicons/coop.js'
 import {
   calendarInclusion,
   icsLocation,
+  listingsOfSchool,
   projectEvent,
   type CalendarEvent,
   type ListingInputs,
@@ -71,7 +72,7 @@ async function visibleEvents(
   const indexer = await getIndexer()
   const rows = await eventsInWindow(indexer, from, to, limit)
   // One query for the page: which school each class was created in (absent row = legacy).
-  const eventSchools = await schoolsOfEvents(rows.map((e) => e.uri))
+  const eventSchools = await stampedSchoolsOfEvents(rows.map((e) => e.uri))
 
   // A8: the HOST of each event. A materialized occurrence's record author is the SCHOOL;
   // its host is the series author. One query for the whole page, not one per event.
@@ -86,7 +87,9 @@ async function visibleEvents(
       sidecarsForEvent<EventListing>(indexer, 'eventListing', e.uri),
       sidecarsForEvent<EventConfig>(indexer, 'eventConfig', e.uri),
     ])
-    const listingValues = listings.map((l) => l.value)
+    // Only OUR school's curation decides what is on OUR calendar — a peer school's
+    // listing is about their calendar (`listingsOfSchool`).
+    const listingValues = listingsOfSchool(listings, currentSchoolDid)
     const configValues = configs.map((cfg) => cfg.value)
     if (school && !listingValues.some((l) => l.school === school) && !configValues.some((cfg) => cfg.school === school)) {
       continue
@@ -110,7 +113,10 @@ async function visibleEvents(
      * survives its host LEAVING this school (spec ruling 10 — "keeps their classes on that
      * calendar", because they are public records the member wrote about a class that
      * really happened here). Authorship is still what decides for an UNSTAMPED class,
-     * where the school is a fallback guess and there is no row to trust.
+     * where the school is a fallback guess and there is no row to trust — which since
+     * federation includes every class in a PEER school's repo: we index those because we
+     * follow that school's PDS, they carry no stamp of ours, and `stampedSchoolsOfEvents`
+     * (no legacy fill-in) is what keeps them from being adopted onto our calendar.
      */
     const stamped = eventSchools.get(e.uri)
     const ourEvent = (stamped ?? legacySchoolDid()) === currentSchoolDid

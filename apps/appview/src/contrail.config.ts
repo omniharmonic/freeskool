@@ -35,6 +35,9 @@ export function buildContrailConfig(input: BuildConfigInput): ContrailConfig {
     namespace: input.namespace,
 
     // Peer registry. contrail calls `com.atproto.sync.listReposByCollection` on each.
+    // The set is the UNION across every school this process hosts — one definition, in
+    // `index/peers.ts#indexerPeerHosts`, so a steward's peer edit and the rebuild check
+    // in `lib/peers.ts#reloadIndexerForPeers` can never disagree about what it is.
     relays: input.peers,
 
     // Bluesky's public Jetstream is useless for a private/peered deployment; live
@@ -158,6 +161,12 @@ export function buildContrailConfig(input: BuildConfigInput): ContrailConfig {
         collection: NSID.policy,
         queryable: { version: {}, effectiveAt: { type: 'range' } },
       },
+      /**
+       * A PEER SCHOOL'S OWN DECLARATION. Indexing this from every peer host is what
+       * `lib/peers.ts#peerSchools` (and `GET /api/schools/nearby`) reads: who else is out
+       * there, their region, and the `tags` they route on — their record, never our row
+       * about them, and never a count of anything they hold (ruling 7).
+       */
       school: {
         collection: NSID.school,
         searchable: ['name', 'description'],

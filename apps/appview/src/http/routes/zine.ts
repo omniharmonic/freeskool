@@ -14,12 +14,12 @@ import { eventsInWindow, sidecarsForEvent } from '../../index/queries.js'
 import { config } from '../../config.js'
 import { getRecord } from '../../lib/pds.js'
 import { isOwnMemberSet } from '../../lib/roles.js'
-import { schoolsOfEvents } from '../../lib/event-school.js'
+import { stampedSchoolsOfEvents } from '../../lib/event-school.js'
 import { legacySchoolDid } from '../../lib/schools.js'
 import { currentSchool } from '../school-context.js'
 import { NSID } from '../../lexicons/nsids.js'
 import type { EventConfig, EventListing } from '../../lexicons/coop.js'
-import { calendarInclusion, projectEvent, type PublicCalendarEntry } from '../visibility.js'
+import { calendarInclusion, listingsOfSchool, projectEvent, type PublicCalendarEntry } from '../visibility.js'
 import { toCalendarEvent } from './calendar.js'
 
 export const zine = new Hono<AppEnv>()
@@ -81,7 +81,7 @@ zine.get('/zine/:yyyyMm', async (c) => {
   const schoolDid = currentSchool(c).did
   const indexer = await getIndexer()
   const events = await eventsInWindow(indexer, range.fromIso, range.toIso, 500)
-  const eventSchools = await schoolsOfEvents(events.map((e) => e.uri))
+  const eventSchools = await stampedSchoolsOfEvents(events.map((e) => e.uri))
 
   // One batched membership lookup for the whole month, not one per event (N+1).
   const hosts = await resolveHostDids(events)
@@ -94,7 +94,9 @@ zine.get('/zine/:yyyyMm', async (c) => {
       sidecarsForEvent<EventListing>(indexer, 'eventListing', e.uri),
       sidecarsForEvent<EventConfig>(indexer, 'eventConfig', e.uri),
     ])
-    const inputs = { listings: listings.map((l) => l.value), configs: configs.map((x) => x.value) }
+    // Only OUR school's curation, exactly as on the calendar: a peer school's listing is
+    // about their zine, not ours (`listingsOfSchool`).
+    const inputs = { listings: listingsOfSchool(listings, schoolDid), configs: configs.map((x) => x.value) }
     // Same authorship-based inclusion as the calendar (see http/visibility.ts).
     // Same two-fact rule as the calendar: created in THIS school, and ours by authorship.
     // Same rule as the calendar: a stamped class was created here and stays here even

@@ -42,6 +42,28 @@ export async function schoolOfEvent(eventUri: string, db: Db = getDb()): Promise
   return rows[0]?.schoolDid ?? legacySchoolDid()
 }
 
+/**
+ * The REAL rows only — no legacy fill-in (`schoolsOfEvents` below adds that).
+ *
+ * FEDERATION (MS §7). "An absent row means the legacy school" is right for a class
+ * published from THIS deployment before the table existed, and wrong for a class we only
+ * see because we follow a peer school's PDS: that one has no row either, and adopting it
+ * would put a peer city's whole calendar on ours. The calendar and the zine therefore ask
+ * for the stamps and fall back to AUTHORSHIP when there is none — an unstamped class is
+ * ours only if one of our own members wrote it.
+ */
+export async function stampedSchoolsOfEvents(eventUris: string[], db: Db = getDb()): Promise<Map<string, string>> {
+  const out = new Map<string, string>()
+  const unique = [...new Set(eventUris)]
+  if (unique.length === 0) return out
+  const rows = await db
+    .select({ eventUri: eventSchool.eventUri, schoolDid: eventSchool.schoolDid })
+    .from(eventSchool)
+    .where(inArray(eventSchool.eventUri, unique))
+  for (const r of rows) out.set(r.eventUri, r.schoolDid)
+  return out
+}
+
 /** Batched form, for a calendar page: one query, not one per event. */
 export async function schoolsOfEvents(eventUris: string[], db: Db = getDb()): Promise<Map<string, string>> {
   const out = new Map<string, string>()

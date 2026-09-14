@@ -84,6 +84,32 @@ export async function activePeerHosts(): Promise<string[]> {
 }
 
 /**
+ * THE HOST SET THE INDEX FOLLOWS — the one definition, used both when the indexer is
+ * built (`index/indexer.ts`) and when a peer edit asks whether it has to be rebuilt
+ * (`lib/peers.ts#reloadIndexerForPeers`). If the two computed it differently, every peer
+ * write would look like a change and throw away a warm index — or none would, and a new
+ * peer would never be discovered.
+ *
+ * The union across EVERY school (contrail's index is global, MS §4), falling back to the
+ * `PEER_PDS_HOSTS` env seed only when there are no rows at all — a deployment whose first
+ * boot has not seeded them yet. Deliberately NOT the union WITH the env: a steward who
+ * disabled a seeded host must not have it resurrected by the variable it came from.
+ */
+export async function indexerPeerHosts(): Promise<string[]> {
+  const rows = await activePeerHosts().catch(() => [] as string[])
+  const hosts = rows.length > 0 ? rows : config().PEER_PDS_HOSTS
+  const out = new Set<string>()
+  for (const host of hosts) {
+    try {
+      out.add(normalizeHost(host))
+    } catch {
+      /* a malformed row must not take the peer set down */
+    }
+  }
+  return [...out].sort()
+}
+
+/**
  * Walk the school record's `peers` DIDs, resolve each to a PDS endpoint and register
  * it. Called after every refresh of the school record (outbox consumer + boot).
  */

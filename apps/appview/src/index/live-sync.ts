@@ -25,7 +25,7 @@ import { AppMetaPeerState } from '../sync/peer-state.js'
 import { normalizePeerHost } from '../sync/cursor-map.js'
 import { PeerRepair } from '../sync/repair.js'
 import { PdsChangeSource, type IndexTarget, type PeerHostRef } from '../sync/pds-change-source.js'
-import { listPeers } from './peers.js'
+import { indexerPeerHosts } from './peers.js'
 import type { Indexer } from './indexer.js'
 
 export interface LiveSync {
@@ -93,8 +93,14 @@ export function contrailTarget(indexer: Indexer): IndexTarget {
  */
 export async function startPeerLiveSync(indexer: Indexer): Promise<LiveSync | undefined> {
   const c = config()
-  const registry = await listPeers().catch(() => [])
-  const hosts: PeerHostRef[] = (registry.length > 0 ? registry.map((r) => r.host) : c.PEER_PDS_HOSTS).map((host) => {
+  /**
+   * EVERY school's peers, not the legacy school's (MS §4): one process indexes for every
+   * school it hosts, so the sockets follow the same union contrail is handed as `relays`.
+   * `indexerPeerHosts` falls back to the env seed on a deployment whose rows are not
+   * written yet, so an unseeded first boot still follows something.
+   */
+  const registry = await indexerPeerHosts().catch(() => [] as string[])
+  const hosts: PeerHostRef[] = (registry.length > 0 ? registry : c.PEER_PDS_HOSTS).map((host) => {
     const privateHost = isPrivateHost(host, c.ALLOWED_PRIVATE_PDS_HOSTS)
     return {
       host,

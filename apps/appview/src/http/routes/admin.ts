@@ -9,7 +9,8 @@
  *   POST /moderation            open an item. `reason` is REQUIRED.
  *   POST /moderation/:id/approve  a second steward signs on
  *   POST /moderation/:id/execute  run it as the school, once the threshold is met
- *   GET  /peers   PUT /peers    the peer registry (= contrail's `relays`)
+ *   GET  /peers   PUT /peers    the peer registry (= contrail's `relays`), published as
+ *                               `freeschool.draft.school#peers`/`#tags` by the school actor
  *   GET  /newsletter   POST /newsletter          list / compose a monthly digest draft
  *   POST /newsletter/:id/send   send a draft to every subscribed member (see
  *                               ../../jobs/newsletter.ts)
@@ -35,7 +36,8 @@ import { getRecord } from '../../lib/pds.js'
 import { getRecordByUri, parseAtUri } from '../../index/queries.js'
 import { resolvePdsEndpoint } from '../../lib/identity.js'
 import { addPeer, disablePeer, listPeers, probePeer } from '../../index/peers.js'
-import { getIndexer, resetIndexer } from '../../index/indexer.js'
+import { peerHostsFor, publishedPeerState, publishPeerState, reloadIndexerForPeers } from '../../lib/peers.js'
+import { getIndexer } from '../../index/indexer.js'
 import { composeNewsletterIssue, sendNewsletterIssue } from '../../jobs/newsletter.js'
 import { authorityClient } from '../../lib/authority.js'
 import { skillRecords } from './skills.js'
@@ -393,28 +395,125 @@ admin.post('/moderation/:id/execute', async (c) => {
 
 /* peers */
 
+/**
+ * THE PEER LIST IS TWO THINGS, and this route keeps them in step (ruling 9, gap 4b):
+ *
+ *   `fs_peer`  — the PDS hosts THIS AppView follows for this school. Local, private,
+ *                per school, and what contrail is handed as `relays`.
+ *   the record — `freeschool.draft.school#peers` / `#tags` in the school's own repo,
+ *                written by the school actor. PUBLIC, and the only thing a peer can
+ *                read: it is the source of truth another city discovers us by.
+ *
+ * `GET` returns both, so the admin screen can show what the world sees rather than only
+ * what our database holds.
+ */
 admin.get('/peers', async (c) => {
-  const peers = await listPeers(currentSchool(c).did)
+  const did = currentSchool(c).did
+  const peers = await listPeers(did)
   const probed = c.req.query('probe') === '1' ? await Promise.all(peers.map((p) => probePeer(p.host))) : undefined
-  return c.json({ peers, probed })
+  return c.json({ peers, probed, published: await publishedPeerState(did) })
 })
 
+/**
+ * `add`/`remove` take a PDS host (`https://pds.denver.example`) or a peer school's DID —
+ * a DID is resolved to its endpoint, because a peer is a school, not a machine, and that
+ * is also the form the record publishes.
+ */
+const peerRef = z
+  .string()
+  .trim()
+  .min(1)
+  .max(2048)
+  .refine((v) => v.startsWith('did:') || /^https?:\/\//.test(v), 'a peer is a https:// PDS host or a did:')
+
 const peersBody = z.object({
-  add: z.array(z.string().url()).optional(),
-  remove: z.array(z.string()).optional(),
+  add: z.array(peerRef).max(50).optional(),
+  remove: z.array(peerRef).max(50).optional(),
+  /** The tags this school routes listings on. Omit to leave the published tags alone. */
+  tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
 })
 
 admin.put('/peers', async (c) => {
   const parsed = peersBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
-  const did = currentSchool(c).did
-  for (const host of parsed.data.add ?? []) await addPeer(host, 'admin', did)
-  for (const host of parsed.data.remove ?? []) await disablePeer(host, did)
+  const school = currentSchool(c)
+  const did = school.did
+  const caller = c.var.viewer!.did
+
+  const add = await splitPeerRefs(parsed.data.add ?? [])
+  const remove = await splitPeerRefs(parsed.data.remove ?? [])
+  const current = await peerHostsFor(did)
+  const removeHosts = new Set(remove.hosts)
+  const nextHosts = [...new Set([...current, ...add.hosts])].filter((h) => !removeHosts.has(h))
+  const tags = parsed.data.tags
+    ? [...new Set(parsed.data.tags.map((t) => t.trim().toLowerCase()).filter(Boolean))]
+    : undefined
+
+  /**
+   * ORDER: THE RECORD FIRST, THE TABLE SECOND.
+   *
+   * The record is what a peer reads and the table is only what we follow, so of the two
+   * half-applied states the survivable one is "published but not yet followed" — our own
+   * backfill closes that on its next tick. The other way round, a steward is told the
+   * peering happened while the world still sees the old list, with nothing to repair it.
+   * `publishPeerState` throws when the actor refuses, and `fs_peer` is then untouched.
+   */
+  let published: Awaited<ReturnType<typeof publishPeerState>>
+  try {
+    published = await publishPeerState({
+      schoolDid: did,
+      callerDid: caller,
+      hosts: nextHosts,
+      addDids: add.dids,
+      removeDids: remove.dids,
+      ...(tags ? { tags } : {}),
+      school,
+    })
+  } catch (err) {
+    if (err instanceof SchoolActError) {
+      const { body, status } = schoolErrorBody(err)
+      return c.json(body, status)
+    }
+    log.warn('publishing the peer list failed; the peer table is unchanged', { detail: describeError(err) })
+    return c.json(
+      { error: 'PeerPublishFailed', message: 'the school record could not be republished; nothing was changed' },
+      502,
+    )
+  }
+
+  for (const host of add.hosts) await addPeer(host, 'admin', did)
+  for (const host of remove.hosts) await disablePeer(host, did)
+
   // The peer list IS contrail's `relays` — the UNION across schools, since the index is
-  // global (MS §4) — so the indexer has to be rebuilt whichever school edited it.
-  resetIndexer()
-  return c.json({ peers: await listPeers(did) })
+  // global (MS §4) — so the indexer is rebuilt, whichever school edited it, but only when
+  // the union actually changed.
+  await reloadIndexerForPeers()
+  if (published.uri) {
+    const indexer = await getIndexer()
+    await indexer.notify(published.uri).catch(() => {})
+  }
+  return c.json({ peers: await listPeers(did), published })
 })
+
+/** A mixed list of hosts and DIDs, split; a DID's PDS endpoint becomes a host to follow. */
+async function splitPeerRefs(refs: string[]): Promise<{ hosts: string[]; dids: string[] }> {
+  const hosts = new Set<string>()
+  const dids: string[] = []
+  for (const ref of refs) {
+    if (!ref.startsWith('did:')) {
+      hosts.add(ref)
+      continue
+    }
+    dids.push(ref)
+    const endpoint = await resolvePdsEndpoint(ref).catch(() => null)
+    // Unresolvable: the affiliation is still published (the steward asserted it), we just
+    // cannot follow that school's repo yet. The next backfill retries nothing — a steward
+    // re-adding it once the DID resolves is the repair, and `GET /peers` shows the gap.
+    if (endpoint) hosts.add(endpoint)
+    else log.warn('a peer DID could not be resolved to a PDS endpoint; publishing it unfollowed')
+  }
+  return { hosts: [...hosts], dids }
+}
 
 /* newsletter */
 
