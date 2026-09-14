@@ -213,15 +213,21 @@ export async function actorFor(schoolDid: string): Promise<SchoolActorPort> {
   if (override) return override
   const ttl = config().SCHOOL_ACTOR_CACHE_TTL_MS
   const hit = ports.get(schoolDid)
-  if (hit && Date.now() - hit.at < ttl) return hit.port
-  const port = buildPort(schoolDid)
-  if (ports.size >= CACHE_CAP) {
-    // Oldest-inserted first: Map preserves insertion order, and a re-set moves an entry
-    // to the back, so this is a genuine LRU over the cached ports.
-    const oldest = ports.keys().next().value
-    if (oldest !== undefined) ports.delete(oldest)
+  if (hit && Date.now() - hit.at < ttl) {
+    // Touch on a HIT: delete-then-set moves the entry to the back of the Map's insertion
+    // order, which is what makes the eviction below least-RECENTLY-used rather than
+    // merely oldest-created. Without this a busy school built early would be evicted
+    // ahead of an idle one built late.
+    ports.delete(schoolDid)
+    ports.set(schoolDid, hit)
+    return hit.port
   }
+  const port = buildPort(schoolDid)
   ports.delete(schoolDid)
+  if (ports.size >= CACHE_CAP) {
+    const lru = ports.keys().next().value
+    if (lru !== undefined) ports.delete(lru)
+  }
   ports.set(schoolDid, { port, at: Date.now() })
   return port
 }

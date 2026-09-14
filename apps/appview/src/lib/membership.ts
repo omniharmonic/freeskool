@@ -16,6 +16,10 @@
  * `directoryListing` lives here, not in `fs_member_prefs`: someone who hides in Boulder
  * because they know people there has said nothing about Denver, and a global switch would
  * carry that decision silently from one social context into another (MS §2).
+ *
+ * So does `publicRole`, for a harder reason: the record it gates is a PUBLIC
+ * `coop.lexicon.membership` that names the school it belongs to, so a global opt-in would
+ * let consent given to one school publish a naming in another (R9).
  */
 import { and, eq, isNull } from 'drizzle-orm'
 import { getDb, type Db } from '../db/index.js'
@@ -46,7 +50,7 @@ export async function joinSchool(
   // when they have one, so a member who opted out before this table existed is not
   // silently opted back in by their next sign-in. New rows only; see `set` below.
   const [prefs] = await db
-    .select({ directoryListing: memberPrefs.directoryListing })
+    .select({ directoryListing: memberPrefs.directoryListing, publicRole: memberPrefs.publicRole })
     .from(memberPrefs)
     .where(eq(memberPrefs.did, did))
     .limit(1)
@@ -57,12 +61,21 @@ export async function joinSchool(
       schoolDid,
       door,
       directoryListing: prefs?.directoryListing ?? true,
+      /**
+       * NOT inherited across schools. `directoryListing` defaults from the old GLOBAL
+       * column because the directory is opt-OUT and a member who already hid must not be
+       * un-hidden; `publicRole` is opt-IN and defaults to `false` for a school the member
+       * has not yet said anything to — the fallback in `isPublicRoleOptIn` is what lets
+       * the LEGACY school keep reading their existing answer.
+       */
+      publicRole: false,
       joinedAt: now,
       lastSeenAt: now,
     })
     .onConflictDoUpdate({
       target: [membership.did, membership.schoolDid],
-      // NOT `directoryListing`, NOT `joinedAt`: a returning member's own choices survive.
+      // NOT `directoryListing`, NOT `publicRole`, NOT `joinedAt`: a returning member's
+      // own choices survive.
       set: { door, lastSeenAt: now, leftAt: null },
     })
 }
@@ -120,6 +133,43 @@ export async function setDirectoryListing(
     .insert(membership)
     .values({ did, schoolDid, door: 'custodial', directoryListing: listed, joinedAt: now, lastSeenAt: now })
     .onConflictDoUpdate({ target: [membership.did, membership.schoolDid], set: { directoryListing: listed } })
+}
+
+/**
+ * "Publish my role in this school" — per membership (see the module doc). The old global
+ * `fs_member_prefs.public_role` is consulted only for the LEGACY school, and only while it
+ * has no membership row yet: for any other school, silence means no.
+ */
+export async function publicRoleOptIn(did: string, schoolDid: string, db: Db = getDb()): Promise<boolean> {
+  if (!schoolDid) return false
+  const rows = await db
+    .select({ publicRole: membership.publicRole })
+    .from(membership)
+    .where(and(eq(membership.did, did), eq(membership.schoolDid, schoolDid)))
+    .limit(1)
+  if (rows.length > 0) return rows[0]!.publicRole
+  if (schoolDid !== legacySchoolDid()) return false
+  const prefs = await db
+    .select({ publicRole: memberPrefs.publicRole })
+    .from(memberPrefs)
+    .where(eq(memberPrefs.did, did))
+    .limit(1)
+  return prefs[0]?.publicRole ?? false
+}
+
+/** Writes the per-school answer. `PUT /api/me/public-role` writes the legacy column too. */
+export async function setPublicRole(
+  did: string,
+  schoolDid: string,
+  publicRole: boolean,
+  db: Db = getDb(),
+): Promise<void> {
+  if (!schoolDid) return
+  const now = new Date()
+  await db
+    .insert(membership)
+    .values({ did, schoolDid, door: 'custodial', publicRole, joinedAt: now, lastSeenAt: now })
+    .onConflictDoUpdate({ target: [membership.did, membership.schoolDid], set: { publicRole } })
 }
 
 /**

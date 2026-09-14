@@ -57,11 +57,13 @@ const SKILL = 'at://did:plc:taxonomy/freeschool.draft.skill/welding'
 const EVENT_A = `at://${MEMBER_A}/community.lexicon.calendar.event/ea`
 const EVENT_B = `at://${MEMBER_B}/community.lexicon.calendar.event/eb`
 const REQUEST_A = `at://${ASKER}/freeschool.draft.request/ra`
+/** The month the seeded classes fall in — both are 24h out, so "now" unless that crosses. */
+const ZINE_MONTH = new Date(Date.now() + 86_400_000).toISOString().slice(0, 7)
 
 /** Strings that belong to exactly one school and must never cross. */
 const SECRETS: Record<'a' | 'b', string[]> = {
-  a: [MEMBER_A, EVENT_A, 'vouch-from-a', 'Notification from A', 'proposal-a'],
-  b: [MEMBER_B, EVENT_B, 'vouch-from-b', 'Notification from B', 'proposal-b'],
+  a: [MEMBER_A, 'alice.test', EVENT_A, 'vouch-from-a', 'Notification from A', 'proposal-a'],
+  b: [MEMBER_B, 'bruno.test', EVENT_B, 'vouch-from-b', 'Notification from B', 'proposal-b'],
 }
 
 /* ────────────────────────────── the fake index ────────────────────────────── */
@@ -144,6 +146,7 @@ import {
   notificationFeed,
   requestRsvp,
   rsvp,
+  policyCache,
   school,
   schoolDomain,
   session,
@@ -152,7 +155,36 @@ import {
   steward,
 } from '../src/db/schema.js'
 import { joinSchool } from '../src/lib/membership.js'
+import { isPublicRoleOptIn, publishRoleClaim } from '../src/lib/membership-claims.js'
+import { setSchoolActor } from '../src/lib/school-actors.js'
+import { Role } from '@freeschool/shared'
+import type { Did, SchoolActorPort } from '@freeschool/school-actor'
 import { rowId } from '../src/lib/ids.js'
+
+/**
+ * Which schools a role claim was RETRACTED from. The port is faked wholesale: the
+ * assertions here are about which school a write is aimed at, and a real PDS would only
+ * add a network dependency to that question.
+ */
+const retractions: string[] = []
+
+function fakePort(): SchoolActorPort {
+  return {
+    async describeActor(i: { schoolDid: Did }) {
+      return { schoolDid: i.schoolDid, pdsEndpoint: 'http://pds.test', custody: 'app-owned' as const, online: true }
+    },
+    async authorize() {
+      return { allowed: true as const, auditId: 'audit' }
+    },
+    async putRecordAsSchool(i: { schoolDid: Did; collection: string; rkey: string }) {
+      return { uri: `at://${i.schoolDid}/${i.collection}/${i.rkey}`, cid: 'bafy', auditId: 'audit' }
+    },
+    async deleteRecordAsSchool(i: { schoolDid: Did }) {
+      retractions.push(i.schoolDid)
+      return { auditId: 'audit' }
+    },
+  } as unknown as SchoolActorPort
+}
 
 let available = false
 
@@ -162,6 +194,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  setSchoolActor(undefined)
   if (available) await closeTestDb()
 })
 
@@ -198,6 +231,8 @@ beforeEach(async () => {
     'fs_app_meta',
   )
   resetSchoolContextCache()
+  setSchoolActor(fakePort())
+  retractions.length = 0
   eventRecords.length = 0
   requestRecords.length = 0
   eventConfigs.length = 0
@@ -206,6 +241,24 @@ beforeEach(async () => {
   await db.insert(school).values([
     { did: SCHOOL_A, label: 'a', name: 'A Free School', handle: HOST_A },
     { did: SCHOOL_B, label: 'b', name: 'B Free School', handle: HOST_B },
+  ])
+  /**
+   * A policy for each school with `publishRoles` ON, so the role-claim gate reaches the
+   * per-member opt-in rather than short-circuiting on policy. `policy_uri` is non-null on
+   * purpose: `currentPolicyUri` refreshes when it is null, and a refresh (the school
+   * record is mocked absent) would write the defaults back over this.
+   */
+  await db.insert(policyCache).values([
+    {
+      schoolDid: SCHOOL_A,
+      policyUri: `at://${SCHOOL_A}/freeschool.draft.policy/p1`,
+      thresholds: { memberRequires: 'invite-or-vouch', publishRoles: true },
+    },
+    {
+      schoolDid: SCHOOL_B,
+      policyUri: `at://${SCHOOL_B}/freeschool.draft.policy/p1`,
+      thresholds: { memberRequires: 'invite-or-vouch', publishRoles: true },
+    },
   ])
   await db.insert(schoolDomain).values([
     { host: HOST_A, schoolDid: SCHOOL_A, kind: 'canonical' },
@@ -313,12 +366,13 @@ beforeEach(async () => {
   ])
 
   cookies.memberBoth = await cookieFor(MEMBER_BOTH)
+  cookies.memberA = await cookieFor(MEMBER_A)
   cookies.stewardA = await cookieFor(STEWARD_A)
 })
 
 /* ────────────────────────────── the route table ───────────────────────────── */
 
-type Viewer = 'anon' | 'memberBoth' | 'stewardA'
+type Viewer = 'anon' | 'memberBoth' | 'memberA' | 'stewardA'
 
 interface RouteCase {
   name: string
@@ -326,20 +380,34 @@ interface RouteCase {
   viewer: Viewer
   /** Expected status per school; defaults to 200 on both. */
   expect?: { a?: number; b?: number }
+  /**
+   * The OWN school's secrets that must be PRESENT. Without this an endpoint that returned
+   * an empty body — or 404'd for an unrelated reason — would pass the leak assertion
+   * trivially, which is the one way a tenancy suite can quietly stop testing anything.
+   */
+  present?: (on: 'a' | 'b') => string[]
   /** Extra per-school assertion on the parsed body, when a status is not enough. */
   check?: (body: unknown, on: 'a' | 'b') => void
 }
 
+const member = (on: 'a' | 'b') => [on === 'a' ? MEMBER_A : MEMBER_B]
+const event = (on: 'a' | 'b') => [on === 'a' ? EVENT_A : EVENT_B]
+
 const ROUTES: RouteCase[] = [
-  { name: 'members directory', path: '/api/members', viewer: 'memberBoth' },
+  { name: 'members directory', path: '/api/members', viewer: 'memberBoth', present: member },
   {
     name: "one member's profile (404, never 403, across schools)",
     path: `/api/members/${encodeURIComponent(MEMBER_A)}`,
     viewer: 'memberBoth',
     expect: { a: 200, b: 404 },
   },
-  { name: 'people on a skill page', path: `/api/skills/${encodeURIComponent(SKILL)}`, viewer: 'memberBoth' },
-  { name: 'my vouches', path: '/api/me/attestations', viewer: 'memberBoth' },
+  { name: 'people on a skill page', path: `/api/skills/${encodeURIComponent(SKILL)}`, viewer: 'memberBoth', present: member },
+  {
+    name: 'my vouches',
+    path: '/api/me/attestations',
+    viewer: 'memberBoth',
+    present: (on) => [`vouch-from-${on}`],
+  },
   {
     name: 'the needs board',
     path: '/api/requests',
@@ -350,7 +418,7 @@ const ROUTES: RouteCase[] = [
       for (const r of items) expect(r.rsvpCount, `rsvpCount on ${on}`).toBe(1)
     },
   },
-  { name: 'the public calendar', path: '/api/calendar', viewer: 'anon' },
+  { name: 'the public calendar', path: '/api/calendar', viewer: 'anon', present: event },
   {
     name: "a class's roster",
     path: `/api/events/${encodeURIComponent(EVENT_A)}/rsvps`,
@@ -370,8 +438,36 @@ const ROUTES: RouteCase[] = [
     path: '/api/admin/skills/proposals',
     viewer: 'stewardA',
     expect: { a: 200, b: 403 },
+    // The queue projects the SKILL's rkey and the proposer's HANDLE, never the app-side
+    // proposal row id — so the handle is what proves the row came from this school.
+    present: (on) => (on === 'a' ? ['alice.test'] : []),
   },
-  { name: 'my notifications', path: '/api/notifications', viewer: 'memberBoth' },
+  {
+    name: 'my notifications',
+    path: '/api/notifications',
+    viewer: 'memberBoth',
+    present: (on) => [`Notification from ${on.toUpperCase()}`],
+  },
+  { name: 'the moderation queue', path: '/api/admin/moderation', viewer: 'stewardA', expect: { a: 200, b: 403 } },
+  { name: 'newsletter drafts', path: '/api/admin/newsletter', viewer: 'stewardA', expect: { a: 200, b: 403 } },
+  { name: 'the peer registry', path: '/api/admin/peers', viewer: 'stewardA', expect: { a: 200, b: 403 } },
+  { name: 'the printable zine', path: `/api/zine/${ZINE_MONTH}`, viewer: 'anon', present: event },
+  { name: 'the subscribable feed', path: '/api/calendar.ics', viewer: 'anon', present: event },
+  {
+    name: 'one class',
+    path: `/api/events/${encodeURIComponent(EVENT_A)}`,
+    viewer: 'memberBoth',
+    expect: { a: 200, b: 404 },
+  },
+  {
+    name: "a class's attendance counts",
+    path: `/api/events/${encodeURIComponent(EVENT_A)}/attendance`,
+    viewer: 'memberA',
+    expect: { a: 200, b: 404 },
+  },
+  { name: 'my own summary', path: '/api/me', viewer: 'memberBoth' },
+  { name: 'my badges', path: '/api/me/badges', viewer: 'memberBoth' },
+  { name: 'how this school works', path: '/api/school/how-it-works', viewer: 'anon' },
 ]
 
 async function get(route: RouteCase, on: 'a' | 'b'): Promise<{ status: number; text: string }> {
@@ -392,6 +488,9 @@ describe('tenant isolation, route by route', () => {
         expect(status, `${route.path} on ${on}`).toBe(route.expect?.[on] ?? 200)
         for (const secret of SECRETS[other]) {
           expect(text, `${route.path} on ${on} leaked ${secret}`).not.toContain(secret)
+        }
+        for (const needle of route.present?.(on) ?? []) {
+          expect(text, `${route.path} on ${on} is missing its own ${needle}`).toContain(needle)
         }
         if (route.check && status === 200) route.check(JSON.parse(text), on)
       }
@@ -431,6 +530,69 @@ describe('the tenancy the table depends on', () => {
       const body = (await res.json()) as { members: Array<{ did: string }> }
       expect(body.members.map((m) => m.did).sort()).toEqual([...expected].sort())
     }
+  })
+
+  /**
+   * REVIEW ROUND 1, BLOCKING. `publishRoleClaim` writes a PUBLIC record that NAMES the
+   * school it belongs to. While the opt-in was global, opting in on A published a naming
+   * in B the moment a B re-derivation fired under a `publishRoles` policy — consent given
+   * to one school spent in another, which is precisely what R9 forbids.
+   */
+  describe('the public-role opt-in is per school', () => {
+    it('opting in on A publishes nothing in B', async () => {
+      if (!available) return
+      const app = createApp()
+      const res = await app.request(`http://${HOST_A}/api/me/public-role`, {
+        method: 'PUT',
+        headers: { Host: HOST_A, Cookie: cookies.memberBoth!, 'content-type': 'application/json' },
+        body: JSON.stringify({ publicRole: true }),
+      })
+      expect(res.status).toBe(200)
+      expect(await isPublicRoleOptIn(MEMBER_BOTH, SCHOOL_A)).toBe(true)
+      expect(await isPublicRoleOptIn(MEMBER_BOTH, SCHOOL_B)).toBe(false)
+      // And the gate the claim actually goes through agrees, at a role that qualifies.
+      expect((await publishRoleClaim(SCHOOL_B as Did, MEMBER_BOTH as Did, Role.Host)).reason).toBe('not-opted-in')
+    })
+
+    it("opting out of A retracts A's claim and leaves B's consent alone", async () => {
+      if (!available) return
+      const app = createApp()
+      for (const host of [HOST_A, HOST_B]) {
+        await app.request(`http://${host}/api/me/public-role`, {
+          method: 'PUT',
+          headers: { Host: host, Cookie: cookies.memberBoth!, 'content-type': 'application/json' },
+          body: JSON.stringify({ publicRole: true }),
+        })
+      }
+      retractions.length = 0
+      await app.request(`http://${HOST_A}/api/me/public-role`, {
+        method: 'PUT',
+        headers: { Host: HOST_A, Cookie: cookies.memberBoth!, 'content-type': 'application/json' },
+        body: JSON.stringify({ publicRole: false }),
+      })
+      expect(retractions).toEqual([SCHOOL_A])
+      expect(await isPublicRoleOptIn(MEMBER_BOTH, SCHOOL_A)).toBe(false)
+      expect(await isPublicRoleOptIn(MEMBER_BOTH, SCHOOL_B)).toBe(true)
+    })
+
+    it("GET /api/me/public-role answers for the host's own school", async () => {
+      if (!available) return
+      const app = createApp()
+      await app.request(`http://${HOST_B}/api/me/public-role`, {
+        method: 'PUT',
+        headers: { Host: HOST_B, Cookie: cookies.memberBoth!, 'content-type': 'application/json' },
+        body: JSON.stringify({ publicRole: true }),
+      })
+      for (const [host, expected] of [
+        [HOST_A, false],
+        [HOST_B, true],
+      ] as const) {
+        const res = await app.request(`http://${host}/api/me/public-role`, {
+          headers: { Host: host, Cookie: cookies.memberBoth! },
+        })
+        expect(((await res.json()) as { publicRole: boolean }).publicRole).toBe(expected)
+      }
+    })
   })
 
   it('a vouch given in A is invisible in B, and vice versa', async () => {

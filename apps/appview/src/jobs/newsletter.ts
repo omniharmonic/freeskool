@@ -29,6 +29,7 @@ import { config } from '../config.js'
 import { sendMail, type Mail } from '../lib/mail.js'
 import { activeSubscribers, rotateUnsubscribeToken } from '../lib/newsletter-subscriptions.js'
 import { legacySchoolDid, listSchools } from '../lib/schools.js'
+import { schoolsOfEvents } from '../lib/event-school.js'
 import { schoolScope } from '../lib/school-scope.js'
 import { and, eq } from 'drizzle-orm'
 
@@ -38,17 +39,25 @@ export interface Digest {
   eventCount: number
 }
 
-export async function composeMonthlyDigest(period: string): Promise<Digest> {
+/**
+ * ONE SCHOOL's month. The window query is over the GLOBAL index, so the school filter has
+ * to be applied here — exactly as the calendar and the zine do — or every city's digest is
+ * the union of every city's classes (MS §10.1: no cross-school aggregate is ever
+ * rendered).
+ */
+export async function composeMonthlyDigest(period: string, schoolDid = legacySchoolDid()): Promise<Digest> {
   const [year, month] = period.split('-').map(Number)
   const from = new Date(Date.UTC(year ?? 1970, (month ?? 1) - 1, 1))
   const to = new Date(Date.UTC(year ?? 1970, month ?? 1, 1))
 
   const indexer = await getIndexer()
   const events = await eventsInWindow(indexer, from.toISOString(), to.toISOString(), 500)
+  const eventSchools = await schoolsOfEvents(events.map((e) => e.uri))
 
   const lines: string[] = []
   let count = 0
   for (const e of events) {
+    if ((eventSchools.get(e.uri) ?? legacySchoolDid()) !== schoolDid) continue
     const [listings, configs] = await Promise.all([
       sidecarsForEvent<EventListing>(indexer, 'eventListing', e.uri),
       sidecarsForEvent<EventConfig>(indexer, 'eventConfig', e.uri),
@@ -110,7 +119,7 @@ export async function composeNewsletterIssue(
   period: string,
   schoolDid: string = legacySchoolDid(),
 ): Promise<NewsletterIssueDraft> {
-  const digest = await composeMonthlyDigest(period)
+  const digest = await composeMonthlyDigest(period, schoolDid)
   const html = renderDigestHtml(digest)
   const id = rowId()
   await getDb().insert(newsletterIssue).values({ id, schoolDid, month: period, html, text: digest.body, status: 'draft' })

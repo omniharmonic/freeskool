@@ -9,7 +9,8 @@
  *      and its `fs_school_domain` rows (the apex canonical, `<label>.<apex>` alias).
  *   2. imports `SCHOOL_APP_PASSWORD` into `fs_school_credential`, wrapped with
  *      `wrapSecret` under the same versioned `CUSTODY_KEYS` a member's password uses.
- *   3. copies `fs_member` (+ `fs_member_prefs.directory_listing`) into `fs_membership`.
+ *   3. copies `fs_member` (+ `fs_member_prefs.directory_listing` and `.public_role`) into
+ *      `fs_membership`.
  *   4. stamps `school_did` on every per-school table, in batches of 5 000 by `ctid` so no
  *      statement holds a long lock on a big table.
  *
@@ -132,11 +133,24 @@ async function importCredential(db: Db, did: string, rotate: boolean): Promise<B
  */
 async function copyMemberships(db: Db, did: string): Promise<number> {
   const result = await db.execute(sql`
-    INSERT INTO fs_membership (did, school_did, door, directory_listing, joined_at, last_seen_at)
-    SELECT m.did, ${did}, m.door, COALESCE(p.directory_listing, true), m.first_seen_at, m.last_seen_at
+    INSERT INTO fs_membership (did, school_did, door, directory_listing, public_role, joined_at, last_seen_at)
+    SELECT m.did, ${did}, m.door, COALESCE(p.directory_listing, true), COALESCE(p.public_role, false),
+           m.first_seen_at, m.last_seen_at
     FROM fs_member m
     LEFT JOIN fs_member_prefs p ON p.did = m.did
     ON CONFLICT DO NOTHING
+  `)
+  /**
+   * A member who already had a membership row (this task's session path writes one) but
+   * whose LEGACY opt-in predates it: carry the old global answer across, once, and only
+   * for the legacy school. `AND NOT m.public_role` keeps this idempotent and never
+   * downgrades an answer the member has since given through the new column.
+   */
+  await db.execute(sql`
+    UPDATE fs_membership m
+       SET public_role = true
+      FROM fs_member_prefs p
+     WHERE p.did = m.did AND m.school_did = ${did} AND p.public_role AND NOT m.public_role
   `)
   return result.rowCount ?? 0
 }

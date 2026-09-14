@@ -33,5 +33,5 @@ ALTER TABLE "fs_peer" DROP CONSTRAINT IF EXISTS "fs_peer_pkey";--> statement-bre
 ALTER TABLE "fs_peer" ADD CONSTRAINT "fs_peer_school_did_host_pk" PRIMARY KEY("school_did","host");--> statement-breakpoint
 CREATE INDEX "fs_peer_host_idx" ON "fs_peer" USING btree ("host");--> statement-breakpoint
 
-DROP INDEX "fs_attestation_unique";--> statement-breakpoint
+DROP INDEX IF EXISTS "fs_attestation_unique";--> statement-breakpoint
 CREATE UNIQUE INDEX "fs_attestation_unique" ON "fs_attestation" USING btree ("attester_did","subject_did","skill_uri","school_did");

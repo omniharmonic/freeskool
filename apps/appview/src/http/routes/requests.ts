@@ -39,7 +39,6 @@ import { resolvePdsEndpoint } from '../../lib/identity.js'
 import { countInterested, isInterested, meetsThreshold, toggleInterest } from '../../lib/request-rsvp.js'
 import { createRequest } from '../../lib/requests.js'
 import { currentSchool } from '../school-context.js'
-import { schoolsOfEvents } from '../../lib/event-school.js'
 
 export const requests = new Hono<AppEnv>()
 

@@ -300,7 +300,7 @@ me.put('/public-role', async (c) => {
 })
 
 me.get('/public-role', async (c) => {
-  return c.json({ publicRole: await isPublicRoleOptIn(c.var.viewer!.did) })
+  return c.json({ publicRole: await isPublicRoleOptIn(c.var.viewer!.did, currentSchool(c).did) })
 })
 
 /**

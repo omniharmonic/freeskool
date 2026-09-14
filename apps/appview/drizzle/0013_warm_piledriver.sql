@@ -1,0 +1,13 @@
+-- Federation Task 3, review round 1 (blocking): the public-role opt-in is per school.
+--
+-- `publishRoleClaim` writes a PUBLIC `coop.lexicon.membership` that NAMES the school it
+-- belongs to. Gating it on a global `fs_member_prefs.public_role` meant that opting in on
+-- Boulder published a record naming the member in Denver the moment a Denver
+-- re-derivation fired under a `publishRoles` policy — a public naming the member never
+-- consented to (R9).
+--
+-- Additive: a new column with a non-volatile default is a catalogue-only change.
+-- `scripts/backfill-school.ts` copies the legacy value into the legacy school's
+-- membership rows; `lib/membership-claims.ts` falls back to the old column for the legacy
+-- school alone until it has.
+ALTER TABLE "fs_membership" ADD COLUMN "public_role" boolean DEFAULT false NOT NULL;

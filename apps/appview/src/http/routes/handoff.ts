@@ -47,6 +47,7 @@ import { hashToken, newToken } from '../../lib/crypto.js'
 import { config } from '../../config.js'
 import { actorFor, asDid } from '../../lib/school-actors.js'
 import { legacySchoolDid } from '../../lib/schools.js'
+import { schoolScope } from '../../lib/school-scope.js'
 import { currentSchool } from '../school-context.js'
 import { currentPolicyUri } from '../../lib/policy.js'
 import { NSID } from '../../lexicons/nsids.js'
@@ -171,6 +172,9 @@ export async function acceptHandoff(
     .where(
       and(
         eq(handoff.tokenHash, tokenHash),
+        // A token minted for one school is not merely refused on another — it is not
+        // FOUND there. Anything else tells a stranger that a hand-off exists elsewhere.
+        schoolScope(handoff.schoolDid, schoolDid),
         isNull(handoff.acceptedAt),
         gt(handoff.expiresAt, new Date()),
         or(isNull(handoff.toDid), eq(handoff.toDid, acceptorDid)),
@@ -178,7 +182,7 @@ export async function acceptHandoff(
     )
     .returning()
   const row = claimed[0]
-  if (!row) return await explainFailedClaim(tokenHash, acceptorDid)
+  if (!row) return await explainFailedClaim(tokenHash, acceptorDid, schoolDid)
 
   try {
     const result = await (await actorFor(schoolDid)).putRecordAsSchool({
@@ -259,8 +263,18 @@ export async function acceptHandoff(
  * undifferentiated 404. A row that vanished between the two statements reads as unknown,
  * which is accurate.
  */
-async function explainFailedClaim(tokenHash: string, acceptorDid: string): Promise<AcceptHandoffResult> {
-  const rows = await getDb().select().from(handoff).where(eq(handoff.tokenHash, tokenHash)).limit(1)
+async function explainFailedClaim(
+  tokenHash: string,
+  acceptorDid: string,
+  schoolDid: string,
+): Promise<AcceptHandoffResult> {
+  // Scoped the same way the claim is: a token for another school reads as unknown here,
+  // not as "used" or "expired", both of which would confirm it exists.
+  const rows = await getDb()
+    .select()
+    .from(handoff)
+    .where(and(eq(handoff.tokenHash, tokenHash), schoolScope(handoff.schoolDid, schoolDid)))
+    .limit(1)
   const row = rows[0]
   if (!row) return { ok: false, status: 404, error: 'NotFound', message: 'unknown hand-off token' }
   if (row.acceptedAt) return { ok: false, status: 410, error: 'AlreadyUsed', message: 'this hand-off link has already been used' }

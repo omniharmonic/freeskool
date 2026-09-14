@@ -78,8 +78,12 @@ export async function runReminders(now = new Date()): Promise<ReminderResult> {
 
   let queued = 0
   const digestDue = isDigestDue(now)
+  /**
+   * Keyed by `<did>|<schoolDid>`, not by DID: a member of two schools gets one digest per
+   * school, never one merged across both (MS §10.1), and never one stamped with whichever
+   * school's class happened to be last in the loop.
+   */
   const digestByDid = new Map<string, string[]>()
-  const digestSchool = new Map<string, string>()
 
   for (const e of events) {
     const startsAtRaw = e.value.startsAt
@@ -109,25 +113,28 @@ export async function runReminders(now = new Date()): Promise<ReminderResult> {
 
     if (digestDue && sameUtcDay(startsAt, now)) {
       for (const did of dids) {
-        digestByDid.set(did, [...(digestByDid.get(did) ?? []), name])
-        // A member of two schools gets one digest per school, not one merged across both
-        // (MS §10.1: no cross-school aggregate is ever rendered).
-        digestSchool.set(did, schoolDid)
+        const key = `${did}|${schoolDid}`
+        digestByDid.set(key, [...(digestByDid.get(key) ?? []), name])
       }
     }
   }
 
   if (digestDue) {
     const day = now.toISOString().slice(0, 10)
-    for (const [did, names] of digestByDid) {
+    for (const [key, names] of digestByDid) {
+      const sep = key.lastIndexOf('|')
+      const did = key.slice(0, sep)
+      const schoolDid = key.slice(sep + 1)
       const res = await enqueueNotification({
         did,
         category: 'event.reminder',
-        dedupKey: `event.reminder:day-of:${day}:${did}`,
+        // The school is in the dedup key too, so two schools' digests on the same day do
+        // not claim each other's slot and silently drop one of them.
+        dedupKey: `event.reminder:day-of:${day}:${schoolDid}:${did}`,
         title: names.length === 1 ? `Today: ${names[0]}` : `Today: ${names.length} classes`,
         body: names.join(', '),
         navigate: '/calendar',
-        ...(digestSchool.get(did) ? { schoolDid: digestSchool.get(did)! } : {}),
+        schoolDid,
       })
       if (res.claimed) queued++
     }

@@ -90,7 +90,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   if (!available) return
-  await truncate('fs_member_prefs', 'fs_policy_cache')
+  await truncate('fs_member_prefs', 'fs_membership', 'fs_policy_cache')
   clearPolicyMemo()
 })
 

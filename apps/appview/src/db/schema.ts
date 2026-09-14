@@ -97,6 +97,16 @@ export const membership = pgTable(
     /** 'custodial' | 'oauth' — the door most recently used for THIS school. */
     door: text('door').notNull(),
     directoryListing: boolean('directory_listing').notNull().default(true),
+    /**
+     * "Publish my derived role as a public `coop.lexicon.membership` claim" — PER SCHOOL,
+     * and it has to be: the claim NAMES the school it belongs to, so a global switch
+     * would let opting in on Boulder publish a record naming the member in Denver the
+     * moment a Denver re-derivation fired. R9: no public record may name a DID its holder
+     * did not consent to being named in, and consent given to one school is not consent
+     * given to another. The old global `fs_member_prefs.public_role` survives for one
+     * release as the LEGACY school's value only (MS §9 E).
+     */
+    publicRole: boolean('public_role').notNull().default(false),
     joinedAt: ts('joined_at').notNull().defaultNow(),
     lastSeenAt: ts('last_seen_at').notNull().defaultNow(),
     leftAt: ts('left_at'),
@@ -774,14 +784,14 @@ export const newsletterSubscription = pgTable(
 )
 
 /**
- * Opt-in to having one's DERIVED role published as a public `coop.lexicon.membership`
- * claim (`lib/membership-claims.ts`). OFF by default — R9: no public record may name a
- * DID its holder did not choose to.
+ * What is left of the old global per-member prefs row.
  *
- * MS §4 splits this table: `directoryListing` (and later `publicRole`, `onboardedAt`) are
- * per-school answers and belong on `fs_membership`. The columns stay here and stay
- * authoritative until Task 3 switches readers; `scripts/backfill-school.ts` copies
- * `directoryListing` across so the two agree from the moment the new table exists.
+ * `publicRole` and `directoryListing` are both PER SCHOOL now and live on
+ * `fs_membership`; these columns survive for one release as the LEGACY school's values,
+ * read only as a fallback when that school has no membership row yet, and written
+ * alongside the new ones so a rollback still sees the member's choice (MS §9 E).
+ * `onboardedAt` is genuinely global — it is a fact about the member, not about a school —
+ * and stays here for good.
  */
 export const memberPrefs = pgTable('fs_member_prefs', {
   did: text('did').primaryKey(),
