@@ -63,9 +63,15 @@ const createBody = z.object({
   label: z.string().trim().min(1).max(20),
   name: z.string().trim().min(1).max(120),
   city: z.string().trim().max(120).optional(),
-  handleDomain: z.string().trim().max(253).optional(),
+  // NO `handleDomain` (ruling 4: per-school handle domains are refused in this phase —
+  // one neutral domain, and changing it is a PDS container restart, not a request body).
+  // `createSchool` keeps the parameter for `scripts/create-school.ts`, which derives it
+  // from `SCHOOL_HANDLE` on the host.
   founderDid: z.string().startsWith('did:').max(255).optional(),
 })
+  // STRICT, so a caller who sends `handleDomain` anyway is told no rather than quietly
+  // given the deployment's one domain and left believing they chose it.
+  .strict()
 
 schools.post('/schools', async (c) => {
   const mode = creationMode()

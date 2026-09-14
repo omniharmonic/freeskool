@@ -115,6 +115,7 @@ import {
   school,
   schoolCredential,
   schoolDomain,
+  policyCache,
   session,
   steward,
 } from '../src/db/schema.js'
@@ -124,7 +125,7 @@ import {
   SchoolCreationError,
   type SchoolBootstrapPds,
 } from '../src/lib/schools.js'
-import { isMemberOf, joinSchool } from '../src/lib/membership.js'
+import { appointSteward, isMemberOf, joinSchool, publicRoleOptIn, setPublicRole } from '../src/lib/membership.js'
 import { setSchoolActor } from '../src/lib/school-actors.js'
 import type { Did, SchoolActorPort } from '@freeschool/school-actor'
 import { rowId } from '../src/lib/ids.js'
@@ -433,6 +434,18 @@ describe('POST /api/schools (ruling 1: operator only)', () => {
     expect((await post('admin')).status).toBe(400)
   })
 
+  it('refuses a per-school handle domain (ruling 4)', async () => {
+    if (!available) return
+    const res = await createApp().request('http://legacy.test/api/schools', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-operator-token': process.env.OPERATOR_TOKEN! },
+      body: JSON.stringify({ label: 'denver', name: 'Denver Free School', handleDomain: 'denverskool.org' }),
+    })
+    // Told no, rather than quietly given this deployment's one domain.
+    expect(res.status).toBe(400)
+    expect(await testDb().select().from(school)).toHaveLength(0)
+  })
+
   it('501s when SCHOOL_CREATION is anything else', async () => {
     if (!available) return
     process.env.SCHOOL_CREATION = 'open'
@@ -543,6 +556,74 @@ describe('leaving a school (ruling 10)', () => {
       { method: 'POST' },
     )
     expect(res.status).toBe(401)
+  })
+
+  it('revokes stewardship: a steward who leaves is 403 on that school’s admin routes', async () => {
+    if (!available) return
+    const db = testDb()
+    const schoolDid = await seedCity()
+    // A policy row, so the admin surface answers on its own terms rather than on a
+    // policy read that has no PDS behind it in this suite.
+    await db.insert(policyCache).values({
+      schoolDid,
+      policyUri: `at://${schoolDid}/freeschool.draft.policy/p1`,
+      thresholds: { memberRequires: 'invite-or-vouch' },
+    })
+    await appointSteward(LEAVER, schoolDid)
+    const app = createApp()
+    const cookie = await cookieFor(LEAVER)
+
+    const before = await app.request(`http://${HOST}/api/admin/policy`, { headers: { cookie } })
+    expect(before.status).toBe(200)
+
+    await app.request(`http://${HOST}/api/schools/${encodeURIComponent(schoolDid)}/leave`, {
+      method: 'POST',
+      headers: { cookie },
+    })
+
+    const [row] = await db
+      .select()
+      .from(steward)
+      .where(and(eq(steward.did, LEAVER), eq(steward.schoolDid, schoolDid)))
+    expect(row?.suspendedAt).toBeTruthy()
+
+    const after = await app.request(`http://${HOST}/api/admin/policy`, { headers: { cookie } })
+    expect(after.status).toBe(403)
+
+    // Coming back is not a re-appointment...
+    await joinSchool(LEAVER, schoolDid, 'custodial')
+    expect(
+      (await app.request(`http://${HOST}/api/admin/policy`, { headers: { cookie } })).status,
+    ).toBe(403)
+    // ...somebody appointing them again is.
+    await appointSteward(LEAVER, schoolDid)
+    expect(
+      (await app.request(`http://${HOST}/api/admin/policy`, { headers: { cookie } })).status,
+    ).toBe(200)
+  })
+
+  it('clears the public-role opt-in, so a re-join cannot resurrect the claim', async () => {
+    if (!available) return
+    const db = testDb()
+    const schoolDid = await seedCity()
+    await setPublicRole(LEAVER, schoolDid, true)
+    expect(await publicRoleOptIn(LEAVER, schoolDid)).toBe(true)
+
+    await createApp().request(`http://${HOST}/api/schools/${encodeURIComponent(schoolDid)}/leave`, {
+      method: 'POST',
+      headers: { cookie: await cookieFor(LEAVER) },
+    })
+    expect(await publicRoleOptIn(LEAVER, schoolDid)).toBe(false)
+
+    // `joinSchool` preserves a returning member's own choices — which is why leaving has
+    // to clear this one, or the claim comes back with nobody having consented again.
+    await joinSchool(LEAVER, schoolDid, 'custodial')
+    expect(await publicRoleOptIn(LEAVER, schoolDid)).toBe(false)
+    const [row] = await db
+      .select()
+      .from(membership)
+      .where(and(eq(membership.did, LEAVER), eq(membership.schoolDid, schoolDid)))
+    expect(row?.publicRole).toBe(false)
   })
 
   it('re-joining later clears left_at', async () => {

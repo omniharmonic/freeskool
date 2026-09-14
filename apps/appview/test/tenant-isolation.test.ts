@@ -133,6 +133,7 @@ vi.mock('../src/lib/pds.js', async (importOriginal) => ({
   getRecord: async () => null,
 }))
 
+import { eq } from 'drizzle-orm'
 import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
 import { createApp } from '../src/http/app.js'
 import { config } from '../src/config.js'
@@ -154,7 +155,7 @@ import {
   skillProposal,
   steward,
 } from '../src/db/schema.js'
-import { joinSchool } from '../src/lib/membership.js'
+import { joinSchool, leaveSchool } from '../src/lib/membership.js'
 import { isPublicRoleOptIn, publishRoleClaim } from '../src/lib/membership-claims.js'
 import { setSchoolActor } from '../src/lib/school-actors.js'
 import { Role } from '@freeschool/shared'
@@ -593,6 +594,58 @@ describe('the tenancy the table depends on', () => {
         expect(((await res.json()) as { publicRole: boolean }).publicRole).toBe(expected)
       }
     })
+  })
+
+  /**
+   * THE SWITCHED SESSION (review round 2). Every steward assertion above resolves the
+   * school from the HOST. Task 4 added a second resolution path — `fs_session
+   * .current_school_did`, used when the host names no school — and a power that survived
+   * a switch would be a hole the host-based table could never see: the steward of A picks
+   * B in the switcher and, from then on, every admin route they touch is B's.
+   */
+  it('a steward of A who switches their session to B gets 403 on B’s admin surface', async () => {
+    if (!available) return
+    const db = testDb()
+    const [row] = await db.select({ id: session.id }).from(session).where(eq(session.did, STEWARD_A)).limit(1)
+    await db.update(session).set({ currentSchoolDid: SCHOOL_B }).where(eq(session.id, row!.id))
+
+    // A host that names NO school, so resolution falls through to the session's choice.
+    const res = await createApp().request('http://apex.test/api/admin/policy', {
+      headers: { Host: 'apex.test', Cookie: cookies.stewardA! },
+    })
+    expect(res.status).toBe(403)
+
+    // ...and the same session switched back to A is a steward again, so the 403 above is
+    // about the school and not about the switch having broken authentication.
+    await db.update(session).set({ currentSchoolDid: SCHOOL_A }).where(eq(session.id, row!.id))
+    const back = await createApp().request('http://apex.test/api/admin/policy', {
+      headers: { Host: 'apex.test', Cookie: cookies.stewardA! },
+    })
+    expect(back.status).toBe(200)
+  })
+
+  it('a steward who leaves stops being one, on the host and on a switched session', async () => {
+    if (!available) return
+    const db = testDb()
+    const app = createApp()
+    expect(
+      (await app.request(`http://${HOST_A}/api/admin/policy`, { headers: { Host: HOST_A, Cookie: cookies.stewardA! } }))
+        .status,
+    ).toBe(200)
+
+    await leaveSchool(STEWARD_A, SCHOOL_A)
+
+    expect(
+      (await app.request(`http://${HOST_A}/api/admin/policy`, { headers: { Host: HOST_A, Cookie: cookies.stewardA! } }))
+        .status,
+    ).toBe(403)
+
+    const [row] = await db.select({ id: session.id }).from(session).where(eq(session.did, STEWARD_A)).limit(1)
+    await db.update(session).set({ currentSchoolDid: SCHOOL_A }).where(eq(session.id, row!.id))
+    expect(
+      (await app.request('http://apex.test/api/admin/policy', { headers: { Host: 'apex.test', Cookie: cookies.stewardA! } }))
+        .status,
+    ).toBe(403)
   })
 
   it('a vouch given in A is invisible in B, and vice versa', async () => {

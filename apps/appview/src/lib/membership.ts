@@ -173,36 +173,66 @@ export async function setPublicRole(
 }
 
 /**
- * LEAVING A SCHOOL (spec ruling 10). Three things happen and a fourth deliberately does
- * not:
+ * LEAVING A SCHOOL (spec ruling 10). Everything this school held about the relationship
+ * ends, and one thing deliberately does not:
  *
  *   - `left_at` is stamped, which is what every per-school reader already filters on;
  *   - `directory_listing` goes false, so the member is gone from the people directory
  *     and from skill pages even for a reader that only checks the listing flag;
+ *   - `public_role` goes false — the CONSENT, not just the record it produced;
+ *   - `fs_steward.suspended_at` is stamped, so a steward who leaves stops being one here;
  *   - the published role claim is retracted BY THE CALLER (`routes/schools.ts`), because
  *     retraction is a PDS write through that school's actor and this module does no I/O
- *     beyond its own table;
+ *     beyond its own tables;
  *   - THE CLASSES STAY. They are `community.lexicon.calendar.event` records in the
  *     member's own repo and they really did happen on this school's calendar; deleting
  *     them is not ours to do and un-listing them would rewrite the city's history.
  *
  * The row itself survives, so re-joining is `joinSchool` clearing `left_at` rather than a
- * new membership with a new `joined_at`. Re-joining does NOT re-list them in the
- * directory: leaving was the stronger statement, and silently re-publishing someone's
- * name because they looked at the site again is exactly the R9 failure mode. The Me
- * screen's own toggle is one tap.
+ * new membership with a new `joined_at`. Re-joining restores NOTHING ELSE — not the
+ * directory listing, not the public-role opt-in, not the stewardship. Leaving was the
+ * stronger statement, and re-publishing someone's name (or handing back a moderation
+ * power) because they looked at the site again is exactly the R9 failure mode. The two
+ * toggles are one tap each on the Me screen, and stewardship is somebody's decision.
  *
  * Returns false when there was no membership row to end — `routes/schools.ts` turns that
  * into a 404, never a 403 (MS §10: a 403 would confirm the school has a roster to be off).
  */
 export async function leaveSchool(did: string, schoolDid: string, db: Db = getDb()): Promise<boolean> {
   if (!schoolDid) return false
+  const now = new Date()
   const rows = await db
     .update(membership)
-    .set({ leftAt: new Date(), directoryListing: false })
+    .set({
+      leftAt: now,
+      directoryListing: false,
+      /**
+       * The opt-in dies with the membership (review round 2). The caller retracts the
+       * already-published claim, but the CONSENT has to go too: `joinSchool`'s conflict
+       * `set` deliberately preserves `public_role` for a returning member, so leaving it
+       * true here would let a re-join silently resurrect a public record naming this
+       * person as a member of a school — with no fresh opt-in anywhere. R9: consent that
+       * outlives the relationship it was given inside is not consent.
+       */
+      publicRole: false,
+    })
     .where(and(eq(membership.did, did), eq(membership.schoolDid, schoolDid), isNull(membership.leftAt)))
     .returning({ did: membership.did })
-  return rows.length > 0
+  if (rows.length === 0) return false
+
+  /**
+   * AND THE STEWARDSHIP (review round 2 — blocking). `fs_steward` is read directly by
+   * `lib/roles.ts`, so a steward who left kept `requireRole(Steward)` on the school they
+   * walked out of, forever. Suspending rather than deleting keeps the appointment's
+   * history (who appointed them, when) and matches the column `routes/handoff.ts` already
+   * uses; `appointSteward` clears it, so an explicit RE-APPOINTMENT restores the role and
+   * merely coming back (`joinSchool`) does not.
+   */
+  await db
+    .update(steward)
+    .set({ suspendedAt: now })
+    .where(and(eq(steward.did, did), eq(steward.schoolDid, schoolDid), isNull(steward.suspendedAt)))
+  return true
 }
 
 /**
@@ -215,11 +245,20 @@ export async function leaveSchool(did: string, schoolDid: string, db: Db = getDb
  *
  * Idempotent. Also writes the GLOBAL `fs_member` presence row, because `roleOf` wants a
  * steward to be a known member and an appointee may never have had a session.
+ *
+ * An appointment CLEARS `suspended_at`, which is how a steward who left (and was suspended
+ * by `leaveSchool`) gets their role back: somebody appoints them again. Coming back on
+ * one's own — `joinSchool` clearing `left_at` — deliberately does not, because regaining
+ * stewardship must be a decision somebody made, never a side effect of signing in.
+ * `appointedAt` is left alone so a repeat call stays a no-op.
  */
 export async function appointSteward(did: string, schoolDid: string, db: Db = getDb()): Promise<void> {
   if (!did.startsWith('did:')) throw new Error('a steward is appointed by DID')
   if (!schoolDid) throw new Error('a steward is a steward OF a school; none was given')
-  await db.insert(steward).values({ did, schoolDid, appointedAt: new Date() }).onConflictDoNothing()
+  await db
+    .insert(steward)
+    .values({ did, schoolDid, appointedAt: new Date() })
+    .onConflictDoUpdate({ target: [steward.did, steward.schoolDid], set: { suspendedAt: null } })
   const seenAt = new Date()
   await db
     .insert(member)

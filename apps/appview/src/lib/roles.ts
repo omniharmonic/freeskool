@@ -133,10 +133,31 @@ export async function evidenceFor(did: string, schoolDid = legacySchoolDid()): P
           eq(moderationQueue.action, 'suspend-role'),
         ),
       ),
+    /**
+     * DEFENCE IN DEPTH FOR LEAVING (spec ruling 10, review round 2 — blocking).
+     * `leaveSchool` suspends the steward row, which is the primary revocation; this LEFT
+     * JOIN is the second, independent one, so a steward row that somehow survives a leave
+     * (a partial write, a hand-edited row, a future caller that forgets) still does not
+     * grant `requireRole(Steward)` in a school its holder has walked out of.
+     *
+     * The condition is "no ENDED membership", not "has a live membership": a steward
+     * appointed by `scripts/appoint-steward.ts` may never have had a session, and stewards
+     * appointed before `fs_membership` existed have no row at all. With a LEFT JOIN,
+     * `left_at IS NULL` is true for both of those and false only for someone who actually
+     * left — which is exactly the set this is meant to exclude.
+     */
     db
       .select({ did: steward.did })
       .from(steward)
-      .where(and(eq(steward.did, did), schoolScope(steward.schoolDid, schoolDid), isNull(steward.suspendedAt)))
+      .leftJoin(membership, and(eq(membership.did, steward.did), eq(membership.schoolDid, steward.schoolDid)))
+      .where(
+        and(
+          eq(steward.did, did),
+          schoolScope(steward.schoolDid, schoolDid),
+          isNull(steward.suspendedAt),
+          isNull(membership.leftAt),
+        ),
+      )
       .limit(1),
   ])
 
