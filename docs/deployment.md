@@ -271,7 +271,8 @@ order that keeps a deploy from happening ahead of a migration it depends on.
 
 - **`docs/runbooks/multi-school-rollout.md`** — migrations `0011`–`0013` (the primary-key
   changes that make a rolling deploy unsafe — read the "one thing that matters" there before
-  scheduling this), `backfill-school`, and when it is finally safe to create a second school.
+  scheduling this) plus the additive `0014`–`0015`, `backfill-school`, and when it is finally
+  safe to create a second school.
 - **`docs/runbooks/pds-hostname-migration.md`** — moving every account's DID document from
   `pds.freeskool.xyz` to the neutral `pds.freeskool.directory` (R9), via
   `migrate-pds-hostname`.
@@ -297,10 +298,11 @@ document all of these; `apps/appview/src/config.ts` is still the only thing that
    session's `current_school_did`, `SchoolActorPort` per school) is live either way; with the
    flag off every request still resolves to the single legacy school, so this step is a normal
    `release.sh` — no behaviour change a member would notice.
-2. **Migrations `0011`–`0014` run at boot**, as they do for every deploy — `0011`–`0013` are the
+2. **Migrations `0011`–`0015` run at boot**, as they do for every deploy — `0011`–`0013` are the
    schools/memberships/credentials tables and the primary-key widening the rollout runbook
-   warns about (app DOWN for that one, not a rolling deploy); `0014` is additive (school PDS
-   endpoint, custody mode, verification timestamps) and safe either way.
+   warns about (app DOWN for that one, not a rolling deploy); `0014` (school PDS endpoint,
+   custody mode, verification timestamps) and `0015` (`fs_request_asked_of`) are both additive
+   and safe either way.
 3. **`backfill-school`** (`docs/runbooks/multi-school-rollout.md` §"Order" steps 5–6) — stamps
    `school_did` onto every pre-existing row and verifies zero rows are left unstamped. This has
    to finish, and be verified, before step 4: a second school must never be able to see a row

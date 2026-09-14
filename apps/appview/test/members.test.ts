@@ -93,7 +93,7 @@ vi.mock('../src/index/indexer.js', () => ({
 import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
 import { listMembers, memberProfile, memberVisible, peopleForSkill } from '../src/lib/members.js'
 import { createAttestation } from '../src/lib/attestations.js'
-import { setDirectoryListing } from '../src/lib/membership.js'
+import { directoryListing, setDirectoryListing } from '../src/lib/membership.js'
 import { createApp } from '../src/http/app.js'
 import { createSession } from '../src/http/session.js'
 import { signSessionId } from '../src/lib/crypto.js'
@@ -180,6 +180,27 @@ describe('memberVisible', () => {
     await hide(ALICE)
     expect(await memberVisible(ALICE, BOB)).toBe(false)
     expect(await memberVisible(ALICE, ALICE)).toBe(true)
+  })
+})
+
+describe('directoryListing: the global fs_member_prefs fallback is legacy-school-only', () => {
+  it('with no fs_membership row, falls back to the global pref for the LEGACY school', async () => {
+    if (!available) return
+    await testDb().insert(memberPrefs).values({ did: ALICE, directoryListing: false, updatedAt: new Date() })
+    expect(await directoryListing(ALICE, config().SCHOOL_DID)).toBe(false)
+  })
+
+  it('with no fs_membership row, a NON-legacy school ignores the global pref and defaults true', async () => {
+    if (!available) return
+    await testDb().insert(memberPrefs).values({ did: ALICE, directoryListing: false, updatedAt: new Date() })
+    expect(await directoryListing(ALICE, 'did:plc:some-other-school')).toBe(true)
+  })
+
+  it('a membership row always wins, for any school', async () => {
+    if (!available) return
+    await testDb().insert(memberPrefs).values({ did: ALICE, directoryListing: true, updatedAt: new Date() })
+    await setDirectoryListing(ALICE, 'did:plc:some-other-school', false)
+    expect(await directoryListing(ALICE, 'did:plc:some-other-school')).toBe(false)
   })
 })
 

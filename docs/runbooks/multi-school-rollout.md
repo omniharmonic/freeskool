@@ -50,7 +50,14 @@ they run in the same `db:migrate` pass.
    - stamps `school_did` on every per-school table, in batches of 5 000 by `ctid`.
 
    It is idempotent (`ON CONFLICT DO NOTHING`, and every update is guarded by
-   `school_did = ''`), prints counts only, and can be re-run.
+   `school_did = ''`), prints counts only, and can be re-run **while the legacy school is
+   still the only school**. Once a second school exists it refuses to run at all — a
+   re-run's `fs_member` sweep can no longer assume every member belongs to the legacy
+   school, so it would otherwise fabricate a legacy membership for a member who has since
+   joined only the new school. Pass `--force` only after confirming that is not happening;
+   `copyMemberships` is additionally narrowed to members with no `fs_membership` row
+   anywhere, so even a forced re-run cannot conscript a member who already belongs
+   somewhere.
 6. **Verify.** `pnpm --filter @freeschool/appview privacy-audit`, plus a spot check that
    `SELECT count(*) FROM fs_attendance_tally WHERE school_did = ''` is `0`.
 7. **Only then** create a second school. Not before — see below.

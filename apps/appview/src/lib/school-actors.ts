@@ -241,20 +241,6 @@ export function evictAllSchoolActors(): void {
   ports.clear()
 }
 
-/**
- * LEGACY ENTRYPOINT, kept so the suites that inject a fake port keep compiling: the
- * env-configured school's port, synchronously. Prefer `actorFor(currentSchool(c).did)`.
- */
-export function schoolActor(): SchoolActorPort {
-  if (override) return override
-  const did = legacySchoolDid()
-  const hit = ports.get(did)
-  if (hit && Date.now() - hit.at < config().SCHOOL_ACTOR_CACHE_TTL_MS) return hit.port
-  const port = buildPort(did)
-  ports.set(did, { port, at: Date.now() })
-  return port
-}
-
 /** Tests and scripts inject their own wiring, for every school at once. */
 export function setSchoolActor(p: SchoolActorPort | undefined): void {
   override = p

@@ -19,6 +19,12 @@
  * Pass `--rotate-credential` to re-import the env app password over an existing row —
  * the only non-idempotent thing here, and it is opt-in.
  *
+ * REFUSES TO RUN once a second school exists (`listSchools()` returns more than the
+ * legacy school) unless `--force` is passed: `fs_member` is a global "has ever signed in
+ * here" table, so a re-run after Denver exists would otherwise fabricate Boulder
+ * memberships for Denver-only members. `copyMemberships`'s SELECT is also narrowed to
+ * members with no `fs_membership` row anywhere, belt-and-suspenders with the guard.
+ *
  * Prints counts only (R9: no DIDs in output).
  */
 import { sql } from 'drizzle-orm'
@@ -26,7 +32,7 @@ import { closeDb, getDb, type Db } from '../src/db/index.js'
 import { schoolCredential } from '../src/db/schema.js'
 import { config } from '../src/config.js'
 import { wrapSecret } from '../src/lib/crypto.js'
-import { ensureLegacySchoolRow, legacySchoolDid } from '../src/lib/schools.js'
+import { ensureLegacySchoolRow, legacySchoolDid, listSchools } from '../src/lib/schools.js'
 import { runMigrations } from '../src/db/migrate.js'
 import { isMain } from '../src/lib/is-main.js'
 
@@ -85,8 +91,16 @@ export interface BackfillResult {
   shadowedPeers: number
 }
 
+/**
+ * Once a second school exists, `fs_member` is no longer "everyone belongs to Boulder" —
+ * it is "everyone who has ever signed in anywhere", and a re-run of `copyMemberships`
+ * would conscript Denver-only members into a Boulder `fs_membership` row (MS §10's first
+ * row: a member appearing in a city's roster they never joined). Refuse by default once
+ * `listSchools()` shows more than the legacy school; `--force` is the explicit override
+ * for an operator who has confirmed the narrowed SELECT below is what they want.
+ */
 export async function backfillSchool(
-  options: { rotateCredential?: boolean; db?: Db } = {},
+  options: { rotateCredential?: boolean; force?: boolean; db?: Db } = {},
 ): Promise<BackfillResult> {
   const db = options.db ?? getDb()
   const did = await ensureLegacySchoolRow(
@@ -94,6 +108,17 @@ export async function backfillSchool(
     db,
   )
   if (!did) throw new Error('SCHOOL_DID is not set: there is no legacy school to back-fill from')
+
+  if (!options.force) {
+    const others = (await listSchools(db)).filter((row) => row.did !== did)
+    if (others.length > 0) {
+      throw new Error(
+        `refusing to back-fill: ${others.length} other school(s) already exist besides the legacy ` +
+          'school; re-run with --force once you have confirmed a re-run will not fabricate legacy ' +
+          'memberships for members who already belong elsewhere',
+      )
+    }
+  }
 
   const credential = await importCredential(db, did, options.rotateCredential ?? false)
   const memberships = await copyMemberships(db, did)
@@ -176,6 +201,7 @@ async function copyMemberships(db: Db, did: string): Promise<number> {
            m.first_seen_at, m.last_seen_at
     FROM fs_member m
     LEFT JOIN fs_member_prefs p ON p.did = m.did
+    WHERE NOT EXISTS (SELECT 1 FROM fs_membership x WHERE x.did = m.did)
     ON CONFLICT DO NOTHING
   `)
   /**
@@ -215,7 +241,10 @@ if (isMain(import.meta.url)) {
     console.error('SCHOOL_DID is not set; run create-school first')
     process.exit(1)
   }
-  const result = await backfillSchool({ rotateCredential: process.argv.includes('--rotate-credential') })
+  const result = await backfillSchool({
+    rotateCredential: process.argv.includes('--rotate-credential'),
+    force: process.argv.includes('--force'),
+  })
   const rows = Object.entries(result.stamped).filter(([, n]) => n > 0)
   console.log(
     `school row ensured; credential ${result.credential}; memberships ${result.memberships}` +

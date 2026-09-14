@@ -243,6 +243,41 @@ describe('backfillSchool', () => {
   })
 })
 
+describe('backfillSchool refuses once a second school exists', () => {
+  it('refuses with two schools', async () => {
+    if (!available) return
+    await testDb().insert(school).values({ did: OTHER_SCHOOL, label: 'denver', name: 'Denver', handle: 'denver.freeskool.test' })
+
+    await expect(backfillSchool({ db: testDb() })).rejects.toThrow(/refusing to back-fill/)
+  })
+
+  it('--force runs anyway', async () => {
+    if (!available) return
+    await testDb().insert(school).values({ did: OTHER_SCHOOL, label: 'denver', name: 'Denver', handle: 'denver.freeskool.test' })
+    await testDb().insert(member).values({ did: MEMBER_A, door: 'custodial' })
+
+    const result = await backfillSchool({ db: testDb(), force: true })
+
+    expect(result.schoolDid).toBe(SCHOOL)
+    expect(result.memberships).toBe(1)
+  })
+
+  it('gives a Denver-only member no Boulder membership on re-run', async () => {
+    if (!available) return
+    await testDb().insert(school).values({ did: OTHER_SCHOOL, label: 'denver', name: 'Denver', handle: 'denver.freeskool.test' })
+    // MEMBER_A joined Denver only: a row in the global fs_member table (every door writes
+    // one) but their only fs_membership row is Denver's.
+    await testDb().insert(member).values({ did: MEMBER_A, door: 'oauth' })
+    await testDb().insert(membership).values({ did: MEMBER_A, schoolDid: OTHER_SCHOOL, door: 'oauth' })
+
+    const result = await backfillSchool({ db: testDb(), force: true })
+
+    expect(result.memberships).toBe(0)
+    const rows = await testDb().select().from(membership).where(eq(membership.did, MEMBER_A))
+    expect(rows.map((r) => r.schoolDid)).toEqual([OTHER_SCHOOL])
+  })
+})
+
 /** One row in each per-school table, with the pre-existing ones already owned elsewhere. */
 async function seedOneRowPerTable(): Promise<void> {
   const db = testDb()

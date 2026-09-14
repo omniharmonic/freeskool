@@ -100,10 +100,12 @@ export async function isMemberOf(did: string, schoolDid: string, db: Db = getDb(
 }
 
 /**
- * "List me in this school's directory" — per membership. Falls back to the member's
- * GLOBAL `fs_member_prefs` row while the two coexist (MS §9 E keeps the old column for
- * one release), and to `true` when neither exists, because the directory is listed-by-
- * default and opt-out (spec §3 R-1).
+ * "List me in this school's directory" — per membership. The old global
+ * `fs_member_prefs` row is consulted only for the LEGACY school, and only while it has no
+ * membership row yet (MS §9 E keeps the old column for one release, mirroring
+ * `publicRoleOptIn` below): a Boulder opt-out must never travel to Denver (MS §2). Falls
+ * back to `true` when neither exists, because the directory is listed-by-default and
+ * opt-out (spec §3 R-1).
  */
 export async function directoryListing(did: string, schoolDid: string, db: Db = getDb()): Promise<boolean> {
   const rows = await db
@@ -112,6 +114,7 @@ export async function directoryListing(did: string, schoolDid: string, db: Db = 
     .where(and(eq(membership.did, did), eq(membership.schoolDid, schoolDid)))
     .limit(1)
   if (rows.length > 0) return rows[0]!.directoryListing
+  if (schoolDid !== legacySchoolDid()) return true
   const prefs = await db
     .select({ directoryListing: memberPrefs.directoryListing })
     .from(memberPrefs)

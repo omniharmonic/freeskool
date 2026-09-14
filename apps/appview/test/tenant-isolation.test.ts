@@ -483,8 +483,17 @@ beforeEach(async () => {
    * untested and therefore free to drift either way.
    */
   await db.insert(appMeta).values([
-    { key: `profile:${MEMBER_A}`, value: { displayName: 'Alice', bio: 'welder', publicListing: true } },
+    {
+      key: `profile:${MEMBER_A}`,
+      // The avatar is app-side profile data, not a public claim: it exercises
+      // `GET /api/members/:did/avatar`, gated on `memberVisible` (per-school), not on
+      // `publicListing` the way `GET /api/profiles/:did` is.
+      value: { displayName: 'Alice', bio: 'welder', publicListing: true, avatar: { data: 'AAAA', alt: '', revision: '1' } },
+    },
     { key: `profile:${MEMBER_B}`, value: { displayName: 'Bruno', bio: 'welder', publicListing: true } },
+    // A's class has a cover image; B's does not. `GET /api/events/:id/image` scopes
+    // through `loadEvent`, same as `.ics` — this gives it a 200-vs-404 to actually prove.
+    { key: `event-presentation:${EVENT_A}`, value: { cover: { data: 'AAAA', alt: '', revision: '1' } } },
   ])
 
   requestRecords.push({
@@ -539,7 +548,20 @@ const ROUTES: RouteCase[] = [
     expect: { a: 200, b: 404 },
     present: (on) => (on === 'a' ? [MEMBER_A] : []),
   },
+  {
+    name: "a member's avatar",
+    path: `/api/members/${encodeURIComponent(MEMBER_A)}/avatar`,
+    viewer: 'memberBoth',
+    // Gated on `memberVisible`, the same per-school membership check as the profile above.
+    expect: { a: 200, b: 404 },
+  },
   { name: 'people on a skill page', path: `/api/skills/${encodeURIComponent(SKILL)}`, viewer: 'memberBoth', present: member },
+  {
+    name: "who publicly claims a skill — scoped to the viewer's school (MS §10)",
+    path: `/api/practitioners?skill=${encodeURIComponent(SKILL)}`,
+    viewer: 'anon',
+    present: member,
+  },
   {
     name: 'my vouches',
     path: '/api/me/attestations',
@@ -614,6 +636,13 @@ const ROUTES: RouteCase[] = [
     present: (on) => (on === 'a' ? ['issue-a'] : []),
   },
   {
+    name: 'the most recently composed newsletter',
+    path: '/api/admin/newsletter/last',
+    viewer: 'stewardA',
+    expect: { a: 200, b: 403 },
+    present: (on) => (on === 'a' ? ['issue-a'] : []),
+  },
+  {
     name: 'the peer registry',
     path: '/api/admin/peers',
     viewer: 'stewardA',
@@ -628,6 +657,20 @@ const ROUTES: RouteCase[] = [
     viewer: 'memberBoth',
     expect: { a: 200, b: 404 },
     present: (on) => (on === 'a' ? [EVENT_A, 'Class in A'] : []),
+  },
+  {
+    name: "a class's .ics file",
+    path: `/api/events/${encodeURIComponent(EVENT_A)}.ics`,
+    viewer: 'anon',
+    expect: { a: 200, b: 404 },
+    present: (on) => (on === 'a' ? [EVENT_A] : []),
+  },
+  {
+    name: "a class's cover image",
+    path: `/api/events/${encodeURIComponent(EVENT_A)}/image`,
+    viewer: 'anon',
+    // A's class has a cover; the same URI is simply not A's class from B's host.
+    expect: { a: 200, b: 404 },
   },
   {
     name: "a class's attendance counts",
@@ -656,6 +699,14 @@ const ROUTES: RouteCase[] = [
     viewer: 'memberBoth',
     // The SAME member, the SAME evidence, two policies: Host in A, Member in B.
     present: (on) => [`"school":"${on === 'a' ? SCHOOL_A : SCHOOL_B}"`, `"role":${on === 'a' ? Role.Host : Role.Member}`],
+  },
+  {
+    name: 'who I am and where — /api/auth/me',
+    path: '/api/auth/me',
+    viewer: 'memberBoth',
+    // Same member, same evidence, two policies — same fact `/api/me` pins, from the door
+    // route instead of the profile one.
+    present: (on) => [`"school":{"did":"${on === 'a' ? SCHOOL_A : SCHOOL_B}"`, `"role":${on === 'a' ? Role.Host : Role.Member}`],
   },
   {
     name: 'my badges',
@@ -712,11 +763,6 @@ const ROUTES: RouteCase[] = [
 const GLOBAL_ROUTES: Array<{ name: string; path: string; why: string }> = [
   { name: 'the skill taxonomy', path: '/api/skills', why: 'one shared tree (MS §6)' },
   {
-    name: 'who publicly claims a skill',
-    path: `/api/practitioners?skill=${encodeURIComponent(SKILL)}`,
-    why: 'the public web directory, gated on each holder\'s own `publicListing` opt-in',
-  },
-  {
     name: 'a published profile',
     path: `/api/profiles/${encodeURIComponent(MEMBER_A)}`,
     why: 'the member wrote it and published it; it names no school',
@@ -765,18 +811,6 @@ describe('the surfaces that are global on purpose', () => {
       expect(bodies[0], `${route.path} differs between hosts`).toBe(bodies[1])
     })
   }
-
-  it('the public practitioner directory lists both cities\' publicly listed members, and names no school', async () => {
-    if (!available) return
-    const res = await createApp().request(`http://${HOST_A}/api/practitioners?skill=${encodeURIComponent(SKILL)}`, {
-      headers: { Host: HOST_A },
-    })
-    const text = await res.text()
-    // The claim is the member's own public record; the directory is their own opt-in.
-    for (const did of [MEMBER_A, MEMBER_B]) expect(text).toContain(did)
-    // ...and nothing in it says WHICH school anyone belongs to, which is the R9 line.
-    for (const schoolDid of [SCHOOL_A, SCHOOL_B]) expect(text).not.toContain(schoolDid)
-  })
 
   it('the members DIRECTORY, by contrast, is strictly per school', async () => {
     if (!available) return

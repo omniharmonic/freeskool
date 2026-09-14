@@ -14,7 +14,6 @@ export {
   credentialFor,
   evictAllSchoolActors,
   evictSchoolActor,
-  schoolActor,
   schoolDid,
   setSchoolActor,
 } from './school-actors.js'
