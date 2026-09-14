@@ -53,6 +53,7 @@ import {
   schoolCredential,
   schoolDomain,
   membership,
+  peer,
   skillProposal,
   steward,
 } from '../src/db/schema.js'
@@ -204,6 +205,28 @@ describe('backfillSchool', () => {
     }
   })
 
+  /**
+   * `fs_peer`'s primary key CONTAINS `school_did` (migration 0012), so an unstamped row
+   * cannot be updated into place when a stamped twin already holds the host — the UPDATE
+   * raises a primary-key violation and aborts the whole backfill. That is what a
+   * deployment looks like when the new code booted (`seedPeersFromEnv` writes the legacy
+   * DID explicitly) before anybody back-filled, and it is exactly the order this project's
+   * dev box ran in.
+   */
+  it('drops an unstamped fs_peer row that a stamped twin already shadows', async () => {
+    if (!available) return
+    await seedOneRowPerTable()
+    await testDb().insert(peer).values({ host: 'https://pds.example', source: 'env', schoolDid: SCHOOL })
+
+    const result = await backfillSchool({ db: testDb() })
+
+    expect(result.shadowedPeers).toBe(1)
+    const rows = await testDb().select().from(peer)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.schoolDid).toBe(SCHOOL)
+    expect(rows[0]!.host).toBe('https://pds.example')
+  })
+
   it('is idempotent: a second run writes nothing', async () => {
     if (!available) return
     await testDb().insert(member).values({ did: MEMBER_A, door: 'custodial' })
@@ -239,6 +262,9 @@ async function seedOneRowPerTable(): Promise<void> {
   await db.insert(requestRsvp).values({ requestUri: 'at://r/1', did: MEMBER_A })
   await db.insert(rsvp).values({ id: 'r1', eventUri: EVENT, did: MEMBER_A, status: 'going' })
   await db.insert(skillProposal).values({ id: 'p1', skillUri: 'at://s/2', proposerDid: MEMBER_A })
+  // `fs_peer` was missing from `STAMPED_TABLES` until Task 11's privacy audit found an
+  // unstamped row on the dev box: the `PEER_PDS_HOSTS` seed rows were never stamped at all.
+  await db.insert(peer).values({ host: 'https://pds.example', source: 'env', schoolDid: '' })
 
   // Already school-scoped before this phase, and owned by ANOTHER school: the sweep is
   // guarded by `school_did = ''`, so these must come out untouched.

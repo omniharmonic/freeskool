@@ -57,6 +57,16 @@ export const STAMPED_TABLES = [
   'fs_notification_feed',
   'fs_notification_outbox',
   'fs_notification_sent',
+  /**
+   * `fs_peer` was MISSING here until Task 11's privacy audit went looking for unstamped
+   * rows and found one on the dev box. Its `school_did` was nullable before migration
+   * 0012, which fills the NULLs with `''` — and nothing then stamped them, so a
+   * deployment's `PEER_PDS_HOSTS` seed rows stayed unstamped forever. Harmless while
+   * `activePeerHosts()` takes the union across schools (Task 3), but it leaves a row
+   * MS §10.3 is right to flag, and `listPeers(schoolDid)` — what a steward sees and
+   * edits — only finds it through the legacy school's `''` widening.
+   */
+  'fs_peer',
   'fs_policy_cache',
   'fs_request_rsvp',
   'fs_rsvp',
@@ -71,6 +81,8 @@ export interface BackfillResult {
   memberships: number
   credential: 'imported' | 'rotated' | 'present' | 'skipped'
   stamped: Record<string, number>
+  /** Unstamped `fs_peer` rows dropped because a stamped twin already held the host. */
+  shadowedPeers: number
 }
 
 export async function backfillSchool(
@@ -86,10 +98,36 @@ export async function backfillSchool(
   const credential = await importCredential(db, did, options.rotateCredential ?? false)
   const memberships = await copyMemberships(db, did)
 
+  // `fs_peer`'s primary key CONTAINS `school_did`, so an unstamped row cannot simply be
+  // updated into place when a stamped twin already exists. See `dropShadowedPeers`.
+  const shadowedPeers = await dropShadowedPeers(db, did)
+
   const stamped: Record<string, number> = {}
   for (const table of STAMPED_TABLES) stamped[table] = await stamp(db, table, did)
 
-  return { schoolDid: did, memberships, credential, stamped }
+  return { schoolDid: did, memberships, credential, stamped, shadowedPeers }
+}
+
+/**
+ * `fs_peer`'s PK became `(school_did, host)` in migration 0012, and `seedPeersFromEnv`
+ * writes the legacy DID explicitly — so a deployment that re-seeded `PEER_PDS_HOSTS`
+ * after deploying and before back-filling has TWO rows per host, `('', host)` and
+ * `(<legacy>, host)`. Stamping the first would collide with the second on the primary
+ * key and abort the whole backfill (observed on the dev box).
+ *
+ * The unstamped row is the older, less specific copy of the same fact — the same host,
+ * the same school, since `''` IS the legacy school — so dropping it loses nothing. It is
+ * dropped only where a stamped twin exists; a lone unstamped row is stamped normally.
+ * `disabled_at` is respected: a host a steward disabled on the stamped row stays disabled,
+ * and the shadow row cannot resurrect it.
+ */
+async function dropShadowedPeers(db: Db, did: string): Promise<number> {
+  const result = await db.execute(sql`
+    DELETE FROM fs_peer p
+     WHERE p.school_did = ''
+       AND EXISTS (SELECT 1 FROM fs_peer q WHERE q.host = p.host AND q.school_did = ${did})
+  `)
+  return result.rowCount ?? 0
 }
 
 /**
@@ -179,7 +217,10 @@ if (isMain(import.meta.url)) {
   }
   const result = await backfillSchool({ rotateCredential: process.argv.includes('--rotate-credential') })
   const rows = Object.entries(result.stamped).filter(([, n]) => n > 0)
-  console.log(`school row ensured; credential ${result.credential}; memberships ${result.memberships}`)
+  console.log(
+    `school row ensured; credential ${result.credential}; memberships ${result.memberships}` +
+      (result.shadowedPeers > 0 ? `; shadowed peer rows dropped ${result.shadowedPeers}` : ''),
+  )
   console.log(rows.length === 0 ? 'no rows needed stamping' : rows.map(([t, n]) => `${t}=${n}`).join(' '))
   await closeDb()
 }
