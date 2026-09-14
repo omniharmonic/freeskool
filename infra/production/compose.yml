@@ -105,6 +105,11 @@ services:
       WEB_HOST: ${WEB_HOST:?Set WEB_HOST}
       PDS_HOST: ${PDS_HOST:?Set PDS_HOST}
       PDS_HANDLE_DOMAIN: ${PDS_HANDLE_DOMAIN:?Set PDS_HANDLE_DOMAIN}
+      # The school/app wildcard. PERMANENT, and the reason cleaning up a hostname migration
+      # does not take `boulder.freeskool.xyz` and `www.freeskool.xyz` offline with it.
+      # Caddy gets it alongside PDS_HANDLE_DOMAIN in one site block, which deduplicates the
+      # two while they are still the same name.
+      SCHOOL_DOMAIN_SUFFIX: ${SCHOOL_DOMAIN_SUFFIX:?Set SCHOOL_DOMAIN_SUFFIX}
       # Unset outside a hostname migration, in which case these become `.invalid` sentinel
       # names: valid site addresses that resolve nowhere and therefore serve nobody. The
       # default is spelled here rather than left to the Caddyfile's `{$VAR:default}`

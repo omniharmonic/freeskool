@@ -2,18 +2,22 @@
  * The neutral-hostname migration (`scripts/migrate-pds-hostname.ts`), against a fake PDS
  * and a fake plc.directory.
  *
- * What is worth asserting here is the PLANNING and the VERIFICATION — who moves, to which
- * handle, what is skipped and why, and that a second run is a no-op — because those are
- * the parts a real run cannot be asked twice about. The two writes themselves
- * (a self-signed PLC operation POSTed to the directory, then
+ * What is worth asserting here is the PLANNING, the GUARDS and the VERIFICATION — who
+ * moves, to which handle, what is refused and why, and that a second run repairs rather
+ * than repeats — because those are the parts a real run cannot be asked twice about. The
+ * two writes themselves (a self-signed PLC operation POSTed to the directory, then
  * `com.atproto.admin.updateAccountHandle`) were proven against the real dev PDS and the
  * real plc.directory in the rehearsal the runbook records; here the ports are fakes that
  * record what the script asked for, so the ORDER and the SHAPE of those asks are pinned.
  *
- * The rotation-key helpers are exercised for real: a private key really is imported,
- * a `did:key` really is derived, and an operation really is signed and verified — no
- * network, but no stubbing of the cryptography either, because a silently wrong signature
- * is exactly the failure that would only show up against production.
+ * The rotation-key helpers are exercised for real: a key really is imported, a `did:key`
+ * really is derived, and an operation really is signed and verified — no network, but no
+ * stubbing of the cryptography either, because a silently wrong signature is exactly the
+ * failure that would only show up against production.
+ *
+ * NO LIVE KEY MATERIAL LIVES IN THIS FILE. The key under test is generated fresh in
+ * `beforeAll`; the one test that pins our `did:key` derivation against a key the real PDS
+ * has published reads both halves from the environment and skips when they are absent.
  */
 process.env.DATABASE_URL ??= 'postgres://freeschool:freeschool@localhost:5434/freeschool_test'
 process.env.SESSION_SECRET ??= 'migrate-hostname-test-session-secret'
@@ -21,49 +25,81 @@ process.env.CUSTODY_KEYS ??= `v1:${Buffer.alloc(32, 7).toString('base64')}`
 process.env.FEEDBACK_BALLOT_PEPPER ??= 'migrate-hostname-test-pepper'
 
 import crypto from 'node:crypto'
-import { describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it } from 'vitest'
 import { encode as cborEncode } from '@atproto/lex-cbor'
 import {
   type AuditEntry,
   type CurrentState,
   type PdsPort,
+  type PlanEntry,
   type PlanOptions,
   type PlcOperation,
   type PlcPort,
+  type RotationKey,
   type RunOptions,
   type StorePort,
   accountKind,
   buildUpdateOp,
+  checkServiceEndpoint,
+  markCollisions,
   migratePdsHostname,
+  normalizeEndpoint,
   normalizeOp,
   plannedHandle,
   rotationKeyFromHex,
+  sec1Der,
   selected,
+  shortDid,
+  unknownFlags,
   verifyAccount,
   withEndpoint,
 } from '../scripts/migrate-pds-hostname.js'
 
-/** The dev PDS's rotation key. Throwaway; it signs nothing outside this file. */
-const KEY_HEX = '0000000000000000000000000000000000000000000000000000000000000000'
-const KEY = rotationKeyFromHex(KEY_HEX)
+/* ───────────────────── a throwaway key, generated here, never committed ─────────── */
 
-const SCHOOL = 'did:plc:school'
-const AUTHORITY = 'did:plc:authority'
-const MEMBER = 'did:plc:member'
-const OWNED = 'did:plc:owned'
+/**
+ * A fresh secp256k1 key per run. Node gives SEC1 DER as
+ * `30 LL 02 01 01 04 20 <32 bytes> …`; the scalar is those 32 bytes. Asserted rather than
+ * searched for, so a change in Node's encoding fails loudly instead of silently handing
+ * us the wrong bytes.
+ */
+function freshKeyHex(): string {
+  const { privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'secp256k1' })
+  const der = Buffer.from(privateKey.export({ format: 'der', type: 'sec1' }) as Buffer)
+  expect([...der.subarray(0, 2)]).toEqual([0x30, der.length - 2])
+  expect([...der.subarray(2, 7)]).toEqual([0x02, 0x01, 0x01, 0x04, 0x20])
+  return der.subarray(7, 39).toString('hex')
+}
+
+let KEY_HEX: string
+let KEY: RotationKey
+beforeAll(() => {
+  KEY_HEX = freshKeyHex()
+  KEY = rotationKeyFromHex(KEY_HEX)
+})
+
+const SCHOOL = 'did:plc:boulderschool000000000'
+const DENVER = 'did:plc:denverschool0000000000'
+const AUTHORITY = 'did:plc:authority00000000000'
+const MEMBER = 'did:plc:member000000000000000'
+const OWNED = 'did:plc:owned0000000000000000'
 
 const OLD_ENDPOINT = 'https://pds.freeskool.xyz'
 const NEW_ENDPOINT = 'https://pds.freeskool.directory'
 
-const OPTS: PlanOptions = {
+const SCHOOLS = new Map([
+  [SCHOOL, 'boulder'],
+  [DENVER, 'denver'],
+])
+
+const OPTS = (): PlanOptions => ({
   handleDomain: 'freeskool.directory',
   serviceEndpoint: NEW_ENDPOINT,
-  schoolDid: SCHOOL,
+  schools: SCHOOLS,
   authorityDid: AUTHORITY,
-  schoolLabel: 'boulder',
   authorityLabel: 'skills',
   accounts: 'custodial',
-}
+})
 
 const op = (over: Partial<PlcOperation> = {}): PlcOperation => ({
   type: 'plc_operation',
@@ -76,46 +112,71 @@ const op = (over: Partial<PlcOperation> = {}): PlcOperation => ({
   ...over,
 })
 
-const stateOf = (o: PlcOperation): CurrentState => ({
-  endpoint: o.services.atproto_pds?.endpoint,
-  publishedHandle: o.alsoKnownAs[0]?.replace(/^at:\/\//, ''),
-  rotationKeys: o.rotationKeys,
-})
-
 /* ─────────────────────────────── the rotation key ──────────────────────────────── */
 
-describe('the PDS rotation key, held locally', () => {
-  it('derives the same did:key the PDS publishes in rotationKeys', () => {
-    // Taken verbatim from the dev PDS's own DID documents on plc.directory, which are
-    // signed by this very key: if our SEC1 import or point compression were wrong, this
-    // string would differ and every operation we signed would be rejected.
-    expect(KEY.didKey).toBe('did:key:zQ3shjPcvoVJmzEY3cwB37RwfMzo2rPWSqT28EFuawPdM5V4y')
-  })
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+/** An independent decoder, so the did:key assertion is not the encoder marking its own work. */
+function base58Decode(s: string): Buffer {
+  let n = 0n
+  for (const ch of s) {
+    const i = BASE58.indexOf(ch)
+    if (i < 0) throw new Error(`not base58btc: ${ch}`)
+    n = n * 58n + BigInt(i)
+  }
+  let hex = n.toString(16)
+  if (hex.length % 2) hex = `0${hex}`
+  const body = Buffer.from(hex, 'hex')
+  let zeros = 0
+  for (const ch of s) {
+    if (ch !== '1') break
+    zeros += 1
+  }
+  return Buffer.concat([Buffer.alloc(zeros), body])
+}
 
-  it('signs dag-cbor as 64 raw bytes, base64url, with a low S', () => {
-    const sig = KEY.sign(cborEncode({ hello: 'world' }))
-    const raw = Buffer.from(sig, 'base64url')
-    expect(raw.length).toBe(64)
-    const n = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141')
-    expect(BigInt(`0x${raw.subarray(32).toString('hex')}`) <= n / 2n).toBe(true)
-  })
-
-  it('produces a signature that verifies against the derived public key', () => {
+describe('the rotation key, held locally', () => {
+  it('signs dag-cbor as 64 raw bytes, base64url, with a low S, verifiable by the public key', () => {
     const bytes = cborEncode({ type: 'plc_operation', prev: null })
     const sig = Buffer.from(KEY.sign(bytes), 'base64url')
-    const pub = crypto.createPublicKey(
-      crypto.createPrivateKey({
-        key: (() => {
-          const priv = Buffer.from(KEY_HEX, 'hex')
-          const oid = Buffer.from('06052b8104000a', 'hex')
-          const body = Buffer.concat([Buffer.from([0x02, 0x01, 0x01]), Buffer.from([0x04, 0x20]), priv, Buffer.from([0xa0, oid.length]), oid])
-          return Buffer.concat([Buffer.from([0x30, body.length]), body])
-        })(),
-        format: 'der',
-        type: 'sec1',
-      }),
-    )
+    expect(sig.length).toBe(64)
+    const n = BigInt('0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141')
+    expect(BigInt(`0x${sig.subarray(32).toString('hex')}`) <= n / 2n).toBe(true)
+    const pub = crypto.createPublicKey(crypto.createPrivateKey({ key: sec1Der(KEY_HEX), format: 'der', type: 'sec1' }))
     expect(crypto.verify('sha256', bytes, { key: pub, dsaEncoding: 'ieee-p1363' }, sig)).toBe(true)
+  })
+
+  it('derives a did:key that decodes back to the multicodec secp256k1 point', () => {
+    // Every secp256k1 did:key starts `zQ3s`; inside is 0xe7 0x01 then the 33-byte
+    // compressed point, whose X must be the public key's X. Decoded here with a decoder
+    // written independently of the encoder under test.
+    expect(KEY.didKey.startsWith('did:key:zQ3s')).toBe(true)
+    const decoded = base58Decode(KEY.didKey.replace('did:key:z', ''))
+    expect([...decoded.subarray(0, 2)]).toEqual([0xe7, 0x01])
+    expect(decoded.length).toBe(35)
+    const compressed = decoded.subarray(2)
+    expect([0x02, 0x03]).toContain(compressed[0])
+    const spki = crypto
+      .createPublicKey(crypto.createPrivateKey({ key: sec1Der(KEY_HEX), format: 'der', type: 'sec1' }))
+      .export({ format: 'der', type: 'spki' }) as Buffer
+    const point = spki.subarray(spki.length - 65)
+    expect(compressed.subarray(1).toString('hex')).toBe(point.subarray(1, 33).toString('hex'))
+    expect(compressed[0]).toBe((point[64]! & 1) === 0 ? 0x02 : 0x03)
+  })
+
+  it('rejects a key that is not 32 bytes', () => {
+    expect(() => rotationKeyFromHex('abcd')).toThrow(/32 bytes/)
+  })
+
+  /**
+   * The cross-check that matters most — our derivation against a did:key a REAL PDS has
+   * published in real DID documents — needs real key material, which does not belong in a
+   * tracked file. Set both variables to run it (the dev values live in the gitignored
+   * `infra/pds.env`); it skips otherwise.
+   */
+  const devHex = process.env.DEV_PDS_ROTATION_KEY_HEX
+  const devDidKey = process.env.DEV_PDS_ROTATION_DID_KEY
+  it.skipIf(!devHex || !devDidKey)('matches the did:key a real PDS publishes in rotationKeys', () => {
+    expect(rotationKeyFromHex(devHex!).didKey).toBe(devDidKey)
   })
 })
 
@@ -123,28 +184,46 @@ describe('the PDS rotation key, held locally', () => {
 
 describe('the endpoint operation', () => {
   it('carries everything else forward and chains on the last CID', () => {
-    const last: AuditEntry = { cid: 'bafyLAST', operation: op() }
-    const next = buildUpdateOp(last, KEY, withEndpoint(NEW_ENDPOINT))
+    // Deliberately not the minimal fixture: two rotation keys, two alsoKnownAs entries and
+    // a service that is not the PDS. Every one of them must survive untouched, because
+    // `createUpdateOp` REPLACES the document — anything we fail to carry forward is
+    // silently deleted from a permanent public record.
+    const rich = op({
+      rotationKeys: [KEY.didKey, 'did:key:zQ3shRecoveryKeyOfTheirOwn'],
+      alsoKnownAs: ['at://calmalder301.freeskool.xyz', 'at://calmalder.example.com'],
+      services: {
+        atproto_pds: { type: 'AtprotoPersonalDataServer', endpoint: OLD_ENDPOINT },
+        atproto_labeler: { type: 'AtprotoLabeler', endpoint: 'https://labeler.example.com' },
+      },
+    })
+    const next = buildUpdateOp({ cid: 'bafyLAST', operation: rich }, KEY, withEndpoint(NEW_ENDPOINT))
     expect(next.prev).toBe('bafyLAST')
     expect(next.services.atproto_pds).toEqual({ type: 'AtprotoPersonalDataServer', endpoint: NEW_ENDPOINT })
+    expect(next.services.atproto_labeler).toEqual({ type: 'AtprotoLabeler', endpoint: 'https://labeler.example.com' })
+    expect(next.rotationKeys).toEqual([KEY.didKey, 'did:key:zQ3shRecoveryKeyOfTheirOwn'])
     // The handle is NOT touched here: it is the PDS's `admin.updateAccountHandle` that
     // moves it, in the second step, so the identity event follows the final document.
-    expect(next.alsoKnownAs).toEqual(['at://calmalder301.freeskool.xyz'])
-    expect(next.rotationKeys).toEqual([KEY.didKey])
+    expect(next.alsoKnownAs).toEqual(['at://calmalder301.freeskool.xyz', 'at://calmalder.example.com'])
     expect(next.verificationMethods).toEqual({ atproto: 'did:key:zQ3shSigningKey' })
     expect(next.sig).toBeTypeOf('string')
   })
 
+  it('normalizes a trailing slash, so "already migrated" is not a punctuation question', () => {
+    expect(normalizeEndpoint('https://pds.freeskool.directory/')).toBe(NEW_ENDPOINT)
+    expect(normalizeEndpoint('pds.freeskool.directory//')).toBe(NEW_ENDPOINT)
+    const next = buildUpdateOp({ cid: 'c', operation: op() }, KEY, withEndpoint(`${NEW_ENDPOINT}/`))
+    expect(next.services.atproto_pds!.endpoint).toBe(NEW_ENDPOINT)
+  })
+
   it('lifts a legacy `create` genesis operation into the modern shape', () => {
-    const legacy = {
-      type: 'create' as const,
+    const n = normalizeOp({
+      type: 'create',
       signingKey: 'did:key:zQ3shSign',
       recoveryKey: 'did:key:zQ3shRecover',
       handle: 'old.freeskool.xyz',
       service: 'pds.freeskool.xyz',
       prev: null,
-    }
-    const n = normalizeOp(legacy)
+    })
     expect(n.type).toBe('plc_operation')
     expect(n.alsoKnownAs).toEqual(['at://old.freeskool.xyz'])
     expect(n.services.atproto_pds?.endpoint).toBe('https://pds.freeskool.xyz')
@@ -156,21 +235,93 @@ describe('the endpoint operation', () => {
   })
 })
 
+/* ──────────────────────── the endpoint guard (blocking review #3) ───────────────── */
+
+describe('--service-endpoint is checked before anything is signed', () => {
+  const at = (pdsHost: string, allowLoopback = false) => ({ pdsHost, allowLoopback })
+
+  it('accepts the real thing', () => {
+    expect(checkServiceEndpoint(NEW_ENDPOINT, at('pds.freeskool.directory'))).toEqual({ ok: true, endpoint: NEW_ENDPOINT })
+    expect(checkServiceEndpoint(`${NEW_ENDPOINT}/`, at('pds.freeskool.directory'))).toEqual({ ok: true, endpoint: NEW_ENDPOINT })
+  })
+
+  it('refuses the failure this guard exists for: a loopback endpoint on a production run', () => {
+    // `config().PDS_URL` defaults to http://localhost:3000. One unset variable used to be
+    // all that stood between an --apply and a permanent loopback endpoint in every DID doc.
+    expect(checkServiceEndpoint('http://localhost:3000', at('pds.freeskool.directory'))).toMatchObject({ ok: false })
+    expect(checkServiceEndpoint('https://127.0.0.1', at('pds.freeskool.directory'))).toMatchObject({ ok: false })
+    expect(checkServiceEndpoint('https://10.0.0.5', at('pds.freeskool.directory'))).toMatchObject({ ok: false })
+    expect(checkServiceEndpoint('https://192.168.1.9', at('pds.freeskool.directory'))).toMatchObject({ ok: false })
+    expect(checkServiceEndpoint('https://172.20.3.4', at('pds.freeskool.directory'))).toMatchObject({ ok: false })
+  })
+
+  it('refuses http, reserved TLDs, IP literals, paths and a host that is not the PDS', () => {
+    expect(checkServiceEndpoint('http://pds.freeskool.directory', at('pds.freeskool.directory'))).toMatchObject({ ok: false })
+    expect(checkServiceEndpoint('https://pds.freeskool.test', at('pds.freeskool.test'))).toMatchObject({ ok: false })
+    expect(checkServiceEndpoint('https://93.184.216.34', at('93.184.216.34'))).toMatchObject({ ok: false })
+    expect(checkServiceEndpoint('https://pds.freeskool.directory/xrpc', at('pds.freeskool.directory'))).toMatchObject({ ok: false })
+    expect(checkServiceEndpoint('https://pds.freeskool.directory?a=1', at('pds.freeskool.directory'))).toMatchObject({ ok: false })
+    expect(checkServiceEndpoint('https://pds.elsewhere.org', at('pds.freeskool.directory'))).toMatchObject({
+      ok: false,
+      reason: expect.stringContaining('does not match'),
+    })
+    expect(checkServiceEndpoint('not a url', at('pds.freeskool.directory'))).toMatchObject({ ok: false })
+  })
+
+  it('opens the loopback escape only when BOTH ends are loopback', () => {
+    expect(checkServiceEndpoint('http://127.0.0.1:3000', at('localhost:3000', true))).toEqual({
+      ok: true,
+      endpoint: 'http://127.0.0.1:3000',
+    })
+    // A production PDS with a loopback endpoint is the exact accident to prevent…
+    expect(checkServiceEndpoint('http://127.0.0.1:3000', at('pds.freeskool.directory', true))).toMatchObject({ ok: false })
+    // …and so is the flag being passed where the endpoint is public anyway.
+    expect(checkServiceEndpoint(NEW_ENDPOINT, at('localhost:3000', true))).toMatchObject({ ok: false })
+  })
+})
+
+/* ─────────────────────────────────── flag parsing ───────────────────────────────── */
+
+describe('flags', () => {
+  it('rejects a typo instead of silently doing the default thing', () => {
+    expect(unknownFlags(['--handle-domain=x', '--apply'])).toEqual([])
+    expect(unknownFlags(['--handle-domian=x'])).toEqual(['handle-domian'])
+    expect(unknownFlags(['--service-endpoint=https://x', '--dryrun'])).toEqual(['dryrun'])
+    expect(unknownFlags(['--', '--dry-run'])).toEqual([])
+  })
+
+  it('truncates a DID to a hint rather than a name', () => {
+    expect(shortDid('did:plc:tgb57hgxmgcxmyeihwj5ker4')).toBe('did:plc:tgb5…')
+  })
+})
+
 /* ───────────────────────────────────── planning ─────────────────────────────────── */
 
 describe('planning the new handles (ruling 3)', () => {
   const custodial = new Set([MEMBER])
-  it('gives the school and the authority their ruled labels, and members their own prefix', () => {
-    expect(plannedHandle({ did: SCHOOL, handle: 'boulder.freeskool.xyz' }, 'school', OPTS)).toBe('boulder.freeskool.directory')
-    expect(plannedHandle({ did: AUTHORITY, handle: 'taxonomy.freeskool.xyz' }, 'authority', OPTS)).toBe('skills.freeskool.directory')
-    expect(plannedHandle({ did: MEMBER, handle: 'calmalder301.freeskool.xyz' }, 'custodial', OPTS)).toBe('calmalder301.freeskool.directory')
+
+  it('gives each school ITS OWN label, the authority the ruled one, and members their prefix', () => {
+    const o = OPTS()
+    expect(plannedHandle({ did: SCHOOL, handle: 'boulder.freeskool.xyz' }, 'school', o)).toBe('boulder.freeskool.directory')
+    // The second school is the case a config-only school label gets wrong: Denver's actor
+    // must become denver.<domain>, never <whatever its handle prefix was>.<domain>.
+    expect(plannedHandle({ did: DENVER, handle: 'denverfreeskool.freeskool.xyz' }, 'school', o)).toBe('denver.freeskool.directory')
+    expect(plannedHandle({ did: AUTHORITY, handle: 'skills.freeskool.xyz' }, 'authority', o)).toBe('skills.freeskool.directory')
+    expect(plannedHandle({ did: MEMBER, handle: 'calmalder301.freeskool.xyz' }, 'custodial', o)).toBe('calmalder301.freeskool.directory')
+  })
+
+  it('refuses a school with no label rather than inventing one from its handle', () => {
+    const o = { ...OPTS(), schools: new Map<string, string>() }
+    expect(() => plannedHandle({ did: SCHOOL, handle: 'boulder.freeskool.xyz' }, 'school', o)).toThrow(/no label/)
   })
 
   it('classifies by DID, not by the shape of the handle', () => {
-    expect(accountKind(SCHOOL, OPTS, custodial)).toBe('school')
-    expect(accountKind(AUTHORITY, OPTS, custodial)).toBe('authority')
-    expect(accountKind(MEMBER, OPTS, custodial)).toBe('custodial')
-    expect(accountKind(OWNED, OPTS, custodial)).toBe('other')
+    const o = OPTS()
+    expect(accountKind(SCHOOL, o, custodial)).toBe('school')
+    expect(accountKind(DENVER, o, custodial)).toBe('school')
+    expect(accountKind(AUTHORITY, o, custodial)).toBe('authority')
+    expect(accountKind(MEMBER, o, custodial)).toBe('custodial')
+    expect(accountKind(OWNED, o, custodial)).toBe('other')
   })
 
   it('leaves a member who took ownership out of --accounts=custodial, and in of --accounts=all', () => {
@@ -179,11 +330,43 @@ describe('planning the new handles (ruling 3)', () => {
     expect(selected(MEMBER, 'custodial', { accounts: 'custodial' })).toBe(true)
     expect(selected(MEMBER, 'custodial', { accounts: 'all', only: new Set([OWNED]) })).toBe(false)
   })
+})
 
-  it('never classifies an account as the school when SCHOOL_DID is unset', () => {
-    // `config().SCHOOL_DID` defaults to the empty string; a `did` of '' cannot occur, but
-    // an unset school must not accidentally swallow the first account it sees.
-    expect(accountKind(MEMBER, { schoolDid: '', authorityDid: '' }, custodial)).toBe('custodial')
+describe('collisions, caught before anything is signed', () => {
+  const entry = (did: string, newHandle: string, kind: PlanEntry['kind'] = 'custodial'): PlanEntry => ({
+    did,
+    kind,
+    currentHandle: 'x.freeskool.xyz',
+    newHandle,
+    needsEndpoint: true,
+    needsHandle: true,
+    needsDb: false,
+  })
+  const reserved = new Set(['boulder', 'denver', 'skills', 'www', 'admin'])
+
+  it('flags two accounts that would land on one handle', () => {
+    const out = markCollisions([entry('did:a', 'cal.freeskool.directory'), entry('did:b', 'cal.freeskool.directory')], reserved)
+    expect(out.every((e) => e.skip === 'handle-taken')).toBe(true)
+    expect(out.every((e) => !e.needsEndpoint && !e.needsHandle)).toBe(true)
+  })
+
+  it('flags a member whose prefix is a reserved label, but not the school or authority using theirs', () => {
+    const out = markCollisions(
+      [
+        entry('did:m', 'boulder.freeskool.directory'),
+        entry(SCHOOL, 'boulder2.freeskool.directory', 'school'),
+        entry(AUTHORITY, 'skills.freeskool.directory', 'authority'),
+      ],
+      reserved,
+    )
+    expect(out[0]!.skip).toBe('handle-taken')
+    expect(out[1]!.skip).toBeUndefined()
+    expect(out[2]!.skip).toBeUndefined()
+  })
+
+  it('leaves an ordinary plan alone', () => {
+    const out = markCollisions([entry('did:a', 'cal.freeskool.directory'), entry('did:b', 'mara.freeskool.directory')], reserved)
+    expect(out.every((e) => e.skip === undefined)).toBe(true)
   })
 })
 
@@ -193,27 +376,39 @@ interface Fakes {
   plc: PlcPort
   pds: PdsPort
   store: StorePort
+  accounts: Record<string, { handle: string; op: PlcOperation }>
+  db: Map<string, string>
+  cache: Map<string, string>
   submitted: PlcOperation[]
   handleCalls: Array<{ did: string; handle: string }>
-  writes: Array<{ did: string; handle: string; cached: boolean }>
   order: string[]
+  failures: Array<{ did: string; reason: string }>
 }
 
-function fakes(init: Record<string, { handle: string; op: PlcOperation }>): Fakes {
+function fakes(init: Record<string, { handle: string; op: PlcOperation }>, db?: Map<string, string>): Fakes {
   const accounts = { ...init }
   const submitted: PlcOperation[] = []
   const handleCalls: Array<{ did: string; handle: string }> = []
-  const writes: Array<{ did: string; handle: string; cached: boolean }> = []
   const order: string[] = []
+  const failures: Array<{ did: string; reason: string }> = []
+  const rows = db ?? new Map([[MEMBER, 'calmalder301.freeskool.xyz']])
+  const cache = new Map<string, string>()
+  let heads = 0
   const plc: PlcPort = {
     async lastOp(did) {
       const a = accounts[did]
       if (!a) throw new Error('unknown did')
-      return { cid: `bafy-${did}-${submitted.length}`, operation: a.op }
+      return { cid: `bafy-${did}-${heads}`, operation: a.op }
+    },
+    async auditLog(did) {
+      return [{ cid: `bafy-${did}-${heads}`, operation: accounts[did]!.op }]
     },
     async submit(did, o) {
       order.push(`plc:${did}`)
+      // The real directory rejects an operation whose `prev` is not the current head.
+      if (o.prev !== `bafy-${did}-${heads}`) throw new Error('InvalidRequest: prev is not the head')
       submitted.push(o)
+      heads += 1
       accounts[did] = { handle: accounts[did]!.handle, op: o }
     },
     async document(did) {
@@ -235,39 +430,51 @@ function fakes(init: Record<string, { handle: string; op: PlcOperation }>): Fake
       order.push(`pds:${did}`)
       handleCalls.push({ did, handle })
       const a = accounts[did]!
-      // The real PDS signs a handle-only PLC op with the same rotation key.
+      // The real PDS signs a handle-only PLC op with the same rotation key, which moves
+      // the head — which is exactly what can staleness-trap a concurrent endpoint op.
+      heads += 1
       accounts[did] = { handle, op: { ...a.op, alsoKnownAs: [`at://${handle}`] } }
     },
     async resolveHandle(handle) {
       return Object.entries(accounts).find(([, a]) => a.handle === handle)?.[0] ?? null
     },
+    async wellKnownDid(handle) {
+      return Object.entries(accounts).find(([, a]) => a.handle === handle)?.[0] ?? null
+    },
   }
   const store: StorePort = {
-    async custodialDids() {
-      return new Set([MEMBER])
+    async custodialAccounts() {
+      return new Map(rows)
+    },
+    async schools() {
+      return SCHOOLS
     },
     async setCustodialHandle(did, handle) {
-      const rows = did === MEMBER ? 1 : 0
-      if (rows) writes.push({ did, handle, cached: false })
-      return rows
+      if (!rows.has(did)) return 0
+      rows.set(did, handle)
+      return 1
     },
     async setCachedHandle(did, handle) {
-      const row = writes.find((w) => w.did === did && w.handle === handle)
-      if (row) row.cached = true
+      cache.set(did, handle)
     },
   }
-  return { plc, pds, store, submitted, handleCalls, writes, order }
+  return { plc, pds, store, accounts, db: rows, cache, submitted, handleCalls, order, failures }
 }
 
-const everyone = () => ({
+type AccountFixtures = Record<string, { handle: string; op: PlcOperation }>
+
+const everyone = (): AccountFixtures => ({
   [SCHOOL]: { handle: 'boulder.freeskool.xyz', op: op({ alsoKnownAs: ['at://boulder.freeskool.xyz'] }) },
-  [AUTHORITY]: { handle: 'taxonomy.freeskool.xyz', op: op({ alsoKnownAs: ['at://taxonomy.freeskool.xyz'] }) },
+  [AUTHORITY]: { handle: 'skills.freeskool.xyz', op: op({ alsoKnownAs: ['at://skills.freeskool.xyz'] }) },
   [MEMBER]: { handle: 'calmalder301.freeskool.xyz', op: op() },
   [OWNED]: { handle: 'owner.example.com', op: op({ alsoKnownAs: ['at://owner.example.com'], rotationKeys: ['did:key:zQ3shSomeoneElse'] }) },
 })
 
 const run = (over: Partial<RunOptions>, f: Fakes) =>
-  migratePdsHostname({ ...OPTS, apply: false, key: KEY, ...over }, { plc: f.plc, pds: f.pds, store: f.store })
+  migratePdsHostname(
+    { ...OPTS(), apply: false, key: KEY, onFailure: (did, reason) => f.failures.push({ did, reason }), ...over },
+    { plc: f.plc, pds: f.pds, store: f.store },
+  )
 
 describe('the run', () => {
   it('dry run counts and writes nothing', async () => {
@@ -302,7 +509,9 @@ describe('the run', () => {
   it('rewrites fs_custodial_account and the handle cache only for accounts we custody', async () => {
     const f = fakes(everyone())
     await run({ apply: true }, f)
-    expect(f.writes).toEqual([{ did: MEMBER, handle: 'calmalder301.freeskool.directory', cached: true }])
+    expect(f.db.get(MEMBER)).toBe('calmalder301.freeskool.directory')
+    expect(f.cache.get(MEMBER)).toBe('calmalder301.freeskool.directory')
+    expect(f.cache.has(SCHOOL)).toBe(false)
   })
 
   it('is idempotent: a second run plans nothing and writes nothing', async () => {
@@ -315,13 +524,59 @@ describe('the run', () => {
     expect(f.submitted).toHaveLength(before)
   })
 
-  it('is resumable: --limit does a prefix and the next run does the rest', async () => {
+  it('is resumable: --limit does a prefix, the next run does the rest, and `considered` never shrinks', async () => {
     const f = fakes(everyone())
     const first = await run({ apply: true, limit: 1 }, f)
     expect(first.planned).toBe(1)
+    // The denominator is "accounts on this PDS", not "accounts this batch looked at".
+    expect(first.considered).toBe(4)
     const second = await run({ apply: true }, f)
     expect(second.planned).toBe(2)
     expect(second.skipped['already-migrated']).toBe(1)
+  })
+
+  it('repairs a row left behind when a previous run died between the PLC write and the DB', async () => {
+    const f = fakes(everyone())
+    await run({ apply: true }, f)
+    // The identity is right; the app's copy is not — the shape of a crash in between.
+    f.db.set(MEMBER, 'calmalder301.freeskool.xyz')
+    f.cache.delete(MEMBER)
+    const repair = await run({ apply: true }, f)
+    expect(repair.planned).toBe(1)
+    expect(repair.dbRepaired).toBe(1)
+    expect(repair.endpointUpdated).toBe(0)
+    expect(repair.handleUpdated).toBe(0)
+    expect(f.db.get(MEMBER)).toBe('calmalder301.freeskool.directory')
+    expect(f.cache.get(MEMBER)).toBe('calmalder301.freeskool.directory')
+  })
+
+  it('retries once when the PLC head moved under it, and gives up on a second failure', async () => {
+    const f = fakes(everyone())
+    let calls = 0
+    const racing: PlcPort = {
+      ...f.plc,
+      async lastOp(did) {
+        const entry = await f.plc.lastOp(did)
+        // Hand out a stale head the FIRST time only, so the first submit is rejected and
+        // the refetch succeeds — exactly the concurrent-write case.
+        return calls++ === 0 ? { ...entry, cid: 'bafy-stale' } : entry
+      },
+    }
+    const counts = await migratePdsHostname(
+      { ...OPTS(), apply: true, key: KEY, only: new Set([MEMBER]), accounts: 'all', onFailure: (d, r) => f.failures.push({ did: d, reason: r }) },
+      { plc: racing, pds: f.pds, store: f.store },
+    )
+    expect(counts.endpointUpdated).toBe(1)
+    expect(counts.failed).toBe(0)
+
+    const g = fakes(everyone())
+    const alwaysStale: PlcPort = { ...g.plc, lastOp: async (did) => ({ ...(await g.plc.lastOp(did)), cid: 'bafy-always-stale' }) }
+    const bad = await migratePdsHostname(
+      { ...OPTS(), apply: true, key: KEY, only: new Set([MEMBER]), accounts: 'all', onFailure: (d, r) => g.failures.push({ did: d, reason: r }) },
+      { plc: alwaysStale, pds: g.pds, store: g.store },
+    )
+    expect(bad.failed).toBe(1)
+    expect(bad.endpointUpdated).toBe(0)
   })
 
   it('reports, and never forces, an account whose rotation keys are no longer ours', async () => {
@@ -331,12 +586,30 @@ describe('the run', () => {
     expect(f.handleCalls.some((h) => h.did === OWNED)).toBe(false)
   })
 
-  it('counts an unreadable PLC log as a failure instead of planning blind', async () => {
+  it('refuses to apply while a collision stands', async () => {
+    const accounts = everyone()
+    accounts['did:plc:collider000000000000'] = { handle: 'boulder.freeskool.xyz', op: op({ alsoKnownAs: ['at://boulder.freeskool.xyz'] }) }
+    const f = fakes(accounts, new Map([[MEMBER, 'calmalder301.freeskool.xyz'], ['did:plc:collider000000000000', 'boulder.freeskool.xyz']]))
+    const dry = await run({}, f)
+    // BOTH ends of the duplicate are flagged, not just the newcomer: the run is refused
+    // as a whole, and saying "the school is fine, the member is not" would invite somebody
+    // to move the school anyway and discover the clash halfway through the batch.
+    expect(dry.collisions).toBe(2)
+    await expect(run({ apply: true }, f)).rejects.toThrow(/refusing to apply/)
+    expect(f.submitted).toHaveLength(0)
+  })
+
+  it('counts an unreadable PLC log as a failure, and names it on the failure channel', async () => {
     const f = fakes(everyone())
     const broken: PlcPort = { ...f.plc, lastOp: async () => { throw new Error('plc down') } }
-    const counts = await migratePdsHostname({ ...OPTS, apply: false, key: KEY }, { plc: broken, pds: f.pds, store: f.store })
+    const counts = await migratePdsHostname(
+      { ...OPTS(), apply: false, key: KEY, onFailure: (did, reason) => f.failures.push({ did, reason }) },
+      { plc: broken, pds: f.pds, store: f.store },
+    )
     expect(counts.planned).toBe(0)
     expect(counts.failed).toBe(3)
+    expect(f.failures).toHaveLength(3)
+    expect(f.failures[0]!.reason).toMatch(/plc down/)
   })
 
   it('counts a half-applied account as failed verification rather than done', async () => {
@@ -345,59 +618,96 @@ describe('the run', () => {
     // shape of a partial failure the script must not report as success.
     const lying: PdsPort = { ...f.pds, updateAccountHandle: async () => {} }
     const counts = await migratePdsHostname(
-      { ...OPTS, apply: true, key: KEY, only: new Set([MEMBER]), accounts: 'all' },
+      { ...OPTS(), apply: true, key: KEY, only: new Set([MEMBER]), accounts: 'all', onFailure: (d, r) => f.failures.push({ did: d, reason: r }) },
       { plc: f.plc, pds: lying, store: f.store },
     )
     expect(counts.endpointUpdated).toBe(1)
     expect(counts.verified).toBe(0)
     expect(counts.failedVerification).toBe(1)
-  })
-
-  it('refuses to apply without the rotation key', async () => {
-    const f = fakes(everyone())
-    await expect(run({ apply: true, key: undefined }, f)).rejects.toThrow(/PDS_PLC_ROTATION_KEY/)
+    expect(f.failures.at(-1)!.reason).toMatch(/verification failed/)
   })
 })
 
 /* ─────────────────────────────────── verification ───────────────────────────────── */
 
 describe('verification', () => {
-  const entry = {
+  const entry: PlanEntry = {
     did: MEMBER,
-    kind: 'custodial' as const,
+    kind: 'custodial',
     currentHandle: 'calmalder301.freeskool.xyz',
     newHandle: 'calmalder301.freeskool.directory',
     needsEndpoint: true,
     needsHandle: true,
+    needsDb: false,
   }
 
-  const port = (endpoint: string, aka: string[], resolves: string | null): { plc: PlcPort; pds: PdsPort } => ({
+  const port = (o: {
+    endpoint: string
+    aka: string[]
+    resolves: Record<string, string | null>
+    wellKnown?: string | null
+  }): { plc: PlcPort; pds: PdsPort } => ({
     plc: {
       lastOp: async () => ({ cid: 'x', operation: op() }),
+      auditLog: async () => [],
       submit: async () => {},
-      document: async () => ({ alsoKnownAs: aka, service: [{ id: '#atproto_pds', serviceEndpoint: endpoint }] }),
+      document: async () => ({ alsoKnownAs: o.aka, service: [{ id: '#atproto_pds', serviceEndpoint: o.endpoint }] }),
     },
     pds: {
       listRepos: async () => [],
       accountInfos: async () => [],
       updateAccountHandle: async () => {},
-      resolveHandle: async () => resolves,
+      resolveHandle: async (h) => o.resolves[h] ?? null,
+      wellKnownDid: async () => (o.wellKnown === undefined ? MEMBER : o.wellKnown),
     },
   })
 
-  it('passes only when the document AND the PDS both agree', async () => {
-    const p = port(NEW_ENDPOINT, ['at://calmalder301.freeskool.directory'], MEMBER)
-    expect(await verifyAccount(entry, p.plc, p.pds, NEW_ENDPOINT)).toEqual({ ok: true, endpointOk: true, handleOk: true, resolvesOk: true })
+  const good = {
+    endpoint: NEW_ENDPOINT,
+    aka: ['at://calmalder301.freeskool.directory'],
+    resolves: { 'calmalder301.freeskool.directory': MEMBER },
+  }
+
+  it('passes when the document, the PDS and the public well-known all agree', async () => {
+    const p = port(good)
+    expect(await verifyAccount(entry, p.plc, p.pds, NEW_ENDPOINT)).toEqual({
+      ok: true,
+      endpointOk: true,
+      handleOk: true,
+      resolvesOk: true,
+      externalOk: true,
+      oldHandleOk: true,
+    })
   })
 
   it('fails when the endpoint is still the old one', async () => {
-    const p = port(OLD_ENDPOINT, ['at://calmalder301.freeskool.directory'], MEMBER)
+    const p = port({ ...good, endpoint: OLD_ENDPOINT })
     expect(await verifyAccount(entry, p.plc, p.pds, NEW_ENDPOINT)).toMatchObject({ ok: false, endpointOk: false })
   })
 
   it('fails when the handle resolves to somebody else', async () => {
-    const p = port(NEW_ENDPOINT, ['at://calmalder301.freeskool.directory'], 'did:plc:someone-else')
+    const p = port({ ...good, resolves: { 'calmalder301.freeskool.directory': 'did:plc:someone-else' } })
     expect(await verifyAccount(entry, p.plc, p.pds, NEW_ENDPOINT)).toMatchObject({ ok: false, resolvesOk: false })
+  })
+
+  it('fails when the public name does not serve /.well-known/atproto-did — DNS or TLS, not PLC', async () => {
+    // Our own PDS happily says yes; the outside world cannot reach the name. That is the
+    // failure `resolveHandle` alone cannot see, which is why the external fetch exists.
+    const p = port({ ...good, wellKnown: null })
+    expect(await verifyAccount(entry, p.plc, p.pds, NEW_ENDPOINT)).toMatchObject({ ok: false, externalOk: false })
+    expect(await verifyAccount(entry, p.plc, p.pds, NEW_ENDPOINT, { skipExternal: true })).toMatchObject({ ok: true, externalOk: true })
+  })
+
+  it('fails when the OLD handle has been taken over by a different DID', async () => {
+    const p = port({ ...good, resolves: { 'calmalder301.freeskool.directory': MEMBER, 'calmalder301.freeskool.xyz': 'did:plc:squatter' } })
+    expect(await verifyAccount(entry, p.plc, p.pds, NEW_ENDPOINT)).toMatchObject({ ok: false, oldHandleOk: false })
+  })
+
+  it('accepts an old handle that still points at us (the overlap window) or is gone', async () => {
+    const stillUs = port({ ...good, resolves: { 'calmalder301.freeskool.directory': MEMBER, 'calmalder301.freeskool.xyz': MEMBER } })
+    expect(await verifyAccount(entry, stillUs.plc, stillUs.pds, NEW_ENDPOINT)).toMatchObject({ ok: true, oldHandleOk: true })
+    const gone = port(good)
+    expect(await verifyAccount(entry, gone.plc, gone.pds, NEW_ENDPOINT)).toMatchObject({ ok: true, oldHandleOk: true })
   })
 })
 
@@ -412,4 +722,23 @@ describe('R9: counts only', () => {
     expect(serialized).not.toMatch(/freeskool/)
     expect(serialized).not.toMatch(/@/)
   })
+
+  it('the failure channel carries a truncated DID and never a handle or an email', async () => {
+    const f = fakes(everyone())
+    const broken: PlcPort = { ...f.plc, lastOp: async () => { throw new Error('plc down') } }
+    await migratePdsHostname(
+      { ...OPTS(), apply: false, key: KEY, onFailure: (did, reason) => f.failures.push({ did: shortDid(did), reason }) },
+      { plc: broken, pds: f.pds, store: f.store },
+    )
+    for (const line of f.failures.map((x) => `${x.did} ${x.reason}`)) {
+      expect(line).toMatch(/…$|… /)
+      expect(line).not.toMatch(/freeskool/)
+      expect(line).not.toMatch(/@/)
+    }
+  })
 })
+
+/** Kept so the CurrentState type is exercised by name, not only structurally. */
+const _state: CurrentState = { endpoint: NEW_ENDPOINT, publishedHandle: 'x.freeskool.directory', rotationKeys: [] }
+void _state
+void ({} as AuditEntry)

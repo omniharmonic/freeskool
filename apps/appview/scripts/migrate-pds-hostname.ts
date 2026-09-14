@@ -3,9 +3,10 @@
  * (MS §3, federation-phase ruling 3: `pds.freeskool.directory` / `*.freeskool.directory`).
  *
  *   pnpm --filter @freeschool/appview migrate-pds-hostname -- \
- *     --handle-domain=freeskool.directory --service-endpoint=https://pds.freeskool.directory
+ *     --handle-domain=freeskool.directory \
+ *     --service-endpoint=https://pds.freeskool.directory --apply
  *
- * Dry run by default. `--apply` writes. See `docs/runbooks/pds-hostname-migration.md`.
+ * Dry run unless `--apply`. See `docs/runbooks/pds-hostname-migration.md`.
  *
  * ── THE MECHANISM, and why it is this one ────────────────────────────────────────
  *
@@ -59,23 +60,42 @@
  * service auth), so the account list comes from `com.atproto.sync.listRepos` (public) +
  * `com.atproto.admin.getAccountInfos` (Basic admin), exactly as `src/lib/pds.ts` does.
  *
- * ── Idempotent and resumable ─────────────────────────────────────────────────────
+ * ── Safety rails, because this writes a permanent public record ──────────────────
  *
- * Every account is planned from its CURRENT state: an endpoint that already matches skips
- * step 1, a handle that already matches skips step 2, and an account whose rotation keys
- * no longer include ours (a member who took ownership and rotated) is reported, never
- * forced. Re-running after a crash, a rate limit or a partial batch does the remainder and
- * nothing else. `--limit` runs it in stages.
+ * `--service-endpoint` is REQUIRED and checked before anything is signed: https, no
+ * loopback or private address, no path, and its host must match the PDS we are talking to.
+ * There is no default, because the default would have been `config().PDS_URL`, whose own
+ * default is `http://localhost:3000` — one unset variable away from writing a loopback
+ * endpoint into every production DID document, permanently. `--allow-loopback-endpoint`
+ * opts out, and only when the PDS is loopback too (the dev rehearsal).
  *
- * Output is COUNTS ONLY (R9): no DID, handle or email ever reaches stdout.
+ * The rotation key is required for a DRY RUN as well as an apply: without it we cannot
+ * tell "this account rotated its keys away from us" from "we do not have the key", and a
+ * plan that cannot tell those apart is a plan that lies.
+ *
+ * ── Idempotent, resumable, repairable ───────────────────────────────────────────
+ *
+ * Every account is planned from its CURRENT published state: an endpoint that already
+ * matches skips step 1, a handle that already matches skips step 2, and an account whose
+ * DID document is already right but whose `fs_custodial_account` row is not (a crash
+ * between the PLC write and the database write) is REPAIRED — that is what `db-repaired`
+ * counts. Re-running after a crash, a rate limit or a partial batch does the remainder and
+ * nothing else. `--limit` runs it in stages; `--only` retries named accounts.
+ *
+ * Output is COUNTS ONLY on stdout (R9). Per-account failures go to stderr with a
+ * TRUNCATED DID and a reason — enough to find the account in an operator's own notes,
+ * never a full identifier, and never a handle or an email.
  */
 import crypto from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
 import { eq } from 'drizzle-orm'
 import { encode as cborEncode } from '@atproto/lex-cbor'
 import { closeDb, getDb } from '../src/db/index.js'
-import { appMeta, custodialAccount } from '../src/db/schema.js'
+import { appMeta, custodialAccount, school } from '../src/db/schema.js'
 import { config } from '../src/config.js'
 import { HANDLE_CACHE_KEY } from '../src/lib/handle-change.js'
+import { RESERVED_LABELS } from '../src/lib/handles.js'
 import { isMain } from '../src/lib/is-main.js'
 
 /* ────────────────────────────── PLC operation shapes ────────────────────────────── */
@@ -120,6 +140,9 @@ const PDS_SERVICE_TYPE = 'AtprotoPersonalDataServer'
 
 const ensureAtprotoPrefix = (handle: string) => (handle.startsWith('at://') ? handle : `at://${handle}`)
 const ensureHttpPrefix = (url: string) => (/^https?:\/\//.test(url) ? url : `https://${url}`)
+
+/** One spelling of an endpoint, so "already migrated" is never a trailing-slash question. */
+export const normalizeEndpoint = (url: string) => ensureHttpPrefix(url.trim()).replace(/\/+$/, '')
 
 /**
  * `@did-plc/lib`'s `normalizeOp`, reimplemented (the package is not a dependency of this
@@ -169,7 +192,7 @@ function base58btc(buf: Buffer): string {
  * Wrap a raw 32-byte secp256k1 private key in SEC1 DER so Node's `crypto` will import it.
  * The optional public-key field is omitted; OpenSSL derives it from the scalar.
  */
-function sec1Der(privateKeyHex: string): Buffer {
+export function sec1Der(privateKeyHex: string): Buffer {
   const priv = Buffer.from(privateKeyHex.replace(/^0x/, ''), 'hex')
   if (priv.length !== 32) throw new Error('rotation key must be 32 bytes of hex')
   const secp256k1Oid = Buffer.from('06052b8104000a', 'hex') // 1.3.132.0.10
@@ -236,14 +259,69 @@ export function buildUpdateOp(
 
 export const withEndpoint = (endpoint: string) => (op: Omit<PlcOperation, 'sig'>) => ({
   ...op,
-  services: { ...op.services, [PDS_SERVICE_ID]: { type: PDS_SERVICE_TYPE, endpoint: ensureHttpPrefix(endpoint) } },
+  services: { ...op.services, [PDS_SERVICE_ID]: { type: PDS_SERVICE_TYPE, endpoint: normalizeEndpoint(endpoint) } },
 })
+
+/* ─────────────────────── the endpoint guard (blocking review #3) ────────────────── */
+
+/**
+ * RFC1918, loopback, link-local and the reserved TLDs. A DID document is permanent and
+ * world-readable: an endpoint nobody outside this machine can dial is not a typo you get
+ * to fix, it is a repo the network can never reach again until somebody signs N more
+ * operations.
+ */
+const PRIVATE_HOST_RE =
+  /^(localhost|127\.\d+\.\d+\.\d+|0\.0\.0\.0|\[?::1\]?|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|169\.254\.\d+\.\d+|172\.(1[6-9]|2\d|3[01])\.\d+\.\d+)$/i
+const RESERVED_TLD_RE = /\.(test|test2|localhost|local|internal|invalid|example|alt|onion|home|lan)$/i
+
+export function isLoopbackHost(hostname: string): boolean {
+  return /^(localhost|127\.\d+\.\d+\.\d+|\[?::1\]?)$/i.test(hostname)
+}
+
+export type EndpointVerdict = { ok: true; endpoint: string } | { ok: false; reason: string }
+
+export function checkServiceEndpoint(
+  raw: string,
+  opts: { pdsHost: string; allowLoopback: boolean },
+): EndpointVerdict {
+  let url: URL
+  try {
+    url = new URL(normalizeEndpoint(raw))
+  } catch {
+    return { ok: false, reason: '--service-endpoint is not a URL' }
+  }
+  if (url.pathname !== '/' || url.search || url.hash) {
+    return { ok: false, reason: '--service-endpoint must be a bare origin (no path, query or fragment)' }
+  }
+  const endpoint = normalizeEndpoint(url.toString())
+  // The escape hatch is not "trust me": it only opens when BOTH ends are loopback, which
+  // is exactly the dev rehearsal and cannot be a production deployment by construction.
+  if (opts.allowLoopback) {
+    if (!isLoopbackHost(url.hostname)) return { ok: false, reason: '--allow-loopback-endpoint but the endpoint is not loopback' }
+    if (!isLoopbackHost(opts.pdsHost.replace(/:\d+$/, ''))) {
+      return { ok: false, reason: '--allow-loopback-endpoint but the PDS is not loopback — refusing' }
+    }
+    return { ok: true, endpoint }
+  }
+  if (url.protocol !== 'https:') return { ok: false, reason: '--service-endpoint must be https (or --allow-loopback-endpoint on a dev PDS)' }
+  if (PRIVATE_HOST_RE.test(url.hostname)) return { ok: false, reason: '--service-endpoint is a loopback or private address' }
+  if (RESERVED_TLD_RE.test(url.hostname)) return { ok: false, reason: '--service-endpoint uses a reserved TLD' }
+  if (/^\d+\.\d+\.\d+\.\d+$/.test(url.hostname) || url.hostname.startsWith('[')) {
+    return { ok: false, reason: '--service-endpoint must be a hostname, not an IP literal' }
+  }
+  if (url.host !== opts.pdsHost) {
+    return { ok: false, reason: `--service-endpoint host does not match the PDS we are talking to (${opts.pdsHost})` }
+  }
+  return { ok: true, endpoint }
+}
 
 /* ──────────────────────────────────── ports ─────────────────────────────────────── */
 
 export interface PlcPort {
   /** The newest non-nullified audit entry, with its CID. */
   lastOp(did: string): Promise<AuditEntry>
+  /** The whole audit log, for `--snapshot`. */
+  auditLog(did: string): Promise<AuditEntry[]>
   submit(did: string, op: PlcOperation): Promise<void>
   /** The resolved DID document, for verification. */
   document(did: string): Promise<{ alsoKnownAs?: string[]; service?: Array<{ id: string; serviceEndpoint: string }> }>
@@ -257,13 +335,22 @@ export interface PdsPort {
   /** `com.atproto.admin.updateAccountHandle` (Basic admin). Signs the handle PLC op. */
   updateAccountHandle(did: string, handle: string): Promise<void>
   resolveHandle(handle: string): Promise<string | null>
+  /**
+   * `https://<handle>/.well-known/atproto-did`, over the PUBLIC name — the path the rest
+   * of the network actually takes. Distinct from `resolveHandle`, which asks our own PDS
+   * and so can say yes while DNS, Caddy or the certificate says no.
+   */
+  wellKnownDid(handle: string): Promise<string | null>
 }
 
-/** Only what the DB writes need, so tests can pass a recorder. */
+/** Only what the DB reads and writes need, so tests can pass a recorder. */
 export interface StorePort {
+  /** `did → handle` for every account we custody. */
+  custodialAccounts(): Promise<Map<string, string>>
+  /** `did → label` for every school this deployment hosts (`fs_school`). */
+  schools(): Promise<Map<string, string>>
   setCustodialHandle(did: string, handle: string): Promise<number>
   setCachedHandle(did: string, handle: string): Promise<void>
-  custodialDids(): Promise<Set<string>>
 }
 
 /* ─────────────────────────────────── planning ───────────────────────────────────── */
@@ -288,18 +375,19 @@ export interface PlanEntry {
   needsEndpoint: boolean
   /** false when the DID document AND the PDS already name the target handle. */
   needsHandle: boolean
+  /** true when the identity is right but `fs_custodial_account` / the cache is not. */
+  needsDb: boolean
   skip?: SkipReason
 }
 
 export interface PlanOptions {
   /** No leading dot. `freeskool.directory`. */
   handleDomain: string
-  /** `https://pds.freeskool.directory` */
+  /** `https://pds.freeskool.directory`, already through `checkServiceEndpoint`. */
   serviceEndpoint: string
-  schoolDid: string
+  /** `did → label` for every school. A school actor's handle is `<label>.<domain>`. */
+  schools: Map<string, string>
   authorityDid: string
-  /** Ruling 3: the school account becomes `boulder.<domain>`. */
-  schoolLabel: string
   /** Ruling 3: the taxonomy authority becomes `skills.<domain>`. */
   authorityLabel: string
   accounts: 'custodial' | 'all'
@@ -311,22 +399,37 @@ export interface PlanOptions {
   only?: Set<string>
 }
 
-export function accountKind(did: string, opts: Pick<PlanOptions, 'schoolDid' | 'authorityDid'>, custodial: Set<string>): AccountKind {
-  if (did && did === opts.schoolDid) return 'school'
+export function accountKind(did: string, opts: Pick<PlanOptions, 'schools' | 'authorityDid'>, custodial: Set<string>): AccountKind {
+  if (opts.schools.has(did)) return 'school'
   if (did && did === opts.authorityDid) return 'authority'
   return custodial.has(did) ? 'custodial' : 'other'
 }
 
 /**
+ * `--accounts=custodial` means the accounts we custody PLUS the institutional ones — a
+ * member who has taken ownership of their identity is not ours to move by default, and
+ * `--accounts=all` is the deliberate opt-in that includes them. `--only` narrows further.
+ */
+export function selected(did: string, kind: AccountKind, opts: Pick<PlanOptions, 'accounts' | 'only'>): boolean {
+  if (opts.only && !opts.only.has(did)) return false
+  return opts.accounts === 'all' || kind !== 'other'
+}
+
+/**
  * The new handle for one account. Custodial members keep their PREFIX — the handle is the
  * name they chose (or were given) and the migration is not an occasion to change it — and
- * only the domain moves. The school and the authority take the labels ruling 3 fixes,
- * because `boulder.freeskool.xyz` is being freed for the city app host and `skills.…` is
- * the taxonomy authority's published name.
+ * only the domain moves. A SCHOOL takes its own label from `fs_school`, which is what
+ * makes this correct for a second school: Denver's actor becomes `denver.<domain>`, not
+ * whatever prefix its handle happens to carry. The authority takes the label ruling 3
+ * fixes, because `skills.<domain>` is the taxonomy authority's published name.
  */
-export function plannedHandle(account: Account, kind: AccountKind, opts: Pick<PlanOptions, 'handleDomain' | 'schoolLabel' | 'authorityLabel'>): string {
+export function plannedHandle(account: Account, kind: AccountKind, opts: Pick<PlanOptions, 'handleDomain' | 'schools' | 'authorityLabel'>): string {
   const domain = opts.handleDomain.replace(/^\./, '').toLowerCase()
-  if (kind === 'school') return `${opts.schoolLabel}.${domain}`
+  if (kind === 'school') {
+    const label = opts.schools.get(account.did)
+    if (!label) throw new Error('a school account with no label in fs_school')
+    return `${label}.${domain}`
+  }
   if (kind === 'authority') return `${opts.authorityLabel}.${domain}`
   const prefix = account.handle.split('.')[0] ?? ''
   if (!prefix) throw new Error('cannot derive a handle prefix')
@@ -339,16 +442,8 @@ export interface CurrentState {
   /** `alsoKnownAs[0]` without the `at://`, as published. */
   publishedHandle: string | undefined
   rotationKeys: string[]
-}
-
-/**
- * `--accounts=custodial` means the accounts we custody PLUS the two institutional ones —
- * a member who has taken ownership of their identity is not ours to move by default, and
- * `--accounts=all` is the deliberate opt-in that includes them. `--only` narrows further.
- */
-export function selected(did: string, kind: AccountKind, opts: Pick<PlanOptions, 'accounts' | 'only'>): boolean {
-  if (opts.only && !opts.only.has(did)) return false
-  return opts.accounts === 'all' || kind !== 'other'
+  /** `fs_custodial_account.handle`, or undefined for an account we do not custody. */
+  storedHandle?: string
 }
 
 export function planAccount(
@@ -359,21 +454,50 @@ export function planAccount(
   rotationDidKey: string,
 ): PlanEntry {
   const newHandle = plannedHandle(account, kind, opts)
-  const endpoint = ensureHttpPrefix(opts.serviceEndpoint)
+  const endpoint = normalizeEndpoint(opts.serviceEndpoint)
   const base: PlanEntry = {
     did: account.did,
     kind,
     currentHandle: account.handle,
     newHandle,
-    needsEndpoint: state.endpoint !== endpoint,
+    needsEndpoint: normalizeEndpoint(state.endpoint ?? '') !== endpoint,
     needsHandle: state.publishedHandle !== newHandle || account.handle !== newHandle,
+    // A crash between the PLC write and the database write leaves the identity right and
+    // the app serving a stale handle. That is repairable and must be repaired, not
+    // reported as "already migrated" and left.
+    needsDb: state.storedHandle !== undefined && state.storedHandle !== newHandle,
   }
-  if (!selected(account.did, kind, opts)) return { ...base, needsEndpoint: false, needsHandle: false, skip: 'not-selected' }
-  if (!base.needsEndpoint && !base.needsHandle) return { ...base, skip: 'already-migrated' }
+  if (!selected(account.did, kind, opts)) return { ...base, needsEndpoint: false, needsHandle: false, needsDb: false, skip: 'not-selected' }
+  if (!base.needsEndpoint && !base.needsHandle && !base.needsDb) return { ...base, skip: 'already-migrated' }
   // The PDS signs with OUR rotation key and so do we; an account that rotated its keys
-  // away (a member who took ownership) can only be moved by its owner. Report, never force.
-  if (!state.rotationKeys.includes(rotationDidKey)) return { ...base, needsEndpoint: false, needsHandle: false, skip: 'foreign-rotation-key' }
+  // away (a member who took ownership) can only be moved by its owner. Report, never
+  // force. A DB-only repair does not need any key, so it survives this.
+  if (!state.rotationKeys.includes(rotationDidKey)) {
+    return base.needsDb
+      ? { ...base, needsEndpoint: false, needsHandle: false }
+      : { ...base, needsEndpoint: false, needsHandle: false, needsDb: false, skip: 'foreign-rotation-key' }
+  }
   return base
+}
+
+/**
+ * Collisions, before a single operation is signed. Two members whose prefixes differ only
+ * by the domain they are on would land on one handle; a member whose prefix is a reserved
+ * label (`boulder`, `skills`, `www`…) would land on a name the school, the authority or
+ * the app already owns. Either one means `admin.updateAccountHandle` fails halfway through
+ * a batch, so we refuse the whole run instead.
+ */
+export function markCollisions(plan: PlanEntry[], reserved: ReadonlySet<string>): PlanEntry[] {
+  const seen = new Map<string, number>()
+  for (const e of plan) seen.set(e.newHandle, (seen.get(e.newHandle) ?? 0) + 1)
+  return plan.map((e) => {
+    if (e.skip) return e
+    const prefix = e.newHandle.split('.')[0]!
+    const duplicated = (seen.get(e.newHandle) ?? 0) > 1
+    // A school's or the authority's own reserved label is the POINT, not a collision.
+    const stealsReserved = (e.kind === 'custodial' || e.kind === 'other') && reserved.has(prefix)
+    return duplicated || stealsReserved ? { ...e, skip: 'handle-taken' as const, needsEndpoint: false, needsHandle: false, needsDb: false } : e
+  })
 }
 
 /* ─────────────────────────────────── verification ───────────────────────────────── */
@@ -383,15 +507,31 @@ export interface VerifyResult {
   endpointOk: boolean
   handleOk: boolean
   resolvesOk: boolean
+  /** `https://<new handle>/.well-known/atproto-did` over the public name. */
+  externalOk: boolean
+  /** The old handle must not resolve to somebody ELSE. Gone, or still us, are both fine. */
+  oldHandleOk: boolean
 }
 
-export async function verifyAccount(entry: PlanEntry, plc: PlcPort, pds: PdsPort, serviceEndpoint: string): Promise<VerifyResult> {
+export async function verifyAccount(
+  entry: PlanEntry,
+  plc: PlcPort,
+  pds: PdsPort,
+  serviceEndpoint: string,
+  opts: { skipExternal: boolean } = { skipExternal: false },
+): Promise<VerifyResult> {
   const doc = await plc.document(entry.did)
   const endpoint = doc.service?.find((s) => s.id === '#atproto_pds' || s.id.endsWith(PDS_SERVICE_ID))?.serviceEndpoint
-  const endpointOk = endpoint === ensureHttpPrefix(serviceEndpoint)
+  const endpointOk = normalizeEndpoint(endpoint ?? '') === normalizeEndpoint(serviceEndpoint)
   const handleOk = (doc.alsoKnownAs ?? []).includes(`at://${entry.newHandle}`)
   const resolvesOk = (await pds.resolveHandle(entry.newHandle)) === entry.did
-  return { ok: endpointOk && handleOk && resolvesOk, endpointOk, handleOk, resolvesOk }
+  const externalOk = opts.skipExternal ? true : (await pds.wellKnownDid(entry.newHandle)) === entry.did
+  let oldHandleOk = true
+  if (entry.currentHandle !== entry.newHandle) {
+    const old = await pds.resolveHandle(entry.currentHandle)
+    oldHandleOk = old === null || old === entry.did
+  }
+  return { ok: endpointOk && handleOk && resolvesOk && externalOk && oldHandleOk, endpointOk, handleOk, resolvesOk, externalOk, oldHandleOk }
 }
 
 /* ──────────────────────────────────── the run ───────────────────────────────────── */
@@ -401,9 +541,11 @@ export interface MigrationCounts {
   planned: number
   endpointUpdated: number
   handleUpdated: number
+  dbRepaired: number
   verified: number
   failedVerification: number
   failed: number
+  collisions: number
   skipped: Record<SkipReason, number>
   byKind: Record<AccountKind, number>
 }
@@ -413,18 +555,30 @@ const emptyCounts = (): MigrationCounts => ({
   planned: 0,
   endpointUpdated: 0,
   handleUpdated: 0,
+  dbRepaired: 0,
   verified: 0,
   failedVerification: 0,
   failed: 0,
+  collisions: 0,
   skipped: { 'already-migrated': 0, 'foreign-rotation-key': 0, 'not-selected': 0, 'handle-taken': 0 },
   byKind: { school: 0, authority: 0, custodial: 0, other: 0 },
 })
 
+/**
+ * Enough of a DID to match against an operator's own notes, never enough to BE one. The
+ * method-specific id is the secret part; four characters of it is a hint, not a name.
+ */
+export const shortDid = (did: string) => `${did.slice(0, 8)}${did.slice(8, 12)}…`
+
 export interface RunOptions extends PlanOptions {
   apply: boolean
   limit?: number
-  /** Absent in a dry run; required to sign. */
-  key?: RotationKey
+  key: RotationKey
+  skipExternalVerify?: boolean
+  /** Directory to write each account's full PLC audit log into before any write. */
+  snapshotDir?: string
+  /** Where per-account failures go. */
+  onFailure?: (did: string, reason: string) => void
 }
 
 export interface Ports {
@@ -435,13 +589,18 @@ export interface Ports {
 
 export async function migratePdsHostname(opts: RunOptions, ports: Ports): Promise<MigrationCounts> {
   const counts = emptyCounts()
-  const custodial = await ports.store.custodialDids()
+  const fail = opts.onFailure ?? (() => {})
+  const custodialHandles = await ports.store.custodialAccounts()
+  const custodial = new Set(custodialHandles.keys())
+  const reserved = new Set<string>([...RESERVED_LABELS, ...opts.schools.values(), opts.authorityLabel])
   const dids = await ports.pds.listRepos()
   const infos = await ports.pds.accountInfos(dids)
-  const rotationDidKey = opts.key?.didKey ?? ''
+  const rotationDidKey = opts.key.didKey
 
-  const plan: PlanEntry[] = []
+  let plan: PlanEntry[] = []
   for (const info of infos) {
+    // `considered` counts every account on the PDS, whatever `--limit` does to the plan:
+    // a staged run must not make the denominator shrink.
     counts.considered += 1
     const kind = accountKind(info.did, opts, custodial)
     // Selection BEFORE the network round trip: on a PDS with a thousand repos, reading
@@ -450,6 +609,7 @@ export async function migratePdsHostname(opts: RunOptions, ports: Ports): Promis
       counts.skipped['not-selected'] += 1
       continue
     }
+    if (opts.limit && plan.length >= opts.limit) continue
     let state: CurrentState
     try {
       const last = await ports.plc.lastOp(info.did)
@@ -458,63 +618,129 @@ export async function migratePdsHostname(opts: RunOptions, ports: Ports): Promis
         endpoint: normalized.services[PDS_SERVICE_ID]?.endpoint,
         publishedHandle: normalized.alsoKnownAs[0]?.replace(/^at:\/\//, ''),
         rotationKeys: normalized.rotationKeys,
+        storedHandle: custodialHandles.get(info.did),
       }
-    } catch {
+    } catch (err) {
       counts.failed += 1
+      fail(info.did, `unreadable PLC log: ${(err as Error).message}`)
       continue
     }
-    const entry = planAccount(info, kind, state, opts, rotationDidKey)
+    let entry: PlanEntry
+    try {
+      entry = planAccount(info, kind, state, opts, rotationDidKey)
+    } catch (err) {
+      counts.failed += 1
+      fail(info.did, (err as Error).message)
+      continue
+    }
     if (entry.skip) {
       counts.skipped[entry.skip] += 1
       continue
     }
-    counts.byKind[kind] += 1
     plan.push(entry)
-    if (opts.limit && plan.length >= opts.limit) break
   }
+
+  plan = markCollisions(plan, reserved)
+  const collided = plan.filter((e) => e.skip === 'handle-taken')
+  for (const e of collided) {
+    counts.skipped['handle-taken'] += 1
+    counts.collisions += 1
+    fail(e.did, 'new handle collides with a reserved label or another account')
+  }
+  plan = plan.filter((e) => !e.skip)
+  for (const e of plan) counts.byKind[e.kind] += 1
   counts.planned = plan.length
 
+  if (counts.collisions > 0 && opts.apply) {
+    throw new Error(`${counts.collisions} handle collision(s): refusing to apply. Resolve them and re-run.`)
+  }
   if (!opts.apply) return counts
 
-  const key = opts.key
-  if (!key) throw new Error('--apply needs PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX')
+  if (opts.snapshotDir) {
+    for (const entry of plan) {
+      const log = await ports.plc.auditLog(entry.did)
+      fs.writeFileSync(path.join(opts.snapshotDir, `${entry.did.replace(/[^a-z0-9:]/gi, '_')}.json`), JSON.stringify(log, null, 2))
+    }
+  }
 
   for (const entry of plan) {
     try {
       // 1. The endpoint: our own signed PLC operation, straight to the directory.
       if (entry.needsEndpoint) {
-        const last = await ports.plc.lastOp(entry.did)
-        await ports.plc.submit(entry.did, buildUpdateOp(last, key, withEndpoint(opts.serviceEndpoint)))
+        await submitWithRetry(ports.plc, entry.did, opts.key, opts.serviceEndpoint)
         counts.endpointUpdated += 1
       }
       // 2. The handle: the PDS's own admin path, which also sequences the identity event.
       if (entry.needsHandle) {
         await ports.pds.updateAccountHandle(entry.did, entry.newHandle)
         counts.handleUpdated += 1
-        const rows = await ports.store.setCustodialHandle(entry.did, entry.newHandle)
-        if (rows > 0) await ports.store.setCachedHandle(entry.did, entry.newHandle)
       }
-    } catch {
+      // 3. The app's own copies, including the repair case where 1 and 2 were already done.
+      if (entry.needsHandle || entry.needsDb) {
+        const rows = await ports.store.setCustodialHandle(entry.did, entry.newHandle)
+        if (rows > 0) {
+          await ports.store.setCachedHandle(entry.did, entry.newHandle)
+          if (!entry.needsHandle && !entry.needsEndpoint) counts.dbRepaired += 1
+        }
+      }
+    } catch (err) {
       counts.failed += 1
+      fail(entry.did, (err as Error).message)
       continue
     }
-    const verdict = await verifyAccount(entry, ports.plc, ports.pds, opts.serviceEndpoint).catch(() => null)
-    if (verdict?.ok) counts.verified += 1
-    else counts.failedVerification += 1
+    let verdict: VerifyResult | null = null
+    try {
+      verdict = await verifyAccount(entry, ports.plc, ports.pds, opts.serviceEndpoint, {
+        skipExternal: opts.skipExternalVerify ?? false,
+      })
+    } catch (err) {
+      fail(entry.did, `verification could not run: ${(err as Error).message}`)
+    }
+    if (verdict?.ok) {
+      counts.verified += 1
+    } else {
+      counts.failedVerification += 1
+      if (verdict) {
+        const bad = Object.entries(verdict)
+          .filter(([k, v]) => k !== 'ok' && v === false)
+          .map(([k]) => k)
+        fail(entry.did, `verification failed: ${bad.join(', ')}`)
+      }
+    }
   }
   return counts
+}
+
+/**
+ * plc.directory rejects an operation whose `prev` is not the current head. That happens
+ * for one benign reason — something else (the PDS's own handle op, a concurrent run) moved
+ * the head between our read and our write — and the fix is to read the head again and
+ * rebuild. Once: a second failure is a real failure and must surface.
+ */
+async function submitWithRetry(plc: PlcPort, did: string, key: RotationKey, endpoint: string): Promise<void> {
+  const last = await plc.lastOp(did)
+  try {
+    await plc.submit(did, buildUpdateOp(last, key, withEndpoint(endpoint)))
+  } catch (err) {
+    const fresh = await plc.lastOp(did)
+    if (fresh.cid === last.cid) throw err // not a stale head; the failure is real
+    await plc.submit(did, buildUpdateOp(fresh, key, withEndpoint(endpoint)))
+  }
 }
 
 /* ───────────────────────────── real ports (HTTP + Postgres) ─────────────────────── */
 
 export function httpPlc(plcUrl: string): PlcPort {
   const base = plcUrl.replace(/\/$/, '')
+  const log = async (did: string): Promise<AuditEntry[]> => {
+    const res = await fetch(`${base}/${encodeURIComponent(did)}/log/audit`)
+    if (!res.ok) throw new Error(`PLC audit log failed: ${res.status}`)
+    return (await res.json()) as AuditEntry[]
+  }
   return {
+    auditLog: log,
     async lastOp(did) {
-      const res = await fetch(`${base}/${encodeURIComponent(did)}/log/audit`)
-      if (!res.ok) throw new Error(`PLC audit log failed: ${res.status}`)
-      const log = (await res.json()) as AuditEntry[]
-      const live = log.filter((e) => !e.nullified)
+      const live = (await log(did)).filter((e) => !e.nullified)
       const last = live[live.length - 1]
       if (!last) throw new Error('empty PLC audit log')
       return last
@@ -581,14 +807,28 @@ export function httpPds(pdsUrl: string, adminPassword: string): PdsPort {
       if (!res.ok) return null
       return ((await res.json()) as { did?: string }).did ?? null
     },
+    async wellKnownDid(handle) {
+      try {
+        const res = await fetch(`https://${handle}/.well-known/atproto-did`, { signal: AbortSignal.timeout(10_000) })
+        if (!res.ok) return null
+        const body = (await res.text()).trim()
+        return body.startsWith('did:') ? body : null
+      } catch {
+        return null
+      }
+    },
   }
 }
 
 export function postgresStore(): StorePort {
   return {
-    async custodialDids() {
-      const rows = await getDb().select({ did: custodialAccount.did }).from(custodialAccount)
-      return new Set(rows.map((r) => r.did))
+    async custodialAccounts() {
+      const rows = await getDb().select({ did: custodialAccount.did, handle: custodialAccount.handle }).from(custodialAccount)
+      return new Map(rows.map((r) => [r.did, r.handle]))
+    },
+    async schools() {
+      const rows = await getDb().select({ did: school.did, label: school.label }).from(school)
+      return new Map(rows.map((r) => [r.did, r.label]))
     },
     async setCustodialHandle(did, handle) {
       const res = await getDb().update(custodialAccount).set({ handle }).where(eq(custodialAccount.did, did))
@@ -607,8 +847,35 @@ export function postgresStore(): StorePort {
 
 /* ─────────────────────────────────────── CLI ────────────────────────────────────── */
 
-function flag(name: string): string | undefined {
-  const hit = process.argv.find((a) => a === `--${name}` || a.startsWith(`--${name}=`))
+/** Every flag this script understands. Anything else is a typo, and a typo must not run. */
+export const KNOWN_FLAGS = [
+  'handle-domain',
+  'service-endpoint',
+  'pds',
+  'pds-host',
+  'plc',
+  'accounts',
+  'only',
+  'limit',
+  'school-label',
+  'authority-label',
+  'snapshot',
+  'create-rehearsal-account',
+  'allow-loopback-endpoint',
+  'skip-external-verify',
+  'apply',
+  'dry-run',
+] as const
+
+export function unknownFlags(argv: string[], known: readonly string[] = KNOWN_FLAGS): string[] {
+  return argv
+    .filter((a) => a.startsWith('--') && a !== '--')
+    .map((a) => a.replace(/^--/, '').split('=')[0]!)
+    .filter((name) => !known.includes(name))
+}
+
+function flag(name: string, argv = process.argv): string | undefined {
+  const hit = argv.find((a) => a === `--${name}` || a.startsWith(`--${name}=`))
   if (!hit) return undefined
   return hit.includes('=') ? hit.slice(hit.indexOf('=') + 1) : ''
 }
@@ -616,11 +883,12 @@ function flag(name: string): string | undefined {
 /**
  * Dev-only affordance for the rehearsal in the runbook: mint a throwaway account through
  * the ordinary signup path (admin invite code → `com.atproto.server.createAccount`) so the
- * real run has something of its own to move. Refuses against anything but a loopback PDS.
+ * real run has something of its own to move. Refuses against anything but a loopback PDS,
+ * and needs `--apply` like every other thing here that writes.
  */
 async function createRehearsalAccount(pdsUrl: string, adminPassword: string, prefix: string, domain: string): Promise<void> {
   const host = new URL(pdsUrl).hostname
-  if (host !== 'localhost' && host !== '127.0.0.1') throw new Error('--create-rehearsal-account is only allowed against a loopback PDS')
+  if (!isLoopbackHost(host)) throw new Error('--create-rehearsal-account is only allowed against a loopback PDS')
   const auth = `Basic ${Buffer.from(`admin:${adminPassword}`).toString('base64')}`
   const invite = await fetch(`${pdsUrl.replace(/\/$/, '')}/xrpc/com.atproto.server.createInviteCode`, {
     method: 'POST',
@@ -646,20 +914,42 @@ async function createRehearsalAccount(pdsUrl: string, adminPassword: string, pre
   console.log(`rehearsal account: ${handle} ${did}`)
 }
 
+const USAGE = `usage: migrate-pds-hostname
+  --handle-domain=<domain>        required, e.g. freeskool.directory
+  --service-endpoint=<url>        required, e.g. https://pds.freeskool.directory
+  --accounts=custodial|all        default custodial
+  --only=<did,did>                restrict to these DIDs
+  --limit=N                       plan at most N accounts
+  --pds=<url>                     the PDS to talk to (default PDS_URL)
+  --pds-host=<host>               what --service-endpoint's host must equal (default PDS_HOST)
+  --plc=<url>                     default https://plc.directory
+  --school-label=<label>          fallback when fs_school is empty (default boulder)
+  --authority-label=<label>       default skills
+  --snapshot=<dir>                write every planned account's PLC audit log here first
+  --skip-external-verify          do not fetch https://<handle>/.well-known/atproto-did
+  --allow-loopback-endpoint       dev only; both the endpoint and the PDS must be loopback
+  --dry-run                       the default
+  --apply                         actually write`
+
 export async function main(): Promise<number> {
   const c = config()
+  const bad = unknownFlags(process.argv.slice(2))
+  if (bad.length > 0) {
+    console.error(`unknown flag(s): ${bad.map((b) => `--${b}`).join(' ')}\n${USAGE}`)
+    return 1
+  }
   const apply = process.argv.includes('--apply')
+  const dryRun = process.argv.includes('--dry-run')
+  if (apply && dryRun) {
+    console.error('--apply and --dry-run are contradictory; pass one')
+    return 1
+  }
   const handleDomain = (flag('handle-domain') || '').replace(/^\./, '')
   if (!handleDomain) {
-    console.error('usage: migrate-pds-hostname --handle-domain=<domain> [--service-endpoint=<url>] [--accounts=custodial|all] [--only=<did,did>] [--limit=N] [--apply]')
+    console.error(USAGE)
     return 1
   }
   const pdsUrl = flag('pds') || c.PDS_URL
-  const serviceEndpoint = flag('service-endpoint') || c.PDS_URL
-  const plcUrl = flag('plc') || 'https://plc.directory'
-  const accounts = flag('accounts') === 'all' ? 'all' : 'custodial'
-  const limitRaw = flag('limit')
-  const onlyRaw = flag('only')
   const adminPassword = c.PDS_ADMIN_PASSWORD
   if (!adminPassword) {
     console.error('PDS_ADMIN_PASSWORD is not set')
@@ -668,51 +958,99 @@ export async function main(): Promise<number> {
 
   const rehearsal = flag('create-rehearsal-account')
   if (rehearsal) {
+    if (!apply) {
+      console.error('--create-rehearsal-account creates a real account: pass --apply')
+      return 1
+    }
     await createRehearsalAccount(pdsUrl, adminPassword, rehearsal, handleDomain)
     return 0
   }
 
+  // The key is required for a DRY RUN too: without it every account looks like
+  // "rotated away from us", and a plan that cannot tell that apart from "we lost the key"
+  // is worse than no plan.
   const keyHex = process.env.PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX ?? ''
-  if (apply && !keyHex) {
-    console.error('PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX is not set; it is what signs the endpoint operation')
+  if (!keyHex) {
+    console.error('PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX is not set; it is what signs the endpoint operation, and what tells a rotated-away account from a missing key')
     return 1
   }
-  // Even a dry run wants the key: without it we cannot tell "we can move this" from
-  // "this account rotated its keys away", and the plan would over-promise.
-  const key = keyHex ? rotationKeyFromHex(keyHex) : undefined
+  let key: RotationKey
+  try {
+    key = rotationKeyFromHex(keyHex)
+  } catch (err) {
+    console.error(`PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX is unusable: ${(err as Error).message}`)
+    return 1
+  }
 
+  const rawEndpoint = flag('service-endpoint')
+  if (!rawEndpoint) {
+    console.error('--service-endpoint is required (there is deliberately no default: the default would be PDS_URL, whose own default is http://localhost:3000)')
+    return 1
+  }
+  const pdsHost = flag('pds-host') || process.env.PDS_HOST || new URL(pdsUrl).host
+  const verdict = checkServiceEndpoint(rawEndpoint, {
+    pdsHost,
+    allowLoopback: process.argv.includes('--allow-loopback-endpoint'),
+  })
+  if (!verdict.ok) {
+    console.error(verdict.reason)
+    return 1
+  }
+
+  const snapshotFlag = flag('snapshot')
+  let snapshotDir: string | undefined
+  if (snapshotFlag) {
+    snapshotDir = path.join(snapshotFlag, new Date().toISOString().replace(/[:.]/g, '-'))
+    fs.mkdirSync(snapshotDir, { recursive: true })
+  }
+
+  const schools = await postgresStore().schools()
+  if (schools.size === 0 && c.SCHOOL_DID) schools.set(c.SCHOOL_DID, flag('school-label') || 'boulder')
+
+  const onlyRaw = flag('only')
+  const limitRaw = flag('limit')
   const opts: RunOptions = {
     apply,
     handleDomain,
-    serviceEndpoint,
-    schoolDid: c.SCHOOL_DID,
+    serviceEndpoint: verdict.endpoint,
+    schools,
     authorityDid: c.AUTHORITY_DID,
-    schoolLabel: flag('school-label') || 'boulder',
     authorityLabel: flag('authority-label') || 'skills',
-    accounts,
+    accounts: flag('accounts') === 'all' ? 'all' : 'custodial',
     only: onlyRaw ? new Set(onlyRaw.split(',').map((d) => d.trim()).filter(Boolean)) : undefined,
     limit: limitRaw ? Number(limitRaw) : undefined,
     key,
+    skipExternalVerify: process.argv.includes('--skip-external-verify'),
+    snapshotDir,
+    onFailure: (did, reason) => console.error(`  ! ${shortDid(did)} ${reason}`),
   }
 
-  const counts = await migratePdsHostname(opts, {
-    plc: httpPlc(plcUrl),
-    pds: httpPds(pdsUrl, adminPassword),
-    store: postgresStore(),
-  })
+  let counts: MigrationCounts
+  try {
+    counts = await migratePdsHostname(opts, {
+      plc: httpPlc(flag('plc') || 'https://plc.directory'),
+      pds: httpPds(pdsUrl, adminPassword),
+      store: postgresStore(),
+    })
+  } catch (err) {
+    console.error((err as Error).message)
+    return 1
+  }
 
   const skipped = Object.entries(counts.skipped).filter(([, n]) => n > 0)
-  console.log(`${apply ? 'APPLY' : 'DRY RUN'} → ${handleDomain} @ ${serviceEndpoint} (accounts=${accounts})`)
+  console.log(`${apply ? 'APPLY' : 'DRY RUN'} → ${handleDomain} @ ${verdict.endpoint} (accounts=${opts.accounts})`)
   console.log(`considered=${counts.considered} planned=${counts.planned}`)
   console.log(`  by kind: ${Object.entries(counts.byKind).filter(([, n]) => n > 0).map(([k, n]) => `${k}=${n}`).join(' ') || 'none'}`)
   console.log(`  skipped: ${skipped.map(([k, n]) => `${k}=${n}`).join(' ') || 'none'}`)
+  if (counts.collisions > 0) console.log(`  COLLISIONS: ${counts.collisions} — --apply will refuse until they are resolved`)
+  if (snapshotDir) console.log(`  snapshot: ${snapshotDir}`)
   if (apply) {
-    console.log(`endpoint-ops=${counts.endpointUpdated} handle-ops=${counts.handleUpdated}`)
+    console.log(`endpoint-ops=${counts.endpointUpdated} handle-ops=${counts.handleUpdated} db-repaired=${counts.dbRepaired}`)
     console.log(`verified=${counts.verified} failed-verification=${counts.failedVerification} failed=${counts.failed}`)
   } else if (counts.failed > 0) {
     console.log(`unreadable=${counts.failed}`)
   }
-  return counts.failed + counts.failedVerification > 0 ? 2 : 0
+  return counts.failed + counts.failedVerification + counts.collisions > 0 ? 2 : 0
 }
 
 if (isMain(import.meta.url)) {

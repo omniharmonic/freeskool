@@ -2,17 +2,29 @@
 #   {$WEB_HOST}                the PWA + the AppView API (same origin: cookies, OAuth)
 #   www.{$WEB_HOST}            redirect to the apex (served from the wildcard block, see below)
 #   {$PDS_HOST}                the PDS, whole: xrpc, oauth, admin, everything it serves
-#   *.{$PDS_HANDLE_DOMAIN}     every handle host AND every school host
+#   *.{$PDS_HANDLE_DOMAIN}     every handle host
+#   *.{$SCHOOL_DOMAIN_SUFFIX}  every school host (`boulder.freeskool.xyz`) and www
 #
-# …and, for the length of a hostname migration only, the SAME two names on the domain we
-# are moving away from: {$PDS_LEGACY_HOST} and *.{$PDS_LEGACY_HANDLE_DOMAIN}. A DID
-# document is world-readable and slow to change; between the moment the PDS starts
-# answering to `pds.freeskool.directory` and the moment the last account's PLC operation
-# lands, some accounts still tell the network their repo is at `pds.freeskool.xyz`. Both
-# names must reach the same container for that whole window, which is why they are two
-# variables and not one. Unset, each falls back to a `.invalid` sentinel — a site block
-# for a name that cannot resolve, which costs nothing and keeps the file free of
-# conditionals. See docs/runbooks/pds-hostname-migration.md.
+# Those last two are ONE site block with two addresses, which is the whole trick. Before
+# the neutral-hostname migration they are the same name (`freeskool.xyz`), and after it
+# they are not (`freeskool.directory` and `freeskool.xyz`) — and Caddy refuses a duplicate
+# site address across two blocks ("ambiguous site definition") while silently deduplicating
+# identical addresses WITHIN one block. So one block with both, plus the legacy domain,
+# serves every arrangement of those three variables without a conditional and without ever
+# being able to collide. Verified with `caddy validate` in each arrangement; see
+# docs/runbooks/pds-hostname-migration.md.
+#
+# `*.{$SCHOOL_DOMAIN_SUFFIX}` is PERMANENT. It is what keeps `boulder.freeskool.xyz` and
+# `www.freeskool.xyz` answering after the migration is finished and the handle domain has
+# moved away — without it, cleaning up the overlap would take the city app host and www
+# down with it.
+#
+# `{$PDS_LEGACY_HOST}` exists only for the length of a hostname migration. A DID document
+# is world-readable and slow to change; between the moment the PDS starts answering to
+# `pds.freeskool.directory` and the moment the last account's PLC operation lands, some
+# accounts still tell the network their repo is at `pds.freeskool.xyz`, and a client
+# reading that document will dial it for `/xrpc/*` AND for OAuth. Unset, it falls back to
+# a `.invalid` sentinel — a site block for a name that cannot resolve, which costs nothing.
 #
 # The wildcard inversion (multi-school design §3). A handle host needs the PDS for exactly
 # two things — `/.well-known/atproto-did`, which is how the network resolves the handle, and
@@ -86,9 +98,28 @@
 	reverse_proxy pds:3000
 }
 
-# What every handle/school host does, on the current domain and on the one being left
-# behind. One definition, for the same reason `(app)` is one definition.
-(handle_host) {
+# Every wildcard host — a member's handle, a school's web address, www — in ONE block,
+# because two of these three addresses are the same name before the migration and a
+# different name after it, and Caddy deduplicates identical addresses inside a block while
+# refusing them across blocks. The order below is the order of specificity in the matchers,
+# not of the names.
+#
+# A handle host needs the PDS for exactly two paths. Everything else is the app, served
+# exactly as the apex serves it, which is what lets `boulder.freeskool.xyz` be the Boulder
+# school's web address AND (until the migration) the school account's handle at once.
+# Routing those two paths on a school host costs nothing once the handles have moved: the
+# PDS simply has no account by that name and answers not-found, exactly as it does today
+# for any label that is not a handle.
+#
+# CAVEAT, and it is the one thing to plan around: the on-demand `ask` gate
+# (`apps/appview/src/lib/tls-check.ts`) vouches for exactly ONE handle domain — whichever
+# `PDS_HANDLE_DOMAIN` currently is — plus the known school labels. During a migration,
+# member handle hosts on the OTHER domain are served from certificates Caddy already holds;
+# a name that has never been issued one cannot get one. That is why the runbook does the
+# flip and the account migration in a single window rather than leaving the overlap open
+# for days. School hosts and www are unaffected: the gate answers for those from
+# `SCHOOL_LABELS` and `WEB_HOST`, neither of which this migration touches.
+*.{$PDS_HANDLE_DOMAIN}, *.{$SCHOOL_DOMAIN_SUFFIX}, *.{$PDS_LEGACY_HANDLE_DOMAIN:legacy.invalid} {
 	tls {
 		on_demand
 	}
@@ -103,32 +134,13 @@
 	import app
 }
 
-*.{$PDS_HANDLE_DOMAIN} {
-	import handle_host
-}
-
-# ── Migration overlap (unset = a `.invalid` sentinel that never resolves) ────────────
-#
-# The old PDS hostname keeps serving the whole PDS, because a not-yet-migrated account's
-# DID document still names it and a client that reads that document will dial it for
-# `/xrpc/*` AND for OAuth. The old wildcard keeps serving handle resolution for the same
-# reason, and keeps serving the app so a bookmarked handle host does not 404 mid-window.
-#
-# CAVEAT, and it is the one thing to plan around: the on-demand `ask` gate
-# (`apps/appview/src/lib/tls-check.ts`) vouches for exactly ONE handle domain — whichever
-# `PDS_HANDLE_DOMAIN` currently is. During the overlap, hosts on the other domain are
-# served from certificates Caddy ALREADY holds; a name that has never been issued one
-# cannot get one. That is why the runbook does the flip and the account migration in a
-# single window rather than leaving the overlap open for days.
+# The PDS hostname we are moving AWAY from, for the length of the migration window only.
+# Unset = a `.invalid` sentinel that never resolves. See the header.
 {$PDS_LEGACY_HOST:legacy-pds.invalid} {
 	tls {
 		on_demand
 	}
 	reverse_proxy pds:3000
-}
-
-*.{$PDS_LEGACY_HANDLE_DOMAIN:legacy.invalid} {
-	import handle_host
 }
 
 # The on-demand "ask" gate (container-local only), proxied to the AppView, which answers
