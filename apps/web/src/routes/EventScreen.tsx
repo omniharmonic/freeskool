@@ -81,6 +81,12 @@ export function EventScreen() {
   const isPast = Boolean(endsAt && endsAt.getTime() < Date.now());
 
   const cancelled = event.status?.endsWith('#cancelled');
+  // The host's own meeting link first, then any legacy `uris` from a class published
+  // before task 19c. `javascript:` and friends never render.
+  const meetingLinks = [
+    ...(event.meetingLink ? [{ uri: event.meetingLink, name: 'Join the class' }] : []),
+    ...(event.uris ?? []).filter(link => link.uri !== event.meetingLink),
+  ].filter(link => { try { return ['http:','https:'].includes(new URL(link.uri).protocol); } catch { return false; } });
   return (
     <Screen title={event.name} layout="detail" back>
       <div className="safe-x">
@@ -99,7 +105,10 @@ export function EventScreen() {
             </section>
             {event.publicOverview?.audience ? <section className="event-section"><h2>Who it’s for</h2><p className="event-description">{event.publicOverview.audience}</p></section> : null}
             {event.publicOverview?.accessibility ? <section className="event-section"><h2>Access &amp; comfort</h2><p className="event-description">{event.publicOverview.accessibility}</p></section> : null}
-            {event.description && !event.locationRedacted ? <section className="event-section"><h2>For attendees</h2><p className="event-description">{event.description}</p></section> : null}
+            {/* Task 19c: `attendeeNotes` is app-side and the API only sends it to a
+                viewer who also gets the address — the host, a steward, or someone who
+                has RSVP'd. `locationRedacted` mirrors that same gate. */}
+            {event.attendeeNotes && !event.locationRedacted ? <section className="event-section"><h2>For attendees</h2><p className="event-description">{event.attendeeNotes}</p></section> : null}
             {event.skills.length ? <section className="event-section"><h2>What you’ll learn</h2><div className="class-skill-list">{event.skills.map((skill,i)=><ClassSkill key={`${skill.skill}-${i}`} skill={skill}/>)}</div></section> : null}
             {event.materials.length > 0 || event.suppliesNote ? <section className="event-section"><h2>What to bring</h2>
               {event.materials.length ? <ul className="list-disc space-y-2 pl-5 text-body">{event.materials.map((m,i) => <li key={`${m}-${i}`}>{m}</li>)}</ul> : null}
@@ -117,7 +126,10 @@ export function EventScreen() {
             <p className="event-cost">Always free <span>·</span> {event.mode?.endsWith('#virtual') ? 'Online' : event.mode?.endsWith('#hybrid') ? 'In person + online' : 'In person'}</p>
             <div className="event-date"><p>{start ? formatDayStamp(start) : 'Date to be announced'}</p><p>{event.startsAt && event.endsAt ? formatTimeRange(event.startsAt,event.endsAt) : event.startsAt ? formatTime(event.startsAt) : 'Time to be announced'}</p></div>
             <dl className="event-location"><dt>Where</dt><dd>{event.mode?.endsWith('#virtual') ? <span>{event.locationRedacted ? 'Online. RSVP to see the meeting link.' : 'Online. Use the meeting link below; if none is listed, check back for details.'}</span> : event.venueNeeded ? <span>We’re looking for a space{event.neighborhood ? ` in ${event.neighborhood}` : ''}. No address yet — check back, or offer one if you have a room.</span> : event.locationRedacted ? <span>{event.neighborhood ? `Somewhere in ${event.neighborhood}. ` : "This class's host hasn't shared a neighbourhood yet. "}The exact address shows up here once you RSVP.</span> : locations.length ? locations.map((location,i) => <div key={i}>{formatAddress(location)}</div>) : <span>No address yet — check back, or offer one if you have a room.</span>}</dd></dl>
-            {!event.locationRedacted && event.uris?.length ? <div className="class-meeting-links">{event.uris.filter(link=>{try{return ['http:','https:'].includes(new URL(link.uri).protocol);}catch{return false;}}).map((link,i)=><a key={`${link.uri}-${i}`} href={link.uri} target="_blank" rel="noopener noreferrer" className="context-link">{link.name || 'Class link'} ↗</a>)}</div> : null}
+            {/* The host's meeting link is app-side now (`meetingLink`); `uris` only ever
+                still carries one on a class published before task 19c, and the API
+                gates both the same way. */}
+            {!event.locationRedacted && meetingLinks.length ? <div className="class-meeting-links">{meetingLinks.map((link,i)=><a key={`${link.uri}-${i}`} href={link.uri} target="_blank" rel="noopener noreferrer" className="context-link">{link.name || 'Class link'} ↗</a>)}</div> : null}
             <h2 className="mt-6 text-body font-bold">Who's coming</h2><p className="mt-2 text-body text-ink-soft">{event.rsvps.going} going{event.rsvps.interested ? `, ${event.rsvps.interested} interested` : ''}</p>
             <div className="mt-5"><SessionGate prompt="Sign in to RSVP, invite a friend, or turn on reminders."><EventActions event={event} /></SessionGate></div>
           </aside>

@@ -419,17 +419,30 @@ export const peer = pgTable('fs_peer', {
 })
 
 /**
- * Materials and a supplies note for a class — `coop.lexicon.event.config` (our ASSUMED
- * shape, `lexicons/coop.ts`) has no fields for either, so they live here, app-side, one
- * row per event. `suppliesNote` is free text the host writes ("bring a lock and cable");
- * it is never auto-linkified or rendered as a payment affordance by this API — that is a
- * client rendering rule, not something enforced by storage.
+ * Everything about a class that the host meant for PEOPLE WHO ARE COMING, not for the
+ * world — `coop.lexicon.event.config` (our ASSUMED shape, `lexicons/coop.ts`) has no
+ * fields for any of it, and `community.lexicon.calendar.event` is a PUBLIC record in the
+ * host's own repo, so none of it may live there. One row per event.
+ *
+ * `suppliesNote` is free text the host writes ("bring a lock and cable"); it is never
+ * auto-linkified or rendered as a payment affordance by this API — that is a client
+ * rendering rule, not something enforced by storage.
+ *
+ * `attendeeNotes` and `meetingLink` (task 19c) used to be written into the event record's
+ * `description` and `uris`, under a form that promised "shown after RSVP" — a promise the
+ * protocol could not keep, because the record is world-readable on the firehose. They are
+ * app-side now and revealed by the SAME gate as the precise location
+ * (`http/visibility.ts#seesFullLocation`: host, steward, RSVP'd, attended).
  */
 export const eventExtra = pgTable('fs_event_extra', {
   eventUri: text('event_uri').primaryKey(),
   /** string[], ≤ 20 items of ≤ 120 chars — enforced by the route's zod schema. */
   materials: jsonb('materials').notNull().default([]),
   suppliesNote: text('supplies_note'),
+  /** Free text for people who RSVP'd. Never on the public record. */
+  attendeeNotes: text('attendee_notes'),
+  /** The Zoom/Meet/Jitsi link. Never on the public record. */
+  meetingLink: text('meeting_link'),
   updatedAt: ts('updated_at').notNull().defaultNow(),
 })
 

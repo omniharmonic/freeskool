@@ -91,7 +91,7 @@ function EventEditForm() {
   const timezone = useMemo(() => Intl.DateTimeFormat().resolvedOptions().timeZone, []);
 
   const [name, setName] = useState('');
-  const [description, setDescription] = useState('');
+  const [attendeeNotes, setAttendeeNotes] = useState('');
   const [overview, setOverview] = useState('');
   const [audience, setAudience] = useState('');
   const [accessibility, setAccessibility] = useState('');
@@ -155,7 +155,7 @@ function EventEditForm() {
   useEffect(() => {
     if (!existing) return;
     setName(existing.name ?? '');
-    setDescription(existing.description ?? '');
+    setAttendeeNotes(existing.attendeeNotes ?? '');
     setOverview(existing.publicOverview?.description ?? '');
     setAudience(existing.publicOverview?.audience ?? '');
     setAccessibility(existing.publicOverview?.accessibility ?? '');
@@ -165,7 +165,7 @@ function EventEditForm() {
     setEndLocal(isoToLocal(existing.endsAt));
     setVenueNeeded(Boolean(existing.venueNeeded));
     setMode(existing.mode ?? 'community.lexicon.calendar.event#inperson');
-    setMeetingLink(existing.uris?.[0]?.uri ?? '');
+    setMeetingLink(existing.meetingLink ?? '');
     setNeighborhood(existing.neighborhood ?? '');
     setTags(existing.tags ?? []);
     // The raw enum (Task 12) — present only for the host/a steward, which an
@@ -279,9 +279,9 @@ function EventEditForm() {
 
     // `updateEventAsHost` (`apps/appview/src/lib/events.ts`) treats an ABSENT
     // key as "leave unchanged" but an EXPLICIT empty value as "clear it" —
-    // so on edit, `description`/`neighborhood`/`tags`/`skills`/`locations`/
-    // `materials`/`suppliesNote` must always be sent (even empty), or a host
-    // can never remove a description, neighbourhood, tag, skill, material, or
+    // so on edit, `attendeeNotes`/`meetingLink`/`neighborhood`/`tags`/`skills`/
+    // `locations`/`materials`/`suppliesNote` must always be sent (even empty),
+    // or a host can never remove a note, neighbourhood, tag, skill, material, or
     // flip a class to venue-needed. On create there is nothing to clear, so
     // the condition below reduces to exactly the old "only send it if it has
     // content" behaviour. `visibility` is the one exception — see
@@ -290,10 +290,10 @@ function EventEditForm() {
       name: name.trim(),
       venueNeeded: mode.endsWith('#virtual') ? false : venueNeeded,
       mode,
-      ...(isEdit || meetingLink.trim() ? {uris:[...(meetingLink.trim() ? [{uri:meetingLink.trim(),name:existing?.uris?.[0]?.name ?? 'Class meeting link'}] : []),...(existing?.uris?.slice(1)??[])]}:{}),
+      ...(isEdit || meetingLink.trim() ? { meetingLink: meetingLink.trim() } : {}),
       ...(cover !== undefined ? { cover } : {}),
       publicOverview: { description: overview.trim(), audience: audience.trim(), accessibility: accessibility.trim() },
-      ...(isEdit || description.trim() ? { description: description.trim() } : {}),
+      ...(isEdit || attendeeNotes.trim() ? { attendeeNotes: attendeeNotes.trim() } : {}),
       startsAt,
       ...(endsAt ? { endsAt } : {}),
       timezone,
@@ -376,7 +376,7 @@ function EventEditForm() {
               maxLength={300}
             />
           </label>
-          <p className="mt-5 text-caption text-ink-soft">The following overview is visible before someone signs in or RSVPs. Keep addresses and meeting links in the location fields.</p>
+          <p className="mt-5 text-caption text-ink-soft">The following overview is the class as the world sees it — it is published with the class and travels to other calendars. Keep addresses, door codes and meeting links out of it; there are attendee-only fields below for those.</p>
           <label className="mt-4 block"><span className={labelText}>About this class</span>
             <textarea className={`${field} min-h-[150px]`} value={overview} onChange={e => setOverview(e.target.value)} maxLength={6000} placeholder="What will you explore together? What will people learn, make, or take home?" />
           </label>
@@ -387,14 +387,15 @@ function EventEditForm() {
             <textarea className={field} value={accessibility} onChange={e => setAccessibility(e.target.value)} maxLength={1000} placeholder="Step-free access, seating, languages, noise, or sensory considerations. Share what you know." />
           </label>
           <label className="mt-4 block">
-            <span className={labelText}>Additional attendee details</span>
+            <span className={labelText}>Notes for attendees (optional)</span>
             <textarea
               className={`${field} min-h-[88px] resize-none`}
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder="Extra notes for people attending. Shown after RSVP on this school’s pages."
+              value={attendeeNotes}
+              onChange={(e) => setAttendeeNotes(e.target.value)}
+              placeholder="Come to the side door; the gate code is on the fence."
               maxLength={20000}
             />
+            <span className="text-caption text-ink-soft">Only people who RSVP see this.</span>
           </label>
         </div>
 
@@ -462,7 +463,7 @@ function EventEditForm() {
         <div id="class-where">
           <SectionHeading>Where</SectionHeading>
           <label className="block mb-4"><span className={labelText}>How we’ll meet</span><select aria-label="How we’ll meet" className={field} value={mode} onChange={e=>setMode(e.target.value)}><option value="community.lexicon.calendar.event#inperson">In person</option><option value="community.lexicon.calendar.event#virtual">Online</option><option value="community.lexicon.calendar.event#hybrid">In person + online</option></select></label>
-          <label className="block mb-5"><span className={labelText}>Meeting link (optional)</span><input type="url" pattern="https?://.*" className={field} value={meetingLink} onChange={e=>setMeetingLink(e.target.value)} placeholder="https://…"/><span className="text-caption text-ink-soft">Available to attendees after they RSVP.</span></label>
+          <label className="block mb-5"><span className={labelText}>Meeting link (optional)</span><input type="url" pattern="https?://.*" className={field} value={meetingLink} onChange={e=>setMeetingLink(e.target.value)} placeholder="https://…"/><span className="text-caption text-ink-soft">Only people who RSVP see this.</span></label>
           <div className="safe-x -mx-4">
             <label className="flex items-center gap-2.5" hidden={mode.endsWith('#virtual')}>
               <input

@@ -210,7 +210,11 @@ describe('EventEditScreen', () => {
     fireEvent.change(screen.getByLabelText(/Meeting link/),{target:{value:'https://example.org/class'}});
     fireEvent.click(screen.getByRole('button',{name:/post this class/i}));
     await waitFor(()=>expect(api.events.create).toHaveBeenCalled());
-    expect(vi.mocked(api.events.create).mock.calls[0]![0]).toMatchObject({mode:'community.lexicon.calendar.event#virtual',venueNeeded:false,uris:[{uri:'https://example.org/class',name:'Class meeting link'}]});
+    // TASK 19c: the link is an app-side `meetingLink`, never a `uris` entry on the
+    // host's public record — the form promises only RSVPs see it.
+    const posted = vi.mocked(api.events.create).mock.calls[0]![0];
+    expect(posted).toMatchObject({mode:'community.lexicon.calendar.event#virtual',venueNeeded:false,meetingLink:'https://example.org/class'});
+    expect('uris' in posted).toBe(false);
   });
 
   it('builds a weekly series and sends it only on create', async () => {
@@ -401,7 +405,7 @@ describe('EventEditScreen', () => {
     fireEvent.change(screen.getByLabelText('About this class'), { target: { value: 'Learn to bake a loaf together.' } });
     fireEvent.change(screen.getByLabelText('Who it’s for'), { target: { value: 'Beginners welcome.' } });
     fireEvent.change(screen.getByLabelText('Access & comfort'), { target: { value: 'Seated work.' } });
-    fireEvent.change(screen.getByLabelText(/additional attendee details/i), { target: { value: 'Bring your own starter.' } });
+    fireEvent.change(screen.getByLabelText(/notes for attendees/i), { target: { value: 'Bring your own starter.' } });
     fireEvent.click(screen.getByLabelText(/venue needed/i));
 
     fireEvent.change(screen.getByPlaceholderText('A mixing bowl'), { target: { value: 'A mixing bowl' } });
@@ -415,8 +419,53 @@ describe('EventEditScreen', () => {
     expect(body.materials).toEqual(['A mixing bowl']);
     expect(body.suppliesNote).toBe('Flour provided.');
     // Never composed into the description — that was the old workaround.
-    expect(body.description).toBe('Bring your own starter.');
+    // TASK 19c: the attendee notes go to their own app-side field; the PUBLIC
+    // overview is the only free text that reaches the event record.
+    expect(body.attendeeNotes).toBe('Bring your own starter.');
+    expect('description' in body).toBe(false);
     expect(body.publicOverview).toEqual({ description: 'Learn to bake a loaf together.', audience: 'Beginners welcome.', accessibility: 'Seated work.' });
+  });
+
+  it('edit: prefills the attendee notes and the meeting link from their app-side fields (task 19c)', async () => {
+    paramsReturn = { id: EVENT_URI };
+    vi.mocked(api.events.get).mockResolvedValue({
+      uri: EVENT_URI,
+      name: 'Sourdough basics',
+      startsAt: '2026-10-01T18:00:00-06:00',
+      locationRedacted: false,
+      hostDid: 'did:plc:host1',
+      venueNeeded: true,
+      tags: [],
+      listed: true,
+      skills: [],
+      materials: [],
+      // The record's own `description` is the PUBLIC overview now; it must never be
+      // prefilled into the attendee-notes box.
+      description: 'Public invitation',
+      publicOverview: { description: 'Public invitation' },
+      attendeeNotes: 'Come to the side door.',
+      meetingLink: 'https://example.org/class',
+      rsvps: { going: 0, interested: 0 },
+      viewerRelation: 'host' as const,
+    });
+    vi.mocked(api.events.update).mockResolvedValue({
+      event: { uri: EVENT_URI, cid: 'cid9' },
+      config: { uri: 'at://did:plc:host1/coop.lexicon.event.config/cfg1', cid: 'cid2' },
+    });
+
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Edit class' });
+    expect(screen.getByLabelText(/notes for attendees/i)).toHaveValue('Come to the side door.');
+    expect(screen.getByLabelText(/meeting link/i)).toHaveValue('https://example.org/class');
+    expect(screen.getByLabelText('About this class')).toHaveValue('Public invitation');
+
+    fireEvent.click(screen.getByRole('button', { name: /save changes/i }));
+    await waitFor(() => expect(api.events.update).toHaveBeenCalled());
+    const [, body] = vi.mocked(api.events.update).mock.calls[0]!;
+    expect(body.attendeeNotes).toBe('Come to the side door.');
+    expect(body.meetingLink).toBe('https://example.org/class');
+    expect('description' in body).toBe(false);
+    expect('uris' in body).toBe(false);
   });
 
   it('edit: prefills materials, suppliesNote, and the raw visibility enum from the host view', async () => {

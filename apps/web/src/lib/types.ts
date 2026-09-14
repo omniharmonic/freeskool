@@ -106,12 +106,16 @@ export interface EventUriRef {
 
 /**
  * Mirrors `PublicCalendarEntry`/`FullCalendarEntry` from `projectEvent()` in
- * `apps/appview/src/http/visibility.ts:87-110` and `toCalendarEvent()` in
- * `apps/appview/src/http/routes/calendar.ts:63-76` exactly: `hostDid`,
- * `description`, `locations`, and `uris` are present only when
- * `locationRedacted` is false (the viewer is the host, has RSVP'd, has
- * confirmed attendance, or is a steward) — everyone else gets the coarser
- * public entry.
+ * `apps/appview/src/http/visibility.ts` and `toCalendarEvent()` in
+ * `apps/appview/src/http/routes/calendar.ts` exactly.
+ *
+ * `description` is the host's PUBLIC overview — it is the event record's own
+ * `description` field, world-readable in the host's repo, and is sent to
+ * everyone for a listed class. `locations`, `uris`, `attendeeNotes` and
+ * `meetingLink` are present only when `locationRedacted` is false (the viewer
+ * is the host, has RSVP'd, has confirmed attendance, or is a steward) —
+ * everyone else gets the coarser public entry. Task 19c moved the notes and the
+ * link off the public record precisely so that gate could be honoured.
  */
 export interface ImageInput { data: string; alt: string }
 
@@ -129,11 +133,16 @@ export interface CalendarEvent {
   neighborhood?: string;
   /** True when the full location was withheld from this viewer. */
   locationRedacted: boolean;
+  /** The public overview. Present for any listed class, to any viewer. */
+  description?: string;
   /** Present only when `locationRedacted` is false. */
   hostDid?: string;
-  description?: string;
   locations?: EventLocation[];
   uris?: EventUriRef[];
+  /** App-side and attendee-only (task 19c): notes the host wrote for people
+   * who RSVP'd, and the meeting link. Never on any public record. */
+  attendeeNotes?: string;
+  meetingLink?: string;
   /** Added by Task 2; absent until then. */
   venueNeeded?: boolean;
   tags?: string[];
@@ -195,12 +204,16 @@ export interface CreateEventInput {
   cover?: ImageInput | null;
   venueNeeded?: boolean;
   name: string;
-  description?: string;
+  /** Attendee-only, app-side. Replaces the pre-19c `description` input, which
+   * the AppView still accepts and maps onto this (`attendeeFields()` in
+   * `apps/appview/src/lib/events.ts`). */
+  attendeeNotes?: string;
+  /** Attendee-only, app-side. Replaces the pre-19c `uris` input. */
+  meetingLink?: string;
   startsAt: string;
   endsAt?: string;
   mode?: string;
   locations?: unknown[];
-  uris?: EventUriRef[];
   timezone?: string;
   capacity?: number;
   visibility?: 'listed' | 'unlisted' | 'private';

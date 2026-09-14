@@ -96,17 +96,38 @@ export async function resolveHostDids(
 }
 
 export interface CreateEventInput {
+  /**
+   * The PUBLIC invitation. Its `description` is written into the event record's own
+   * `description` field (task 19c) — that is what a peer AppView, a calendar client or
+   * anyone reading the host's repo sees, and it is the only free text of ours that goes
+   * there. `audience` / `accessibility` stay app-side (`lib/event-presentation.ts`),
+   * because the borrowed record has nowhere to put them and we never extend it.
+   */
   publicOverview?: PublicOverview
   cover?: ImageInput | null
   venueNeeded?: boolean
   name: string
+  /**
+   * Notes for people who RSVP'd ("come to the side door"). App-side, `fs_event_extra`
+   * — NEVER the record. See `lib/event-extra.ts`.
+   */
+  attendeeNotes?: string
+  /** The Zoom/Meet/Jitsi link. App-side too, same reason, same gate. */
+  meetingLink?: string
+  /**
+   * @deprecated Pre-19c names for `attendeeNotes` / `meetingLink`. The class form
+   * labelled them "shown after RSVP" and then wrote them into the host's PUBLIC record;
+   * `attendeeFields()` below maps them onto the app-side fields so older clients (and
+   * the seed scripts) keep working. Neither is ever written to a record again.
+   */
   description?: string
+  /** @deprecated see `description` — only `uris[0].uri` is read, as the meeting link. */
+  uris?: Array<{ uri: string; name?: string }>
   startsAt: string
   endsAt?: string
   /** `community.lexicon.calendar.event#inperson` etc. Defaults to in-person. */
   mode?: string
   locations?: unknown[]
-  uris?: Array<{ uri: string; name?: string }>
   /** coop.lexicon.event.config */
   timezone?: string
   capacity?: number
@@ -262,6 +283,33 @@ export function canViewRoster(hostDid: string, viewerDid: string, viewerRole: nu
   return hostDid === viewerDid || viewerRole >= Role.Steward
 }
 
+/**
+ * The one place the deprecated `description` / `uris` inputs are folded onto the app-side
+ * `attendeeNotes` / `meetingLink` (task 19c). `undefined` still means "leave alone" on an
+ * update, so the distinction between an ABSENT key and an explicitly empty one survives
+ * the mapping: `uris: []` is a deliberate "clear the link" and resolves to `''`, while an
+ * omitted `uris` resolves to `undefined`.
+ */
+export function attendeeFields(input: Pick<CreateEventInput, 'attendeeNotes' | 'meetingLink' | 'description' | 'uris'>): {
+  attendeeNotes?: string
+  meetingLink?: string
+} {
+  const attendeeNotes = input.attendeeNotes !== undefined ? input.attendeeNotes : input.description
+  const meetingLink =
+    input.meetingLink !== undefined
+      ? input.meetingLink
+      : input.uris !== undefined
+        ? input.uris[0]?.uri ?? ''
+        : undefined
+  return { ...(attendeeNotes !== undefined ? { attendeeNotes } : {}), ...(meetingLink !== undefined ? { meetingLink } : {}) }
+}
+
+/** Empty string and whitespace both mean "not set" for an app-side text field. */
+function text(value?: string): string | undefined {
+  const trimmed = value?.trim()
+  return trimmed ? trimmed : undefined
+}
+
 export async function createEventAsHost(viewer: Viewer, input: CreateEventInput): Promise<CreatedEvent> {
   const cover = input.cover ? await normalizeImage(input.cover) : undefined
   const agent = await actorAgent(viewer)
@@ -270,18 +318,26 @@ export async function createEventAsHost(viewer: Viewer, input: CreateEventInput)
   // above). It still appears on our own calendar by authorship, not by this array.
   const tags = input.tags ?? []
 
+  const attendee = attendeeFields(input)
+
+  // THE RECORD'S `description` IS THE PUBLIC OVERVIEW, and nothing else (task 19c). The
+  // attendee notes and the meeting link that used to land here — under a form that said
+  // "shown after RSVP" — are app-side now: `community.lexicon.calendar.event` is
+  // world-readable in the host's own repo, so the old promise was never true, while the
+  // text the host actually wrote FOR the public was not on the record at all and peers
+  // saw a class with no description. No `uris` either: the only thing that ever
+  // populated them was the host's meeting link.
   const eventRkey = tid()
   const event = await put(agent, viewer.did, NSID.event, eventRkey, {
     $type: NSID.event,
     name: input.name,
-    ...(input.description ? { description: input.description } : {}),
+    ...(text(input.publicOverview?.description) ? { description: input.publicOverview!.description.trim() } : {}),
     createdAt: now,
     startsAt: input.startsAt,
     ...(input.endsAt ? { endsAt: input.endsAt } : {}),
     mode: input.mode ?? `${NSID.event}#inperson`,
     status: `${NSID.event}#scheduled`,
     ...(input.locations?.length ? { locations: input.locations } : {}),
-    ...(input.uris?.length ? { uris: input.uris } : {}),
     rsvpExpected: input.rsvpRequired ?? true,
   })
 
@@ -344,7 +400,12 @@ export async function createEventAsHost(viewer: Viewer, input: CreateEventInput)
     callerDid: viewer.did as Did,
   })
 
-  await setEventExtra(event.uri, input.materials ?? [], input.suppliesNote)
+  await setEventExtra(event.uri, {
+    materials: input.materials ?? [],
+    ...(text(input.suppliesNote) ? { suppliesNote: input.suppliesNote!.trim() } : {}),
+    ...(text(attendee.attendeeNotes) ? { attendeeNotes: attendee.attendeeNotes!.trim() } : {}),
+    ...(text(attendee.meetingLink) ? { meetingLink: attendee.meetingLink!.trim() } : {}),
+  })
   await savePresentation(event.uri, { cover, venueNeeded: input.venueNeeded, publicOverview: input.publicOverview })
 
   await bumpTally(viewer.did, { hostedEvents: 1 })
@@ -442,15 +503,23 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
   }
   const agent = await actorAgent(viewer)
 
+  // Task 19c. The record's `description` is ALWAYS the resolved public overview — never
+  // merged from `current.value`, because on a class published before 19c that field holds
+  // the host's attendee notes, and re-writing it from the app-side overview is what
+  // repairs the leak on the next edit. `uris` is dropped for the same reason: nothing in
+  // this codebase writes them any more, so whatever is there is a legacy meeting link the
+  // host was told only attendees would see. (`scripts/migrate-event-notes.ts` is the
+  // one-off that moves the old values somewhere safe rather than merely dropping them.)
+  const newOverview = input.publicOverview !== undefined ? input.publicOverview : oldPresentation.publicOverview
+  const { uris: _legacyUris, description: _legacyDescription, ...carried } = current.value as Record<string, unknown>
   const mergedEvent: Record<string, unknown> = {
-    ...current.value,
+    ...carried,
+    ...(text(newOverview?.description) ? { description: newOverview!.description.trim() } : {}),
     ...(input.name !== undefined ? { name: input.name } : {}),
-    ...(input.description !== undefined ? { description: input.description } : {}),
     ...(input.startsAt !== undefined ? { startsAt: input.startsAt } : {}),
     ...(input.endsAt !== undefined ? { endsAt: input.endsAt } : {}),
     ...(input.mode !== undefined ? { mode: input.mode } : {}),
     ...(input.locations !== undefined ? { locations: input.locations } : {}),
-    ...(input.uris !== undefined ? { uris: input.uris } : {}),
     ...(input.rsvpRequired !== undefined ? { rsvpExpected: input.rsvpRequired } : {}),
   }
   const event = await put(agent, viewer.did, NSID.event, parts.rkey, mergedEvent)
@@ -481,9 +550,22 @@ export async function updateEventAsHost(viewer: Viewer, eventUri: string, input:
 
   // Same "omit means leave alone" convention as `tags`/`visibility` above.
   const existingExtra = await getEventExtra(eventUri)
-  const newMaterials = input.materials !== undefined ? input.materials : existingExtra.materials
-  const newSuppliesNote = input.suppliesNote !== undefined ? input.suppliesNote : existingExtra.suppliesNote
-  await setEventExtra(event.uri, newMaterials, newSuppliesNote)
+  const attendee = attendeeFields(input)
+  await setEventExtra(event.uri, {
+    materials: input.materials !== undefined ? input.materials : existingExtra.materials,
+    ...(() => {
+      const v = text(input.suppliesNote !== undefined ? input.suppliesNote : existingExtra.suppliesNote)
+      return v ? { suppliesNote: v } : {}
+    })(),
+    ...(() => {
+      const v = text(attendee.attendeeNotes !== undefined ? attendee.attendeeNotes : existingExtra.attendeeNotes)
+      return v ? { attendeeNotes: v } : {}
+    })(),
+    ...(() => {
+      const v = text(attendee.meetingLink !== undefined ? attendee.meetingLink : existingExtra.meetingLink)
+      return v ? { meetingLink: v } : {}
+    })(),
+  })
   await savePresentation(event.uri, { ...oldPresentation, cover, ...(input.publicOverview !== undefined ? { publicOverview: input.publicOverview } : {}), ...(input.venueNeeded !== undefined ? { venueNeeded: input.venueNeeded } : {}) })
 
   // Replace the skill sidecars entirely when `skills` is present; leave them alone

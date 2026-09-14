@@ -354,7 +354,10 @@ describe('EventScreen', () => {
     vi.mocked(api.auth.me).mockRejectedValue(new Error('Not signed in'));
     vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent,
       publicOverview: { description: 'Learn to grow oyster mushrooms.', audience: 'No experience needed.', accessibility: 'Seated work available.' },
-      description: 'Enter through the private kitchen door.',
+      // TASK 19c: the notes and the link are app-side and arrive only for a viewer
+      // who has RSVP'd. A payload that carried them anyway must still not render.
+      attendeeNotes: 'Enter through the private kitchen door.',
+      meetingLink: 'https://example.org/private-meeting',
       materials: ['A notebook'], suppliesNote: 'Starter kits provided.',
     });
     renderScreen();
@@ -364,6 +367,21 @@ describe('EventScreen', () => {
     expect(screen.getByText('A notebook')).toBeVisible();
     expect(screen.getByText('Starter kits provided.')).toBeVisible();
     expect(screen.queryByText('Enter through the private kitchen door.')).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /join the class/i })).not.toBeInTheDocument();
+  });
+
+  it('shows the attendee notes and the meeting link once the viewer is past the RSVP gate', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent,
+      locationRedacted: false,
+      viewerRelation: 'rsvp' as const,
+      mode: 'community.lexicon.calendar.event#virtual',
+      publicOverview: { description: 'Learn to grow oyster mushrooms.' },
+      attendeeNotes: 'Enter through the private kitchen door.',
+      meetingLink: 'https://example.org/private-meeting',
+    });
+    renderScreen();
+    expect(await screen.findByText('Enter through the private kitchen door.')).toBeVisible();
+    expect(screen.getByRole('link', { name: 'Join the class ↗' })).toHaveAttribute('href', 'https://example.org/private-meeting');
   });
 
   it('shows skill depth, prerequisites and safe meeting links only to eligible viewers', async () => {
@@ -377,10 +395,11 @@ describe('EventScreen', () => {
     expect(screen.queryByRole('link',{name:'Unsafe link ↗'})).not.toBeInTheDocument();
   });
   it('withholds meeting links before RSVP even if an accidental payload includes them', async () => {
-    vi.mocked(api.events.get).mockResolvedValue({...baseEvent,mode:'community.lexicon.calendar.event#virtual',uris:[{uri:'https://example.org/private-meeting',name:'Join the class'}]});
+    vi.mocked(api.events.get).mockResolvedValue({...baseEvent,mode:'community.lexicon.calendar.event#virtual',meetingLink:'https://example.org/private-meeting',uris:[{uri:'https://example.org/legacy-meeting',name:'Join the class'}]});
     renderScreen();
     expect(await screen.findByText('Online. RSVP to see the meeting link.')).toBeVisible();
     expect(screen.queryByRole('link',{name:'Join the class ↗'})).not.toBeInTheDocument();
+    expect(screen.queryByText(/legacy-meeting/)).not.toBeInTheDocument();
   });
 
   it('shows recovery when an RSVP fails and does not trigger a success nudge', async () => {
