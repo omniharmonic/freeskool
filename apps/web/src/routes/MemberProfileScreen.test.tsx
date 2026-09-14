@@ -93,6 +93,7 @@ describe('MemberProfileScreen', () => {
       handle: 'viewer.fs.boulder',
       isCustodial: true,
       emailVerified: true,
+      onboarded: true,
     });
     vi.mocked(api.members.get).mockReset().mockResolvedValue(profile);
     vi.mocked(api.me.attestations).mockReset().mockResolvedValue({ given: [], received: [] });
@@ -152,6 +153,28 @@ describe('MemberProfileScreen', () => {
     expect(await screen.findByText(/already vouched/i)).toBeInTheDocument();
   });
 
+  it('reconciles with the server when the vouch is refused, instead of failing again on retry', async () => {
+    // 409 `AlreadyVouched`: the vouch is already there, this page just hadn't
+    // heard. The refetched profile is what the button should show.
+    vi.mocked(api.attestations.create).mockRejectedValue(
+      new ApiError(409, 'AlreadyVouched', 'you have already vouched for this skill'),
+    );
+    vi.mocked(api.members.get)
+      .mockReset()
+      .mockResolvedValueOnce(profile)
+      .mockResolvedValue({
+        ...profile,
+        claims: [{ ...profile.claims[0]!, viewerVouched: true }, profile.claims[1]!],
+      });
+    renderScreen();
+
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Vouch' }))[0]!);
+
+    expect(await screen.findByText(/already vouched/i)).toBeInTheDocument();
+    await waitFor(() => expect(api.members.get).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole('button', { name: 'Vouched ✓' })).toBeInTheDocument();
+  });
+
   it('cannot vouch for yourself, and says why', async () => {
     vi.mocked(api.auth.me).mockResolvedValue({
       did: SUBJECT_DID,
@@ -160,6 +183,7 @@ describe('MemberProfileScreen', () => {
       handle: 'wren.fs.boulder',
       isCustodial: true,
       emailVerified: true,
+      onboarded: true,
     });
     renderScreen();
 
@@ -176,6 +200,7 @@ describe('MemberProfileScreen', () => {
       handle: 'wren.fs.boulder',
       isCustodial: true,
       emailVerified: true,
+      onboarded: true,
     });
     vi.mocked(api.me.attestations).mockResolvedValue({
       given: [],

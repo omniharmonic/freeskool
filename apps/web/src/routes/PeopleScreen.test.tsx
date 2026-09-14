@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 vi.mock('@tanstack/react-router', () => ({
@@ -36,6 +36,9 @@ vi.mock('../lib/api', () => {
 
 const { api } = await import('../lib/api');
 const { PeopleScreen } = await import('./PeopleScreen');
+
+/** Kept in step with the screen's own debounce window. */
+const SEARCH_DEBOUNCE_MS = 250;
 
 const SKILL_URI = 'at://did:plc:school/freeschool.draft.skill/mending';
 
@@ -81,6 +84,7 @@ describe('PeopleScreen', () => {
       handle: 'viewer.fs.boulder',
       isCustodial: true,
       emailVerified: true,
+      onboarded: true,
     });
     vi.mocked(api.members.list).mockReset().mockResolvedValue({ members });
     vi.mocked(api.skills.tree)
@@ -131,6 +135,56 @@ describe('PeopleScreen', () => {
     await waitFor(() =>
       expect(api.members.list).toHaveBeenCalledWith(expect.objectContaining({ skill: SKILL_URI })),
     );
+  });
+
+  it('pages through the directory with the cursor, and stops offering more when there is none', async () => {
+    vi.mocked(api.members.list).mockReset().mockImplementation(async (params) =>
+      params?.cursor === 'c1' ? { members: [members[1]!] } : { members: [members[0]!], cursor: 'c1' },
+    );
+    renderScreen();
+
+    expect(await screen.findByText('Wren Halloway')).toBeInTheDocument();
+    expect(screen.queryByText('Juno Marsh')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show more people' }));
+
+    // The second page is appended, not swapped in.
+    expect(await screen.findByText('Juno Marsh')).toBeInTheDocument();
+    expect(screen.getByText('Wren Halloway')).toBeInTheDocument();
+    expect(api.members.list).toHaveBeenCalledWith(expect.objectContaining({ cursor: 'c1' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Show more people' })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('debounces the name search: a name typed at speed is one request, not one per letter', async () => {
+    vi.useFakeTimers();
+    try {
+      renderScreen();
+      // Let the session check and the first page settle before counting calls.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const input = screen.getByLabelText(/search people/i);
+      vi.mocked(api.members.list).mockClear();
+
+      fireEvent.change(input, { target: { value: 'w' } });
+      fireEvent.change(input, { target: { value: 'wr' } });
+      fireEvent.change(input, { target: { value: 'wre' } });
+
+      // The box itself never waits on the network.
+      expect(input).toHaveValue('wre');
+      expect(api.members.list).not.toHaveBeenCalled();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(SEARCH_DEBOUNCE_MS);
+      });
+
+      expect(api.members.list).toHaveBeenCalledTimes(1);
+      expect(api.members.list).toHaveBeenCalledWith(expect.objectContaining({ q: 'wre' }));
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('says so plainly when nobody matches', async () => {

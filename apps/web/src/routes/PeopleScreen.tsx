@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Link } from '@tanstack/react-router';
 import { Screen } from '../components/Screen';
 import { SessionGate } from '../components/SessionGate';
@@ -20,9 +20,13 @@ import type { MemberSummary } from '../lib/types';
  * search results.
  *
  * Two filters, both server-side: a display-name substring (`q`) and one exact
- * skill (`skill`). Neither is debounced — the school is a community-scale
- * roster, and a keystroke's round trip is cheaper than the code to hide it.
+ * skill (`skill`). The text box updates on every keystroke and the request
+ * follows 250ms later, so typing a name is one query rather than one per
+ * letter; picking a skill is a deliberate act and fires at once.
  */
+
+/** Long enough to swallow a name typed at speed, short enough to feel typed. */
+const SEARCH_DEBOUNCE_MS = 250;
 export function PeopleScreen() {
   return (
     <SessionGate screen prompt="Sign in to see the people at this school.">
@@ -32,8 +36,15 @@ export function PeopleScreen() {
 }
 
 function PeopleContent() {
+  /** What is in the box, and what has reached the API — the gap is the debounce. */
+  const [typed, setTyped] = useState('');
   const [query, setQuery] = useState('');
   const [skill, setSkill] = useState('');
+
+  useEffect(() => {
+    const timer = setTimeout(() => setQuery(typed), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [typed]);
   const { data: tree } = useSkillTree();
   const flatSkills = useMemo(() => flattenSkills(tree?.skills ?? []), [tree]);
 
@@ -59,8 +70,8 @@ function PeopleContent() {
             <span className="text-caption text-ink-soft">Search people by name</span>
             <input
               type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
+              value={typed}
+              onChange={(event) => setTyped(event.target.value)}
               placeholder="A name"
               className="mt-1.5 min-h-[44px] w-full border-[1.5px] border-ink bg-sheet px-3 py-2.5 text-body outline-none"
             />

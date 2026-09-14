@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { Link, useParams } from '@tanstack/react-router';
 import { Screen } from '../components/Screen';
 import { LoadingState, PageState } from '../components/PageState';
@@ -88,6 +89,7 @@ function MemberProfileBody({ profile, viewerDid }: { profile: MemberProfileRespo
   const attestations = attestationsQuery.data;
   const vouchMutation = useVouchMutation();
   const unvouchMutation = useUnvouchMutation();
+  const queryClient = useQueryClient();
   const [vouchError, setVouchError] = useState<string | null>(null);
   /** What this viewer has just done, which the server copy may not show yet. */
   const [justChanged, setJustChanged] = useState<Record<string, boolean>>({});
@@ -128,6 +130,20 @@ function MemberProfileBody({ profile, viewerDid }: { profile: MemberProfileRespo
         setJustChanged((prev) => ({ ...prev, [claim.skillUri]: true }));
       }
     } catch (err) {
+      // A refused vouch usually means this page is out of date rather than that
+      // anything is wrong: 409 `AlreadyVouched` says the vouch is already there,
+      // 404 `SubjectNotHolding` says the claim has gone. Reconcile with the
+      // server before the member presses it again — otherwise the button keeps
+      // asking for something that cannot happen. The local override for this one
+      // skill is dropped too, so the refetched truth is what shows.
+      setJustChanged((prev) => {
+        const { [claim.skillUri]: _dropped, ...rest } = prev;
+        return rest;
+      });
+      void queryClient.invalidateQueries({ queryKey: ['member', profile.did] });
+      void queryClient.invalidateQueries({ queryKey: ['members'] });
+      void queryClient.invalidateQueries({ queryKey: ['skill'] });
+      void queryClient.invalidateQueries({ queryKey: ['my-attestations'] });
       setVouchError(err instanceof ApiError ? err.message : 'Could not save that vouch. Try again.');
     }
   };
