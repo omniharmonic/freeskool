@@ -44,6 +44,8 @@ import { resolvePdsEndpoint } from '../lib/identity.js'
 import { describeError, log } from '../lib/logging.js'
 import { openFeedbackWindow } from '../lib/feedback.js'
 
+const RELIST_LOOKBACK_MS = 7 * 24 * 60 * 60 * 1000
+
 export const DEFAULT_WINDOW_DAYS = 90
 export const MIN_OCCURRENCES = 4
 export const MAX_MONTHS_AHEAD = 18
@@ -294,7 +296,11 @@ export async function materializeSeries(
     const rkey = occurrenceRkey(parts.rkey, originalStartsAt)
     if (existing.has(rkey)) {
       skipped++
-      if (await seriesRoutes()) await relistIfMissing(existing.get(rkey) ?? null, i + 1)
+      // Back-fill a missing listing only for recent or upcoming occurrences: index lag
+      // resolves within a tick or two, and a years-old weekly series would otherwise
+      // cost one index query per past occurrence on every run, forever.
+      const recent = instant.getTime() >= now.getTime() - RELIST_LOOKBACK_MS
+      if (recent && (await seriesRoutes())) await relistIfMissing(existing.get(rkey) ?? null, i + 1)
       continue
     }
 
