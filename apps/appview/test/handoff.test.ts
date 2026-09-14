@@ -8,6 +8,7 @@
  */
 process.env.SCHOOL_DID = 'did:plc:school'
 
+import { leaveSchool } from '../src/lib/membership.js'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { eq } from 'drizzle-orm'
 import type { Context } from 'hono'
@@ -341,15 +342,18 @@ describe('HTTP: POST /api/handoff/:token/accept', () => {
     expect(body.ok).toBe(true)
   })
 
-  it('a Visitor (no profile at all) is refused with 403, not a steward-gate 403 masquerading as the wrong error', async () => {
+  it('a Visitor (signed in, but no live membership and no profile) is refused with 403, not a steward-gate 403 masquerading as the wrong error', async () => {
     if (!available) return
     setSchoolActor(wirePort())
     const proposed = await proposeHandoff({ did: FROM, kind: 'custodial' }, {}, { writeApproval: fakeApproval })
     expect(proposed.ok).toBe(true)
     if (!proposed.ok) return
 
+    // Signing in joins the school (a live membership is a profile since 2026-09-14), so a
+    // "bare" visitor is one whose membership has ended.
     const visitor = 'did:plc:a-bare-visitor'
     const cookie = await cookieFor(visitor)
+    await leaveSchool(visitor, process.env.SCHOOL_DID!)
 
     const app = createApp()
     const res = await app.request(`/api/handoff/${proposed.token}/accept`, {
