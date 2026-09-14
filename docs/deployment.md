@@ -5,7 +5,8 @@ the AppView (indexer + API + jobs), Postgres, and the school's own reference PDS
 
 - `Dockerfile` — `appview` and `web` targets from one pnpm workspace layer
 - `infra/production/compose.yml` — the four services; only Caddy publishes ports
-- `infra/production/Caddyfile` — three site blocks: web+API, `www` redirect, PDS + handles
+- `infra/production/Caddyfile` — an `(app)` snippet and four names: web+API on the apex, the PDS
+  hostname, the `*.` wildcard (handles **and** schools), and the container-local TLS `ask`
 - `infra/production/.env.example` — every variable, with how to generate each secret
 - `infra/production/backup.sh` — nightly Postgres dump + PDS volume tarball, 14-day retention
 
@@ -51,6 +52,68 @@ an MX plus SPF TXT on the `send` subdomain, and optionally `_dmarc`). `freeskool
 Resend domain (since 2026-09-13; `cosense.us` was removed to make room) and mail goes out as
 `Free School <hello@freeskool.xyz>`. Namecheap only keeps MX records once Mail Settings is set to
 **Custom MX** in its UI; the API silently drops them otherwise.
+
+## Caddy: handle hosts, school hosts, and the on-demand gate
+
+Since the federation branch the wildcard is **inverted** (multi-school design §3). It used to send
+everything on `*.freeskool.xyz` to the PDS, which made `boulder.freeskool.xyz` — the school
+account's handle — unusable as the school's web address. Now:
+
+| Name | What serves it |
+|---|---|
+| `freeskool.xyz` | the PWA, plus `/api/*` and the three `/oauth/*` documents on the AppView |
+| `www.freeskool.xyz` | 301 to the apex (from inside the wildcard block; see below) |
+| `pds.freeskool.xyz` | the PDS, whole and unchanged |
+| `*.freeskool.xyz` | `/.well-known/atproto-did` and `/xrpc/*` → the PDS; **every other path → the app** |
+
+So `boulder.freeskool.xyz` is both the Boulder school's web address and the Boulder school
+account's handle, and `calmalder301.freeskool.xyz/.well-known/atproto-did` keeps resolving exactly
+as before. The apex body lives in one Caddyfile snippet, `(app)`, imported by both the apex block
+and the wildcard block, so "the same app on another name" cannot drift into two apps.
+
+The consequence is that **school labels and member handles share one namespace**. One list,
+`RESERVED_LABELS` in `apps/appview/src/lib/handles.ts` (mirrored in the PWA's `HandleChooser.tsx`,
+which cannot import server code), is refused by the handle generator, by the handle chooser and by
+school creation: `admin www pds skills school help mail api app static assets internal denver
+boulder`, plus every label in `SCHOOL_LABELS`. A member who held a school's label would hold a
+school's origin — the session cookie is scoped to the registered domain — so this is a
+security rule, not a tidiness rule.
+
+**The on-demand `ask` now asks the AppView, not the PDS.** Caddy cannot get a wildcard certificate
+here (no DNS challenge), so every handle and school host is issued one name at a time and Caddy
+asks first. `http://127.0.0.1:9000` inside the Caddy container proxies to
+`appview:4000/internal/tls-check?domain=…`, which answers 200 for `www.$WEB_HOST`, 200 for a known
+school label under `SCHOOL_DOMAIN_SUFFIX`, and otherwise asks the PDS's own `/tls-check` (3-second
+timeout). **A PDS that does not answer is a 403**, never a yes: an unanswered check must not spend
+one of Let's Encrypt's 50 certificates per registered domain per week. The endpoint is never routed
+from a public host — the site blocks send only `/api/*` and the OAuth documents to the AppView — and
+it never logs the domain (R9: the ask carries a member's handle host).
+
+Two AppView variables belong in `infra/production/.env` (both have defaults that already match this
+deployment): `SCHOOL_DOMAIN_SUFFIX=freeskool.xyz` and `SCHOOL_LABELS=boulder`. The label of
+`SCHOOL_HANDLE` is added automatically when that handle sits directly under the suffix. Federation
+Task 2 replaces the `SCHOOL_LABELS` half with the `fs_school_domain` table.
+
+**Caddy gotchas that constrain all of the above.** Caddy never issues a certificate for a specific
+name it believes a configured wildcard covers, which is why `www` is served from inside the wildcard
+block (it would otherwise never get a certificate at all) and why `pds.freeskool.xyz` keeps
+`tls { on_demand }` even in its own block.
+
+### Validating the Caddyfile
+
+The Caddyfile uses `{$ENV}` placeholders, so validation needs them set — an unset placeholder
+becomes an empty hostname and the adapter's answer is meaningless:
+
+```sh
+docker run --rm \
+  -e WEB_HOST=freeskool.xyz -e PDS_HOST=pds.freeskool.xyz -e PDS_HANDLE_DOMAIN=freeskool.xyz \
+  -v "$PWD/infra/production/Caddyfile:/etc/caddy/Caddyfile:ro" \
+  caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+```
+
+It ends in `Valid configuration`. Swap `validate` for `adapt` to read the JSON it becomes — the
+quickest way to check that the PDS paths still sit ahead of the app on the wildcard host, and that
+the on-demand policy still covers both `pds.` and `*.`.
 
 ## Email (Resend)
 
@@ -190,7 +253,8 @@ design doc (`docs/superpowers/specs/2026-09-13-multi-school-design.md` §3) flag
 causes: a `<city>.freeskool.xyz`-per-school URL scheme, which that doc proposes, would collide head-on
 with the member-handle namespace `PDS_HANDLE_DOMAIN=freeskool.xyz` already owns. Nothing to do for this
 release — it is a known, written-down constraint for whenever multi-school ships, not a bug in what
-shipped here.
+shipped here. **Resolved on branch `federation`** by the wildcard inversion — see "Caddy: handle
+hosts, school hosts, and the on-demand gate" above.
 
 ## Moving the stack
 

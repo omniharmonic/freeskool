@@ -15,6 +15,7 @@ import { cors } from 'hono/cors'
 import { config } from '../config.js'
 import { withViewer, type AppEnv } from './session.js'
 import { health } from './routes/health.js'
+import { internal } from './routes/internal.js'
 import { auth } from './routes/auth.js'
 import { calendar } from './routes/calendar.js'
 import { events } from './routes/events.js'
@@ -69,6 +70,8 @@ export function createApp() {
   app.use('*', withViewer)
 
   app.route('/', health)
+  // Outside /api by design: the edge never routes /internal/* from a public host.
+  app.route('/', internal)
   app.route('/', oauthRoutes)
   app.route('/api/auth', auth)
   app.route('/api', calendar)

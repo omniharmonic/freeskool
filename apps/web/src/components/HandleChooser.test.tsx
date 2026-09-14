@@ -22,7 +22,7 @@ vi.mock('../lib/api', () => {
 });
 
 const { api } = await import('../lib/api');
-const { HandleChooser, HANDLE_PREFIX_RE, HANDLE_RULE } = await import('./HandleChooser');
+const { HandleChooser, HANDLE_PREFIX_RE, HANDLE_RULE, RESERVED_LABELS } = await import('./HandleChooser');
 
 function renderChooser() {
   const queryClient = new QueryClient();
@@ -94,10 +94,12 @@ describe('HandleChooser', () => {
   });
 
   it('keeps the server as the authority on reserved and taken', async () => {
+    // `longmont` is deliberately NOT in the client's mirror: the school labels a given
+    // deployment runs are config, so a reserved answer can still only come from the server.
     vi.mocked(api.me.checkHandle).mockResolvedValueOnce({ available: false, reason: 'reserved' });
     renderChooser();
 
-    type('school');
+    type('longmont');
 
     expect(await screen.findByText('That handle is reserved. Try another.')).toBeInTheDocument();
 
@@ -106,6 +108,31 @@ describe('HandleChooser', () => {
 
     expect(await screen.findByText('That handle is taken. Try another.')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Save this handle' })).toBeDisabled();
+  });
+
+  /**
+   * Task 1 (federation): a reserved label is a name the edge may hand to a school
+   * (`boulder.freeskool.xyz`), so it can never be a member's handle host. The server
+   * stays the authority — the mirror here only saves a round trip and says so sooner.
+   */
+  it('answers a reserved label itself, without asking the server', async () => {
+    renderChooser();
+
+    type('boulder');
+
+    expect(await screen.findByText('That handle is reserved. Try another.')).toBeInTheDocument();
+    await afterDebounce();
+    expect(api.me.checkHandle).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Save this handle' })).toBeDisabled();
+  });
+
+  it('mirrors the server list (apps/appview/src/lib/handles.ts RESERVED_LABELS)', () => {
+    expect([...RESERVED_LABELS].sort()).toEqual(
+      [
+        'admin', 'api', 'app', 'assets', 'boulder', 'denver', 'help',
+        'internal', 'mail', 'pds', 'school', 'skills', 'static', 'www',
+      ].sort(),
+    );
   });
 
   it('sends the normalized prefix, not what was typed', async () => {

@@ -45,6 +45,21 @@ const schema = z.object({
   SCHOOL_HANDLE: z.string().default(''),
   SCHOOL_APP_PASSWORD: z.string().default(''),
 
+  /**
+   * The registered domain whose single labels are SCHOOLS: `<label>.<suffix>` serves
+   * that school's app (MS §3's wildcard inversion). It is usually the same domain as
+   * `PDS_HANDLE_DOMAIN` — `boulder.freeskool.xyz` is both the Boulder school's host and
+   * the Boulder school account's handle — which is exactly why school labels are
+   * reserved against the handle namespace (`lib/handles.ts`).
+   */
+  SCHOOL_DOMAIN_SUFFIX: z.string().default('freeskool.xyz'),
+  /**
+   * The labels that are schools, until `fs_school_domain` lands (federation Task 2) and
+   * answers the question from the table. Read by the reserved-label list and by the
+   * on-demand TLS gate, which must never answer from a pattern.
+   */
+  SCHOOL_LABELS: z.string().default('boulder').transform(csv),
+
   /** Taxonomy authority DID: when set, the skill tree/detail routes ignore skill records from any other DID. */
   AUTHORITY_DID: z.string().default(''),
   /** Handle for the taxonomy authority account (ops/documentation use only). */
@@ -139,6 +154,10 @@ export type Config = z.infer<typeof schema> & {
   isProd: boolean
   /** WEB_PUBLIC_URL, or APPVIEW_PUBLIC_URL when the PWA is not given its own origin. */
   webPublicUrl: string
+  /** Just the hostname of `webPublicUrl`, e.g. `freeskool.xyz`. The apex; `www.` of it redirects here. */
+  webHost: string
+  /** `SCHOOL_DOMAIN_SUFFIX`, lowercased, with any leading dot stripped. */
+  schoolDomainSuffix: string
   /** Resolved `DEV_MAIL_LOG`: where `lib/mail.ts` appends mail when SMTP is unset. */
   devMailLog: string
 }
@@ -162,6 +181,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
         'transport, and the dev file sink would write magic links to disk instead of sending them.',
     )
   }
+  const webPublicUrl = (parsed.WEB_PUBLIC_URL ?? publicUrl).replace(/\/$/, '')
   return {
     ...parsed,
     APPVIEW_PUBLIC_URL: publicUrl,
@@ -170,9 +190,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     // A confidential client's client_id IS the metadata URL.
     oauthClientId: `${publicUrl}/oauth/client-metadata.json`,
     isProd: parsed.NODE_ENV === 'production',
-    webPublicUrl: (parsed.WEB_PUBLIC_URL ?? publicUrl).replace(/\/$/, ''),
+    webPublicUrl,
+    webHost: hostnameOf(webPublicUrl),
+    schoolDomainSuffix: parsed.SCHOOL_DOMAIN_SUFFIX.trim().toLowerCase().replace(/^\./, ''),
     // `src/config.ts` -> `apps/appview/.dev-mail.log`.
     devMailLog: parsed.DEV_MAIL_LOG || fileURLToPath(new URL('../.dev-mail.log', import.meta.url)),
+  }
+}
+
+/** The hostname of a URL, or the string itself when it is not one (never throws at boot). */
+function hostnameOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase()
+  } catch {
+    return url.toLowerCase()
   }
 }
 

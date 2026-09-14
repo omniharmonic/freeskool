@@ -1,20 +1,41 @@
-# One Caddy for the whole stack. Three kinds of names:
-#   {$WEB_HOST}                          the PWA + the AppView API (same origin: cookies, OAuth)
-#   www.{$WEB_HOST}                      redirect to the apex (served from the wildcard block, see below)
-#   {$PDS_HOST}, *.{$PDS_HANDLE_DOMAIN}  the PDS, and every generated handle it answers for
+# One Caddy for the whole stack. Four kinds of names:
+#   {$WEB_HOST}                the PWA + the AppView API (same origin: cookies, OAuth)
+#   www.{$WEB_HOST}            redirect to the apex (served from the wildcard block, see below)
+#   {$PDS_HOST}                the PDS, whole: xrpc, oauth, admin, everything it serves
+#   *.{$PDS_HANDLE_DOMAIN}     every handle host AND every school host
+#
+# The wildcard inversion (multi-school design §3). A handle host needs the PDS for exactly
+# two things — `/.well-known/atproto-did`, which is how the network resolves the handle, and
+# `/xrpc/*`, which is how a client that discovered the handle first talks to the repo. Every
+# OTHER path on such a host is the app, served exactly as the apex serves it (the `(app)`
+# snippet below, imported by both). That is what lets `boulder.{$PDS_HANDLE_DOMAIN}` be the
+# Boulder school's web address AND the Boulder school account's handle at the same time,
+# instead of the collision the old "wildcard → PDS" block made of it.
+#
+# The cost is that a school label and a member handle share one namespace, so
+# `apps/appview/src/lib/handles.ts` (`RESERVED_LABELS`) refuses to mint or accept a handle
+# on a label a school could hold. Nothing here enforces that; it is enforced where handles
+# are made.
 #
 # Why www lives inside the wildcard block: when a site lists both `*.example` and `www.example`,
 # Caddy assumes the wildcard certificate will cover www and never issues one for it — but the
 # wildcard here is on-demand (no DNS challenge), so www would never get a certificate at all.
-# Instead www is issued on demand like a handle, through a local `ask` endpoint that says yes
-# for www itself and defers to the PDS's /tls-check for everything else.
+# Instead www is issued on demand like a handle, through the local `ask` endpoint below.
+#
+# The ask endpoint now asks the AppView, not the PDS: the AppView knows www, it knows which
+# labels are schools, and for anything else it asks the PDS itself. See
+# `apps/appview/src/lib/tls-check.ts`. It stays container-local — 127.0.0.1 inside this
+# container — and `/internal/*` is not routed from any public host, so nothing outside can
+# reach it.
 {
 	on_demand_tls {
-		ask http://127.0.0.1:9000/tls-check
+		ask http://127.0.0.1:9000/internal/tls-check
 	}
 }
 
-{$WEB_HOST} {
+# The app, as served on the apex and on every handle/school host. One definition, because
+# "the same app on a different name" must not drift into two.
+(app) {
 	encode zstd gzip
 	header {
 		Referrer-Policy no-referrer
@@ -22,6 +43,9 @@
 		Permissions-Policy "camera=(), microphone=(), geolocation=()"
 		Strict-Transport-Security "max-age=31536000"
 	}
+	# Deliberately the three OAuth documents and not `/oauth/*`: `/oauth/confirm` is a
+	# SCREEN in the PWA (`apps/web/src/router.tsx`), and handing it to the AppView would
+	# 404 the second door.
 	@backend path /api/* /oauth/callback /oauth/jwks.json /oauth/client-metadata.json
 	handle @backend {
 		reverse_proxy appview:4000
@@ -38,19 +62,38 @@
 	}
 }
 
-{$PDS_HOST}, *.{$PDS_HANDLE_DOMAIN} {
+{$WEB_HOST} {
+	import app
+}
+
+# The PDS's own hostname keeps the whole PDS. Its certificate stays on-demand, as it was
+# when this name shared a block with the wildcard: a specific name Caddy believes a
+# configured wildcard covers is never issued on its own.
+{$PDS_HOST} {
+	tls {
+		on_demand
+	}
+	reverse_proxy pds:3000
+}
+
+*.{$PDS_HANDLE_DOMAIN} {
 	tls {
 		on_demand
 	}
 	@www host www.{$WEB_HOST}
 	redir @www https://{$WEB_HOST}{uri} permanent
-	reverse_proxy pds:3000
+	# The only two paths a handle host owes the network. Everything else falls through to
+	# `import app` below — a school's PWA, or the same PWA on a member's handle host.
+	@pds path /.well-known/atproto-did /xrpc/*
+	handle @pds {
+		reverse_proxy pds:3000
+	}
+	import app
 }
 
-# The on-demand "ask" gate (container-local only). The PDS vouches for its own hostname and for
-# every handle it has issued; www is the one extra name this stack answers for.
+# The on-demand "ask" gate (container-local only), proxied to the AppView, which answers
+# `GET /internal/tls-check?domain=` with 200 (issue) or 403 (do not). A 403 — including a
+# PDS that failed to answer — must never become a certificate.
 http://127.0.0.1:9000 {
-	@www query domain=www.{$WEB_HOST}
-	respond @www 200
-	reverse_proxy pds:3000
+	reverse_proxy appview:4000
 }

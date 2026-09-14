@@ -1,0 +1,157 @@
+/**
+ * Task 1 (federation): `GET /internal/tls-check?domain=` — the on-demand TLS gate.
+ *
+ * Caddy asks this before it will ask Let's Encrypt for a certificate for a name it has
+ * never seen. It must answer from KNOWN NAMES and never from a pattern: a gate that says
+ * yes to `*.freeskool.xyz` burns the 50-certificates-per-registered-domain-per-week
+ * ceiling the first time a bot dials random SNIs at the box (MS §3).
+ *
+ * Three answers, in order: `www`, a school host (`<known label>.<SCHOOL_DOMAIN_SUFFIX>`),
+ * and otherwise whatever the PDS says about the handle it issued. A PDS that does not
+ * answer is a NO, never a yes — an unanswered check must not mint a certificate.
+ *
+ * The domain never reaches a log line (R9): the ask carries the name of a member's handle
+ * host, and a certificate log is a membership list.
+ */
+process.env.WEB_PUBLIC_URL ??= 'https://freeskool.test'
+process.env.APPVIEW_PUBLIC_URL ??= 'https://freeskool.test'
+process.env.PDS_URL ??= 'http://pds.test'
+process.env.PDS_HANDLE_DOMAIN ??= 'freeskool.test'
+process.env.SCHOOL_DOMAIN_SUFFIX ??= 'freeskool.test'
+process.env.SCHOOL_LABELS ??= 'boulder'
+process.env.SCHOOL_HANDLE ??= 'denver.freeskool.test'
+process.env.SESSION_SECRET ??= 'tls-check-test-session-secret'
+process.env.CUSTODY_KEYS ??= `v1:${Buffer.alloc(32, 5).toString('base64')}`
+process.env.FEEDBACK_BALLOT_PEPPER ??= 'tls-check-test-pepper'
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { internal } from '../src/http/routes/internal.js'
+import { createApp } from '../src/http/app.js'
+
+/** A PDS that vouches for exactly these names and 404s everything else. */
+function fakePds(known: string[], opts: { status?: number; throws?: boolean } = {}) {
+  return vi.fn(async (input: URL | string, init?: RequestInit) => {
+    const url = new URL(String(input))
+    expect(url.pathname).toBe('/tls-check')
+    // A check that hangs must not hang Caddy's handshake.
+    expect(init?.signal).toBeDefined()
+    if (opts.throws) throw new Error('connect ECONNREFUSED')
+    if (opts.status) return new Response('', { status: opts.status })
+    const domain = url.searchParams.get('domain') ?? ''
+    return known.includes(domain)
+      ? new Response('', { status: 200 })
+      : new Response(JSON.stringify({ error: 'not a registered handle' }), { status: 404 })
+  })
+}
+
+async function ask(domain: string | null) {
+  const query = domain === null ? '' : `?domain=${encodeURIComponent(domain)}`
+  return internal.request(`/internal/tls-check${query}`)
+}
+
+let consoleSpies: ReturnType<typeof vi.spyOn>[] = []
+
+beforeEach(() => {
+  consoleSpies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) =>
+    vi.spyOn(console, m).mockImplementation(() => {}),
+  )
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
+  for (const spy of consoleSpies) spy.mockRestore()
+})
+
+describe('GET /internal/tls-check', () => {
+  it('says yes to www on the web host, without asking the PDS', async () => {
+    const pds = fakePds([])
+    vi.stubGlobal('fetch', pds)
+    expect((await ask('www.freeskool.test')).status).toBe(200)
+    expect(pds).not.toHaveBeenCalled()
+  })
+
+  it('says yes to a known school label under the school domain suffix, without asking the PDS', async () => {
+    const pds = fakePds([])
+    vi.stubGlobal('fetch', pds)
+    expect((await ask('boulder.freeskool.test')).status).toBe(200)
+    expect(pds).not.toHaveBeenCalled()
+  })
+
+  it('says yes to the legacy school whose label comes from SCHOOL_HANDLE', async () => {
+    const pds = fakePds([])
+    vi.stubGlobal('fetch', pds)
+    expect((await ask('denver.freeskool.test')).status).toBe(200)
+    expect(pds).not.toHaveBeenCalled()
+  })
+
+  it('normalizes case and a trailing dot before matching', async () => {
+    const pds = fakePds([])
+    vi.stubGlobal('fetch', pds)
+    expect((await ask('Boulder.FreeSkool.test.')).status).toBe(200)
+    expect(pds).not.toHaveBeenCalled()
+  })
+
+  it('defers a member handle host to the PDS and passes its yes on', async () => {
+    vi.stubGlobal('fetch', fakePds(['calmotter417.freeskool.test']))
+    expect((await ask('calmotter417.freeskool.test')).status).toBe(200)
+  })
+
+  it('says no when the PDS does not know the name', async () => {
+    vi.stubGlobal('fetch', fakePds(['calmotter417.freeskool.test']))
+    expect((await ask('nobody.freeskool.test')).status).toBe(403)
+  })
+
+  it('says no when the PDS is unreachable, so a failed check never mints a certificate', async () => {
+    vi.stubGlobal('fetch', fakePds([], { throws: true }))
+    expect((await ask('calmotter417.freeskool.test')).status).toBe(403)
+  })
+
+  it('says no when the PDS answers with an error status', async () => {
+    vi.stubGlobal('fetch', fakePds([], { status: 500 }))
+    expect((await ask('calmotter417.freeskool.test')).status).toBe(403)
+  })
+
+  it('says no to a missing or empty domain, without asking the PDS', async () => {
+    const pds = fakePds([])
+    vi.stubGlobal('fetch', pds)
+    expect((await ask(null)).status).toBe(403)
+    expect((await ask('')).status).toBe(403)
+    expect(pds).not.toHaveBeenCalled()
+  })
+
+  it('says no to a deeper name under the suffix: a school host and a handle host are both one label', async () => {
+    // `a.boulder.freeskool.test` is not the Boulder school, and the PDS issues no such handle.
+    const pds = fakePds([])
+    vi.stubGlobal('fetch', pds)
+    expect((await ask('a.boulder.freeskool.test')).status).toBe(403)
+    expect(pds).not.toHaveBeenCalled()
+  })
+
+  it('says no to a name outside both the web host and the school suffix', async () => {
+    vi.stubGlobal('fetch', fakePds(['evil.example']))
+    // Even a PDS that said yes cannot get a certificate for a name this stack does not own.
+    expect((await ask('evil.example')).status).toBe(403)
+  })
+
+  it('never logs the domain', async () => {
+    vi.stubGlobal('fetch', fakePds([], { throws: true }))
+    await ask('calmotter417.freeskool.test')
+    await ask('www.freeskool.test')
+    for (const spy of consoleSpies) expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('is mounted on the app outside /api, where only Caddy\'s container-local ask can reach it', async () => {
+    vi.stubGlobal('fetch', fakePds([]))
+    const app = createApp()
+    expect((await app.request('/internal/tls-check?domain=www.freeskool.test')).status).toBe(200)
+    // And nowhere under /api, which is the only prefix (with the OAuth documents) the
+    // edge proxies to the AppView from a public host.
+    expect((await app.request('/api/internal/tls-check?domain=www.freeskool.test')).status).not.toBe(200)
+  })
+
+  it('answers with an empty body: the ask is a status code, not a page', async () => {
+    vi.stubGlobal('fetch', fakePds([]))
+    expect(await (await ask('www.freeskool.test')).text()).toBe('')
+    expect(await (await ask('nobody.freeskool.test')).text()).toBe('')
+  })
+})
