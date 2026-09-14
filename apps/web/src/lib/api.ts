@@ -78,6 +78,7 @@ import type {
   RsvpSetInput,
   RsvpSetResult,
   SetNewsletterInput,
+  SwitchSchoolResult,
   SetPublicRoleInput,
   SignupResult,
   SkillClaimsResponse,
@@ -197,6 +198,14 @@ export const api = {
       get<VerifyResult>('/api/auth/verify', { token }, { accept: 'application/json' }),
     me: () => get<AuthMe>('/api/auth/me'),
     logout: () => post<{ ok: boolean }>('/api/auth/logout'),
+    /**
+     * Move this session to another school the member belongs to. 403
+     * `NotAMember` otherwise. The answer carries the school's host because
+     * switching is a NAVIGATION: each city is its own origin, so the caller
+     * sends the browser there rather than re-rendering in place.
+     */
+    switchSchool: (schoolDid: string) =>
+      post<SwitchSchoolResult>('/api/auth/switch-school', { schoolDid }),
     /**
      * Secondary door. `confirm` must be true or the AppView refuses with 428;
      * `handle` (a handle or a DID) is required too or it refuses with 400

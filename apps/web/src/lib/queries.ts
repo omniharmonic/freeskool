@@ -69,6 +69,19 @@ export function useMe() {
   });
 }
 
+/**
+ * `POST /api/auth/switch-school`. Deliberately does NOT invalidate anything:
+ * every city is its own origin, so the caller navigates to the returned host
+ * and the whole app reloads there. Invalidating first would repaint the
+ * current school's screens with a session that has already moved.
+ */
+export function useSwitchSchoolMutation() {
+  return useMutation({
+    mutationFn: (schoolDid: string) => api.auth.switchSchool(schoolDid),
+    retry: false,
+  });
+}
+
 export function useRequests() {
   return useQuery({
     queryKey: ['requests'],

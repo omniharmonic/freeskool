@@ -11,6 +11,7 @@ import { Button, SkillChip, Toggle } from '../components/bits';
 import { Sheet } from '../components/Sheet';
 import { SkillPicker } from '../components/SkillPicker';
 import { HandleChooser } from '../components/HandleChooser';
+import { SchoolSwitcher } from '../components/SchoolSwitcher';
 import { flattenSkills } from '../lib/skills';
 import { useInstallFlow } from '../components/InstallNudge';
 import { api, ApiError } from '../lib/api';
@@ -310,7 +311,14 @@ function MeContent() {
   if (profileLoadError || claimsLoadError || visibilityError) return <Screen title="Me" layout="account"><div className="safe-x"><PageState title="Your notebook couldn’t load." error action={<Button onClick={() => { void refetchProfile(); void refetchClaims(); void refetchVisibility(); }}>Try again</Button>}>Your saved profile and skills are still there. Please try again before making changes.</PageState></div></Screen>;
 
   return (
-    <Screen title="Me" layout="account" standfirst="Your own corner of the school. What you’re learning, what you can share, and how you want to stay connected.">
+    <Screen
+      title="Me"
+      layout="account"
+      standfirst="Your own corner of the school. What you’re learning, what you can share, and how you want to stay connected."
+      // Renders nothing for a member of one school, which is everybody until a second city
+      // exists — see components/SchoolSwitcher.tsx.
+      trailing={<SchoolSwitcher me={me} />}
+    >
       <nav className="safe-x editor-nav" aria-label="Account sections"><a href="#my-profile">Profile</a><a href="#my-skills">Skills</a><a href="#my-badges">Badges</a><a href="#my-settings">Settings</a></nav>
       <div className="safe-x account-layout"><div className="account-main">
         <div className="profile-card" id="my-profile">

@@ -31,6 +31,15 @@ export interface VerifyResult {
   did: string;
 }
 
+/** A school as the viewer's own session knows it. Never another member's. */
+export interface ViewerSchool {
+  did: string;
+  label: string;
+  name: string;
+  /** The host this school is served from — where the switcher navigates. */
+  host: string;
+}
+
 export interface AuthMe {
   did: string;
   kind: 'custodial' | 'oauth';
@@ -42,6 +51,25 @@ export interface AuthMe {
    * everyone who signed up before onboarding existed, which is the point:
    * they get the offer once, on their next verified sign-in. */
   onboarded: boolean;
+  /**
+   * The school THIS REQUEST resolved to — the host's, or the session's when
+   * the host names none (the apex). Absent on a deployment that has not been
+   * bootstrapped with a school at all.
+   */
+  school?: Omit<ViewerSchool, 'host'>;
+  /**
+   * Every school the viewer belongs to. The ONLY cross-school list in the
+   * app, and it is the viewer's own membership and nobody else's (MS §10.1).
+   * `SchoolSwitcher` renders when there is more than one; one school is not a
+   * choice and must not look like one.
+   */
+  schools?: ViewerSchool[];
+}
+
+/** `POST /api/auth/switch-school`. `host` is where the PWA navigates next. */
+export interface SwitchSchoolResult {
+  school: Omit<ViewerSchool, 'host'>;
+  host: string;
 }
 
 /**

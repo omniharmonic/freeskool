@@ -5,7 +5,7 @@ import { dayKey, formatDayStamp, groupByDay } from '../lib/dates';
 import { Screen } from '../components/Screen';
 import { ContentGrid } from '../components/ContentGrid';
 import { SchoolMark } from '../components/SchoolMark';
-import { useCalendar } from '../lib/queries';
+import { useCalendar, useMe } from '../lib/queries';
 import { api } from '../lib/api';
 import { CalendarViews } from '../components/CalendarViews';
 import { addDays, calendarRange, type CalendarView } from '../lib/calendar-range';
@@ -19,7 +19,11 @@ export function CalendarScreen() {
   const range = useMemo(() => { const r = calendarRange(month, view); return { from: r.from.toISOString(), to: r.to.toISOString() }; }, [month, view]);
   const { data, isPending, isError, refetch } = useCalendar(range);
   const { data: info } = useQuery({ queryKey: ['school-info'], queryFn: () => api.school.howItWorks(), enabled: Boolean(api.school), staleTime: 300_000 });
+  // `GET /api/auth/me` names the school THIS HOST resolved to, which is the authority on
+  // whose calendar this is; `how-it-works` is the fallback for a signed-out visitor.
+  const { data: me } = useMe();
   const school = info?.school;
+  const schoolName = me?.school?.name ?? school?.name ?? 'Free School';
   const today = dayKey(new Date());
   const events = useMemo(() => (data?.events ?? []).filter(event => {
     const matches = `${event.name} ${event.neighborhood ?? ''} ${(event.tags ?? []).join(' ')}`.toLocaleLowerCase().includes(search.toLocaleLowerCase().trim());
@@ -31,7 +35,7 @@ export function CalendarScreen() {
   const monthLabel = view === 'day' ? month.toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }) : view === 'week' ? `${new Date(range.from).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${addDays(new Date(range.to), -1).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}` : month.toLocaleDateString(undefined, { month: 'long', year: 'numeric' });
   function moveMonth(amount: number) { setMonth(current => view === 'day' ? addDays(current, amount) : view === 'week' ? addDays(current, amount * 7) : new Date(current.getFullYear(), current.getMonth() + amount, 1)); }
   function jump(key: string) { dayRefs.current.get(key)?.scrollIntoView({ behavior: window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth', block: 'start' }); }
-  return <Screen title={school?.name ?? 'Free School'} wide trailing={<Link to="/zine" className="header-print">Print zine</Link>} intro={
+  return <Screen title={schoolName} wide trailing={<Link to="/zine" className="header-print">Print zine</Link>} intro={
     <div className="calendar-intro">
       <div><p className="local-line"><span className="status-dot" />{school?.region || 'Your local learning commons'}</p>
         <h1>Everybody has<br />something to share.</h1>

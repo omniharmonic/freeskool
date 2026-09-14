@@ -10,13 +10,14 @@
  *   GET  /oauth/start       SECONDARY door. Requires ?confirm=1 — see ../oauth.ts
  *   POST /logout
  *   GET  /me
+ *   POST /switch-school     move this session to another school the viewer belongs to
  */
 import { Hono, type Context } from 'hono'
 import { z } from 'zod'
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import type { AppEnv } from '../session.js'
-import { createSession, destroySession, requireViewer } from '../session.js'
-import { currentSchool, schoolDidOrLegacy } from '../school-context.js'
+import { createSession, destroySession, requireViewer, setSessionSchool } from '../session.js'
+import { legacySchool, requestHost, schoolDidOrLegacy } from '../school-context.js'
 import {
   signup,
   verifyEmailToken,
@@ -26,11 +27,13 @@ import {
   RevealPendingError,
   SignupError,
 } from '../../lib/custody.js'
-import { oauthClient, OAuthUnavailableError } from '../oauth.js'
+import { oauthClient, oauthOriginState, OAuthUnavailableError } from '../oauth.js'
 import { config } from '../../config.js'
 import { roleOf } from '../../lib/roles.js'
 import { getDb } from '../../db/index.js'
-import { custodialAccount, memberPrefs } from '../../db/schema.js'
+import { custodialAccount, memberPrefs, membership, school as schoolTable } from '../../db/schema.js'
+import { canonicalHostsFor, getSchool, schoolHostFor } from '../../lib/schools.js'
+import { isMemberOf } from '../../lib/membership.js'
 import { describeError, log } from '../../lib/logging.js'
 
 export const auth = new Hono<AppEnv>()
@@ -113,7 +116,17 @@ auth.get('/oauth/start', async (c) => {
   if (!handle) return c.json({ error: 'InvalidRequest', message: 'handle or did is required' }, 400)
   try {
     const client = await oauthClient()
-    const url = await client.authorize(handle, { scope: 'atproto transition:generic' })
+    /**
+     * The one thing the apex-only callback cannot work out for itself: which city the
+     * member pressed this button on. `state` is the library's `appState` — stored
+     * server-side in `fs_oauth_state`, handed back by `client.callback()`, never
+     * writable by the browser. `../oauth.ts` documents the round trip and the
+     * validation that happens on the way back.
+     */
+    const url = await client.authorize(handle, {
+      scope: 'atproto transition:generic',
+      state: oauthOriginState(requestHost(c)),
+    })
     return c.redirect(url.toString())
   } catch (err) {
     if (err instanceof OAuthUnavailableError) return c.json({ error: err.code, message: err.message }, 503)
@@ -127,12 +140,26 @@ auth.post('/logout', async (c) => {
   return c.json({ ok: true })
 })
 
+/**
+ * WHO THE VIEWER IS, AND WHERE THEY ARE.
+ *
+ * `school` is the school THIS REQUEST resolved to (the host's, or the session's on the
+ * apex) — the name the PWA prints in its headers. `schools` is every school the viewer
+ * belongs to, with the host each is served from, which is the school picker's whole data
+ * source.
+ *
+ * `schools` is the ONE place a cross-school list is served (MS §10.1: "a member's Me
+ * screen may know its own schools; no other view may"). It is the viewer's own membership
+ * and nobody else's, it names no other member, and it is behind `requireViewer`.
+ */
 auth.get('/me', requireViewer, async (c) => {
   const viewer = c.var.viewer!
-  const [role, custodial, prefsRows] = await Promise.all([
+  const here = c.var.school ?? (await legacySchool())
+  const [role, custodial, prefsRows, schools] = await Promise.all([
     roleOf(viewer.did, schoolDidOrLegacy(c)),
     getCustodialAccount(viewer.did),
     getDb().select({ onboardedAt: memberPrefs.onboardedAt }).from(memberPrefs).where(eq(memberPrefs.did, viewer.did)).limit(1),
+    schoolsForViewer(viewer.did),
   ])
   return c.json({
     did: viewer.did,
@@ -144,6 +171,60 @@ auth.get('/me', requireViewer, async (c) => {
     // Task 6: consistent with `GET /api/me`'s own `onboarded` field — see `me.ts`'s
     // `loadDirectoryPrefs`, which reads the same column the same way.
     onboarded: (prefsRows[0]?.onboardedAt ?? null) != null,
+    ...(here?.did ? { school: { did: here.did, label: here.label, name: here.name } } : {}),
+    schools,
+  })
+})
+
+export interface ViewerSchool {
+  did: string
+  label: string
+  name: string
+  /** Where this school is served — what the PWA navigates to when the member picks it. */
+  host: string
+}
+
+/** Every school the viewer has not left, oldest membership first, each with its host. */
+async function schoolsForViewer(did: string): Promise<ViewerSchool[]> {
+  const rows = await getDb()
+    .select({ did: schoolTable.did, label: schoolTable.label, name: schoolTable.name })
+    .from(membership)
+    .innerJoin(schoolTable, eq(schoolTable.did, membership.schoolDid))
+    .where(and(eq(membership.did, did), isNull(membership.leftAt)))
+    .orderBy(membership.joinedAt)
+  const hosts = await canonicalHostsFor(rows.map((r) => r.did))
+  return rows.map((r) => ({ ...r, host: hosts.get(r.did) ?? '' }))
+}
+
+const switchSchoolBody = z.object({ schoolDid: z.string().startsWith('did:') })
+
+/**
+ * MOVE THIS SESSION TO ANOTHER SCHOOL.
+ *
+ * 403 unless the viewer is a member of it — and a 403 rather than a 404 is right HERE,
+ * unusually, because the picker only ever offers schools `GET /me` already listed, so a
+ * refusal confirms nothing the caller did not already know. (`GET /api/members/:did` and
+ * the per-school reads keep their 404s; those ARE probes.)
+ *
+ * The response carries the school's canonical host: switching is a NAVIGATION, not a
+ * state change the current page can render. The session field is what makes the apex
+ * agree, and the host is what makes `boulder.freeskool.xyz` stop being Denver.
+ */
+auth.post('/switch-school', requireViewer, async (c) => {
+  const viewer = c.var.viewer!
+  const parsed = switchSchoolBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) return c.json({ error: 'InvalidRequest', message: 'schoolDid is required' }, 400)
+  const { schoolDid } = parsed.data
+  if (!(await isMemberOf(viewer.did, schoolDid))) {
+    return c.json({ error: 'NotAMember', message: 'you are not a member of that school' }, 403)
+  }
+  const target = await getSchool(schoolDid)
+  // A membership row for a school that no longer exists is not a school to switch to.
+  if (!target) return c.json({ error: 'NotAMember', message: 'you are not a member of that school' }, 403)
+  await setSessionSchool(viewer.sessionId, schoolDid)
+  return c.json({
+    school: { did: target.did, label: target.label, name: target.name },
+    host: await schoolHostFor(schoolDid),
   })
 })
 
@@ -197,6 +278,7 @@ auth.post('/resend-verification', requireViewer, async (c) => {
   const email = rows[0]?.email
   if (!email) return c.json({ error: 'NotCustodial' }, 409)
   const { sendVerificationEmail } = await import('../../lib/custody.js')
-  await sendVerificationEmail(viewer.did, email)
+  // The re-sent link lands on the school this request is for, same rule as the first one.
+  await sendVerificationEmail(viewer.did, email, await schoolHostFor(schoolDidOrLegacy(c)).catch(() => ''))
   return c.json({ ok: true })
 })

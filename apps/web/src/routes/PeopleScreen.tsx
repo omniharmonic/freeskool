@@ -6,7 +6,8 @@ import { SkillPicker } from '../components/SkillPicker';
 import { LoadingState, PageState } from '../components/PageState';
 import { Button, MemberAvatar } from '../components/bits';
 import { flattenSkills } from '../lib/skills';
-import { useMembers, useSkillTree } from '../lib/queries';
+import { useMe, useMembers, useSkillTree } from '../lib/queries';
+import { schoolHeading } from '../lib/school';
 import type { MemberSummary } from '../lib/types';
 
 /**
@@ -53,6 +54,7 @@ function PeopleContent() {
     const timer = setTimeout(() => setQuery(typed), SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
   }, [typed]);
+  const { data: me } = useMe();
   const { data: tree } = useSkillTree();
   const flatSkills = useMemo(() => flattenSkills(tree?.skills ?? []), [tree]);
 
@@ -69,6 +71,7 @@ function PeopleContent() {
   return (
     <Screen
       title="People"
+      eyebrow={schoolHeading(me)}
       layout="library"
       standfirst="Everyone who has signed in here, and what they say they can share."
     >

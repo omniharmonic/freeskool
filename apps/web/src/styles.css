@@ -509,6 +509,25 @@ dialog.sheet::backdrop {
 .lt-title { font-size: 36px; line-height: 1.1; margin-bottom: 16px; }
 .screen-standard .lt-title { max-width: 23ch; }
 .header-print { display: inline-flex; min-height: 44px; align-items: center; font-size: 13px; font-weight: 600; }
+
+/* Which school this screen is showing, above the large title. */
+.page-eyebrow { font-size: 13px; font-weight: 700; letter-spacing: 0.02em; color: var(--c-ink-soft); }
+
+/* The school picker in the Me header — see components/SchoolSwitcher.tsx. Only ever
+   rendered for a member of two or more schools. */
+.school-switcher { position: relative; }
+.school-switcher > button { display: inline-flex; min-height: 44px; align-items: center; gap: 4px; }
+.school-switcher-menu {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 40; min-width: 190px;
+  margin: 0; padding: 4px; list-style: none;
+  border: 1.5px solid var(--c-ink); background: var(--c-sheet);
+}
+.school-switcher-menu button {
+  display: block; width: 100%; min-height: 44px; padding: 0 10px; text-align: left;
+  font-size: 14px;
+}
+.school-switcher-menu button[aria-selected='true'] { font-weight: 700; }
+.school-switcher-menu button:disabled { opacity: 0.5; }
 .tab-bar a { min-height: 48px; }
 .tab-bar a[aria-current='page'] { color: var(--c-blue) !important; }
 .tab-bar a[aria-current='page'] > span { text-decoration: underline; text-underline-offset: 5px; }

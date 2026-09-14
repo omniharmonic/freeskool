@@ -10,6 +10,10 @@
  * and otherwise whatever the PDS says about the handle it issued. A PDS that does not
  * answer is a NO, never a yes — an unanswered check must not mint a certificate.
  *
+ * The third rule spans EVERY handle domain this deployment serves, not one: ruling 3
+ * moves member handles from `freeskool.xyz` to `freeskool.directory`, and a handle that
+ * has not been rewritten yet must keep renewing its certificate throughout.
+ *
  * The domain never reaches a log line (R9): the ask carries the name of a member's handle
  * host, and a certificate log is a membership list.
  */
@@ -17,6 +21,8 @@ process.env.WEB_PUBLIC_URL ??= 'https://freeskool.test'
 process.env.APPVIEW_PUBLIC_URL ??= 'https://freeskool.test'
 process.env.PDS_URL ??= 'http://pds.test'
 process.env.PDS_HANDLE_DOMAIN ??= 'freeskool.test'
+/** The domain this deployment is moving OFF (federation ruling 3) — see the tests below. */
+process.env.PDS_LEGACY_HANDLE_DOMAIN ??= 'old.test'
 process.env.SCHOOL_DOMAIN_SUFFIX ??= 'freeskool.test'
 process.env.SCHOOL_LABELS ??= 'boulder'
 process.env.SCHOOL_HANDLE ??= 'denver.freeskool.test'
@@ -125,6 +131,18 @@ describe('GET /internal/tls-check', () => {
     vi.stubGlobal('fetch', pds)
     expect((await ask('a.boulder.freeskool.test')).status).toBe(403)
     expect(pds).not.toHaveBeenCalled()
+  })
+
+  it('defers a handle host under the LEGACY handle domain too, for the length of the migration', async () => {
+    // A member whose DID document still says `calmotter417.old.test` must keep renewing:
+    // the day the gate stops vouching for the old domain is the day they stop resolving.
+    vi.stubGlobal('fetch', fakePds(['calmotter417.old.test']))
+    expect((await ask('calmotter417.old.test')).status).toBe(200)
+  })
+
+  it('still asks the PDS about the legacy domain rather than assuming: an unknown name is no', async () => {
+    vi.stubGlobal('fetch', fakePds(['calmotter417.old.test']))
+    expect((await ask('nobody.old.test')).status).toBe(403)
   })
 
   it('says no to a name outside both the web host and the school suffix', async () => {

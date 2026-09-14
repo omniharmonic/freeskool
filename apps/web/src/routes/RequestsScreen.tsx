@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { schoolHeading } from '../lib/school';
 import { useNavigate } from '@tanstack/react-router';
 import { LoadingState, PageState } from '../components/PageState';
 import { Screen } from '../components/Screen';
@@ -56,6 +57,7 @@ export function RequestsScreen() {
   return (
     <Screen
       title="Requests"
+      eyebrow={schoolHeading(me)}
       layout="library"
       standfirst="Things people want to learn. When enough people want the same thing, someone turns up to teach it."
       trailing={

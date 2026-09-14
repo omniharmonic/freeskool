@@ -15,9 +15,13 @@
  *   MULTI_SCHOOL=1                1. the request host (`fs_school_domain`), honouring
  *                                    `X-Forwarded-Host` because the edge terminates TLS
  *                                    and the app only ever sees its own origin otherwise;
- *                                 2. the session's `current_school_did` (Task 4 writes
- *                                    it — read defensively, since a deployment mid-
- *                                    migration may not have the column yet);
+ *                                 2. the session's `current_school_did` (written by
+ *                                    `createSession` and by `POST /api/auth/switch-school`
+ *                                    — read defensively, since a deployment mid-migration
+ *                                    may not have the column yet). This is what answers on
+ *                                    the APEX, which serves no city of its own: a member
+ *                                    who signed in on `denver.freeskool.xyz` and follows a
+ *                                    link to `freeskool.xyz` stays in Denver.
  *                                 3. the only school, when there is exactly one (a
  *                                    deployment that flipped the flag before it had a
  *                                    second city, and the apex front door of MS ruling 2);
@@ -95,6 +99,12 @@ function syntheticLegacySchool(did: string): School {
     name: `${label.charAt(0).toUpperCase()}${label.slice(1)} Free School`,
     city: null,
     handle: config().SCHOOL_HANDLE || label,
+    // The env-configured school is on the shared PDS and app-custodied by definition —
+    // these three columns are Task 5's additive migration, and the synthetic row has to
+    // carry them because `School` is `fs_school`'s select type.
+    pdsUrl: config().PDS_URL,
+    custody: 'app',
+    createdByDid: null,
     createdAt: new Date(0),
     creationState: 'active',
   }
@@ -118,11 +128,20 @@ export function requestHost(c: Context): string {
   }
 }
 
-/** The session's `current_school_did`, or undefined. Never throws — the column is Task 4's. */
+/**
+ * The session's `current_school_did`, or undefined. Never throws: a deployment whose
+ * migrations have not caught up has no such column, and that must degrade to "no school
+ * from the session" rather than 500 every request.
+ *
+ * `withViewer` has already read the row, so the DID normally rides on `c.var.viewer` and
+ * this costs one lookup of the school, not two. The direct read is the fallback for a
+ * context built without the middleware (scripts, unit suites).
+ */
 async function sessionSchool(c: Context<AppEnv>): Promise<School | undefined> {
   const viewer = c.var.viewer
   if (!viewer) return undefined
   try {
+    if (viewer.currentSchoolDid) return await getSchool(viewer.currentSchoolDid)
     const rows = await getDb()
       .select({ did: session.currentSchoolDid })
       .from(session)

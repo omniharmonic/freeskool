@@ -11,8 +11,17 @@
  *   2. a school host: a single known label under `SCHOOL_DOMAIN_SUFFIX`. Federation
  *      Task 2 moves the known set from config into `fs_school_domain`; the answer's
  *      shape does not change.
- *   3. otherwise, a single label under the handle domain, which only the PDS can vouch
- *      for — it is the one that issued the handle.
+ *   3. otherwise, a single label under ANY handle domain this deployment serves, which
+ *      only the PDS can vouch for — it is the one that issued the handle.
+ *
+ * Rule 3 is a LIST, not one name, because of federation ruling 3: the handle domain moves
+ * from `freeskool.xyz` to `freeskool.directory`, and for the length of that migration a
+ * member's DID document may still name either. If the gate stopped vouching for the old
+ * domain the instant `PDS_HANDLE_DOMAIN` flipped, every handle that had not yet been
+ * rewritten would become unreachable at the next certificate renewal. Both domains are
+ * offered to the PDS, which is the only thing that actually knows which handles exist;
+ * `PDS_LEGACY_HANDLE_DOMAIN` (and the csv `PDS_HANDLE_DOMAINS`) is how the second one is
+ * named, and clearing it at the end of the migration narrows the gate again.
  *
  * Everything else is NO, and so is a PDS that fails to answer inside three seconds: an
  * unanswered check must never mint a certificate. Let's Encrypt allows 50 certificates
@@ -38,9 +47,9 @@ export async function allowCertificateFor(domain: string): Promise<boolean> {
   const school = labelUnder(host, c.schoolDomainSuffix)
   if (school && schoolLabels(c).has(school)) return true
 
-  // A handle host is exactly one label under the handle domain. A name outside it is a
-  // name this stack does not serve, whatever the PDS might say about it.
-  if (!labelUnder(host, c.handleDomain)) return false
+  // A handle host is exactly one label under a handle domain. A name outside every one of
+  // them is a name this stack does not serve, whatever the PDS might say about it.
+  if (!c.handleDomains.some((domain) => labelUnder(host, domain))) return false
   return pdsVouchesFor(host)
 }
 
