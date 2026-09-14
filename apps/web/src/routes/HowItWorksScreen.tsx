@@ -1,3 +1,4 @@
+import { Link } from '@tanstack/react-router';
 import { LoadingState, PageState } from '../components/PageState';
 import { Screen } from '../components/Screen';
 import { Button } from '../components/bits';
@@ -42,6 +43,19 @@ export function HowItWorksScreen() {
             <p className="mt-1.5 max-w-[60ch] text-body">{section.body}</p>
           </section>
         ))}
+
+        <section>
+          <h2 className="text-lede font-bold">Other free schools</h2>
+          <p className="mt-1.5 max-w-[60ch] text-body">
+            This is one school among others, each run by the people in it. The directory lists them and links
+            to each one’s own calendar.
+          </p>
+          <p className="mt-1.5">
+            <Link to="/schools" className="text-caption font-bold text-blue">
+              See the other schools <span aria-hidden="true">↗</span>
+            </Link>
+          </p>
+        </section>
 
         {data ? (
           <p className="text-caption text-ink-faint">Last updated {dateFormat.format(new Date(data.lastUpdated))}.</p>

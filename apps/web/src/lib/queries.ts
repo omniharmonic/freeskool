@@ -82,6 +82,41 @@ export function useSwitchSchoolMutation() {
   });
 }
 
+/** The public directory of schools (`GET /api/schools`). No session needed. */
+export function useSchools() {
+  return useQuery({
+    queryKey: ['schools'],
+    queryFn: () => api.schools.list(),
+  });
+}
+
+/**
+ * `GET /api/schools/nearby` — peers, from their own published school records.
+ *
+ * `retry: false` because the interesting failure is a 404 from an AppView that
+ * does not serve this route yet, and retrying a 404 four times only delays the
+ * empty state `/schools` already knows how to render.
+ */
+export function useNearbySchools() {
+  return useQuery({
+    queryKey: ['schools', 'nearby'],
+    queryFn: () => api.schools.nearby(),
+    retry: false,
+  });
+}
+
+/**
+ * `POST /api/schools/:did/leave`. Invalidates nothing on purpose: leaving ends
+ * this membership, and the caller returns to the calendar the way signing out
+ * does — a full navigation, with every cached answer dropped.
+ */
+export function useLeaveSchoolMutation() {
+  return useMutation({
+    mutationFn: (schoolDid: string) => api.schools.leave(schoolDid),
+    retry: false,
+  });
+}
+
 export function useRequests() {
   return useQuery({
     queryKey: ['requests'],

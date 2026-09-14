@@ -37,6 +37,7 @@ const OAuthConfirmScreen = lazyRouteComponent(() => import('./routes/OAuthConfir
 const ZineScreen = lazyRouteComponent(() => import('./routes/ZineScreen'), 'ZineScreen');
 const InviteScreen = lazyRouteComponent(() => import('./routes/InviteScreen'), 'InviteScreen');
 const HowItWorksScreen = lazyRouteComponent(() => import('./routes/HowItWorksScreen'), 'HowItWorksScreen');
+const SchoolsScreen = lazyRouteComponent(() => import('./routes/SchoolsScreen'), 'SchoolsScreen');
 const RevealScreen = lazyRouteComponent(() => import('./routes/RevealScreen'), 'RevealScreen');
 const AdminOverviewScreen = lazyRouteComponent(() => import('./routes/admin/AdminLayout'), 'AdminOverviewScreen');
 const PolicyScreen = lazyRouteComponent(() => import('./routes/admin/PolicyScreen'), 'PolicyScreen');
@@ -140,6 +141,9 @@ const routes = [
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/handoff', component: HandoffScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/admin/handoff/accept/$token', component: HandoffAcceptScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/how-it-works', component: HowItWorksScreen }),
+  // Public, and deliberately NOT a tab: the school you are in is the app, and a
+  // directory of the others is a page you go and look at (Task 5/10).
+  createRoute({ getParentRoute: () => rootRoute, path: '/schools', component: SchoolsScreen }),
   createRoute({ getParentRoute: () => rootRoute, path: '/account/reveal/$token', component: RevealScreen }),
 ];
 

@@ -40,6 +40,46 @@ export interface ViewerSchool {
   host: string;
 }
 
+/**
+ * `GET /api/schools` — the public directory of the schools this AppView hosts.
+ *
+ * Name, city, and a host you can visit. NEVER a member count, a class count or
+ * a "most active" ordering (spec ruling 7): a directory of cities is a public
+ * fact, how many people are in each one is not.
+ */
+export interface SchoolListing {
+  did: string;
+  label: string;
+  name: string;
+  city?: string | null;
+  /** Where the school is served — the link out of this page. */
+  host: string;
+}
+
+export interface SchoolsResponse {
+  schools: SchoolListing[];
+}
+
+/**
+ * `GET /api/schools/nearby` — schools this one has named as peers, read from
+ * their own published `freeschool.draft.school` records rather than from any
+ * local table. Absent (404) on a deployment whose AppView predates it, which
+ * `/schools` treats as "none to show" rather than as an error.
+ */
+export interface NearbySchool {
+  did: string;
+  name: string;
+  city?: string | null;
+  host?: string;
+  tags?: string[];
+  peers?: string[];
+}
+
+/** `POST /api/schools/:did/leave`. */
+export interface LeaveSchoolResult {
+  left: boolean;
+}
+
 export interface AuthMe {
   did: string;
   kind: 'custodial' | 'oauth';

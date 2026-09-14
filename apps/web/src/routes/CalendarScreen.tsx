@@ -14,6 +14,10 @@ export function CalendarScreen() {
   const [month, setMonth] = useState(() => { const date = new URLSearchParams(window.location.search).get('date'); const parsed = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T12:00:00`) : new Date(); return Number.isNaN(parsed.getTime()) ? new Date() : parsed; });
   const [view, setView] = useState<CalendarView>(() => { const selected = new URLSearchParams(window.location.search).get('view'); return ['list','month','week','day'].includes(selected??'') ? selected as CalendarView : 'list'; });
   const [search, setSearch] = useState('');
+  // Where "Leave this school" lands (Me). Read in the initializer because the effect
+  // below rewrites the query string on mount, and a leaver should be told it worked
+  // rather than dropped silently on a calendar that no longer counts them.
+  const [leftNotice, setLeftNotice] = useState(() => new URLSearchParams(window.location.search).get('left') === '1');
   useEffect(()=>{const query=new URLSearchParams(window.location.search);query.set('view',view);query.set('date',dayKey(month));window.history.replaceState(window.history.state,'',`${window.location.pathname}?${query}`);},[view,month]);
   const [showPast, setShowPast] = useState(false);
   const range = useMemo(() => { const r = calendarRange(month, view); return { from: r.from.toISOString(), to: r.to.toISOString() }; }, [month, view]);
@@ -45,6 +49,7 @@ export function CalendarScreen() {
       <div className="commons-drawing"><SchoolMark /><span>Built by all of us.</span></div>
     </div>
   }>
+    {leftNotice ? <div className="safe-x"><p role="status" className="mb-4 text-caption text-ink-soft">You’ve left this school. Classes you taught are still on this calendar. <button type="button" className="font-bold text-blue" onClick={() => setLeftNotice(false)}>Dismiss</button></p></div> : null}
     <div className="calendar-toolbar">
       <div className="month-control"><h2>{monthLabel}</h2><div><button type="button" aria-label={`Previous ${view === 'list' ? 'month' : view}`} onClick={() => moveMonth(-1)}>‹</button><button type="button" aria-label={`Next ${view === 'list' ? 'month' : view}`} onClick={() => moveMonth(1)}>›</button></div><button className="today-button" type="button" onClick={() => setMonth(new Date())}>Today</button></div>
       <label className="calendar-search"><svg width="18" height="18" viewBox="0 0 20 20" fill="none" aria-hidden="true"><circle cx="8" cy="8" r="5.5" stroke="currentColor"/><path d="m12 12 5 5" stroke="currentColor"/></svg><input type="search" placeholder="Find a class, skill or neighborhood" aria-label="Search classes" value={search} onChange={e => setSearch(e.target.value)} /></label>
