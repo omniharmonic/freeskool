@@ -14,7 +14,7 @@
  */
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, eq, gte } from 'drizzle-orm'
+import { and, eq, gte, ne } from 'drizzle-orm'
 import type { AppEnv } from '../session.js'
 import { requireViewer, withViewer } from '../session.js'
 import { config } from '../../config.js'
@@ -259,7 +259,8 @@ skills.post('/skills', requireViewer, async (c) => {
   const recent = await getDb()
     .select({ id: skillProposal.id })
     .from(skillProposal)
-    .where(and(eq(skillProposal.proposerDid, viewer.did), gte(skillProposal.createdAt, since)))
+    // `failed` rows never produced a record, so they do not count against the member.
+    .where(and(eq(skillProposal.proposerDid, viewer.did), gte(skillProposal.createdAt, since), ne(skillProposal.status, 'failed')))
   if (recent.length >= MAX_PROPOSALS_PER_DAY) {
     return c.json({ error: 'RateLimited', limit: MAX_PROPOSALS_PER_DAY }, 429)
   }
