@@ -90,7 +90,14 @@ export const custodialAccount = pgTable(
     verifiedAt: ts('verified_at'),
     ownedAt: ts('owned_at'),
   },
-  (t) => [uniqueIndex('fs_custodial_handle_idx').on(t.handle)],
+  (t) => [
+    uniqueIndex('fs_custodial_handle_idx').on(t.handle),
+    // Backstop for `signup()`'s per-email advisory lock (review round 1, blocking
+    // finding): two concurrent signups for the same brand-new email must never both
+    // succeed in inserting a row — the lock already serializes the normal path, this
+    // is the DB-level guarantee for anything that somehow gets past it.
+    uniqueIndex('fs_custodial_account_email_idx').on(t.email),
+  ],
 )
 
 /** Magic-link email verification. Only the token HASH is stored. */

@@ -116,4 +116,90 @@ describe('signup() against an orphaned PDS account', () => {
     expect(updateAccountPassword).not.toHaveBeenCalled()
     expect(sendMail).not.toHaveBeenCalled()
   })
+
+  // REVIEW ROUND 1 (blocking, part c): adopt's own re-check, inside the lock, right
+  // before rotating anything. The outer "no existing row for this EMAIL" check at the
+  // top of `signup()` cannot catch every case on its own (e.g. a data inconsistency, or
+  // a genuinely different email whose PDS lookup happens to resolve to a DID we already
+  // hold) — this is the second, narrower guard specifically over the did.
+  it('adopt bails to resend, never rotating a password, when the found did already has a row', async () => {
+    if (!available) return
+    await getDb().insert(custodialAccount).values({
+      did: 'did:plc:already-there',
+      handle: 'already-there.test',
+      email: 'other-email@example.org',
+      isCustodial: true,
+      keyVersion: 'v1',
+    })
+    vi.mocked(createAccount).mockRejectedValue(new PdsError('email already taken', 400, 'InvalidRequest'))
+    vi.mocked(searchAccountByEmail).mockResolvedValue({ did: 'did:plc:already-there', handle: 'already-there.test' })
+
+    const result = await signup({ email: 'raced2@example.org' })
+
+    expect(result.did).toBe('did:plc:already-there')
+    expect(updateAccountPassword).not.toHaveBeenCalled()
+    expect(sendMail).toHaveBeenCalledOnce()
+  })
+
+  // REVIEW ROUND 1 (blocking, part b): the unique index is a DB-level backstop
+  // independent of `signup()`'s own advisory-lock serialization — proved directly here
+  // rather than by trying to race past the lock (which is the whole point of part a).
+  it('the DB itself refuses two rows for the same email (fs_custodial_account_email_idx)', async () => {
+    if (!available) return
+    await getDb().insert(custodialAccount).values({
+      did: 'did:plc:dupe-a',
+      handle: 'dupe-a.test',
+      email: 'dupe@example.org',
+      isCustodial: true,
+      keyVersion: 'v1',
+    })
+    await expect(
+      getDb().insert(custodialAccount).values({
+        did: 'did:plc:dupe-b',
+        handle: 'dupe-b.test',
+        email: 'dupe@example.org',
+        isCustodial: true,
+        keyVersion: 'v1',
+      }),
+    ).rejects.toThrow()
+  })
+})
+
+describe('signup() under real concurrency (review round 1, blocking finding)', () => {
+  // The bug: two concurrent signups for the same BRAND-NEW email both pass the "no
+  // existing row" check, both call `createAccount`, and the loser either crashes on the
+  // unique-did insert or (worse) lands in the orphan-adopt path and rotates the
+  // WINNER's just-minted password out from under it. The fix serializes the whole
+  // check -> mint -> insert sequence per email with `pg_advisory_xact_lock`, so this
+  // needs a REAL Postgres (the lock itself is the thing under test) — the PDS client
+  // stays mocked, exactly like the rest of this file.
+  it('two concurrent signup() calls for the same new email: exactly one createAccount, one row, both calls resolve, and the stored password matches what the PDS was actually given', async () => {
+    if (!available) return
+    const email = `race-${Date.now()}@example.org`
+    let capturedPassword: string | undefined
+    vi.mocked(createAccount).mockImplementation(async (input) => {
+      capturedPassword = input.password
+      // A small delay so both concurrent calls are genuinely in flight together before
+      // either reaches the point the lock actually has to serialize.
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      return { did: 'did:plc:race-winner', handle: 'race-winner.test', accessJwt: 'x', refreshJwt: 'y' }
+    })
+
+    const [a, b] = await Promise.all([signup({ email }), signup({ email })])
+
+    expect(createAccount).toHaveBeenCalledTimes(1)
+    expect(updateAccountPassword).not.toHaveBeenCalled()
+    expect(a.did).toBe('did:plc:race-winner')
+    expect(b.did).toBe('did:plc:race-winner')
+    expect(a.handle).toBe('race-winner.test')
+    expect(b.handle).toBe('race-winner.test')
+
+    const rows = await getDb().select().from(custodialAccount).where(eq(custodialAccount.did, 'did:plc:race-winner'))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]?.email).toBe(email)
+
+    const { unwrapSecret } = await import('../src/lib/crypto.js')
+    const decrypted = unwrapSecret({ keyVersion: rows[0]!.keyVersion, blob: Buffer.from(rows[0]!.wrappedPassword!) })
+    expect(decrypted).toBe(capturedPassword)
+  })
 })

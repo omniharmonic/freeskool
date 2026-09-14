@@ -57,6 +57,13 @@
       "when": 1789340811276,
       "tag": "0007_curious_jane_foster",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1789344050390,
+      "tag": "0008_same_lilith",
+      "breakpoints": true
     }
   ]
 }
