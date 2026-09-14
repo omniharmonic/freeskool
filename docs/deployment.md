@@ -31,9 +31,15 @@ Why Falkenstein and not a US location: Hetzner's CX line (CX33 €9.99/month, 20
 the US locations only offer CPX at roughly four to seven times the price. Boulder sees ~130 ms to
 Falkenstein, which the PWA's offline-first calendar absorbs. Move later with the runbook below.
 
-**Still open (R9):** the PDS hostname is `pds.freeskool.xyz`, which is not neutral — the hostname
-itself says what the school is. Changing it later means a new `PDS_HOSTNAME`, DNS, and a PLC
-operation per existing account to re-point the service endpoint, so decide before inviting members.
+**Decided (R9), 2026-09-14:** the PDS hostname `pds.freeskool.xyz` is not neutral — the hostname
+itself says what the school is, in a DID document that is world-readable forever. Benjamin
+registered **`freeskool.directory`**, and the PDS moves to `pds.freeskool.directory` with every
+handle to `<name>.freeskool.directory` (federation design §2, ruling 3). That is a PLC operation
+per existing account, plus a Caddy/env window in which both domains are served at once, so it has
+its own runbook: **`docs/runbooks/pds-hostname-migration.md`** — do it before the relay switch
+(`docs/runbooks/relay-switch.md`). `infra/production/{Caddyfile,compose.yml,.env.example}` already
+carry the `PDS_LEGACY_HOST` / `PDS_LEGACY_HANDLE_DOMAIN` overlap variables the runbook uses; they
+are empty except during that window.
 
 ## DNS
 

@@ -24,12 +24,20 @@ services:
   # The school's own PDS. Custodial member accounts and the school account live here.
   # Generated handles are `<name>.${PDS_HANDLE_DOMAIN}`; Caddy fronts both the PDS hostname
   # and every handle (on-demand certificates, vouched for by the PDS's /tls-check).
+  #
+  # Changing PDS_HOSTNAME changes what this container SERVES and nothing about the DID
+  # documents already published — every existing account keeps naming the old endpoint
+  # until a PLC operation moves it. `pnpm --filter @freeschool/appview migrate-pds-hostname`
+  # is what moves them; docs/runbooks/pds-hostname-migration.md is the order to do it in.
+  # PDS_LEGACY_HANDLE_DOMAIN, set only for the length of that window, keeps the PDS willing
+  # to mint and validate handles on BOTH domains, so an account that has not moved yet is
+  # still a handle this PDS recognizes as its own.
   pds:
     image: ghcr.io/bluesky-social/pds:0.4
     restart: unless-stopped
     environment:
       PDS_HOSTNAME: ${PDS_HOST:?Set PDS_HOST}
-      PDS_SERVICE_HANDLE_DOMAINS: .${PDS_HANDLE_DOMAIN:?Set PDS_HANDLE_DOMAIN}
+      PDS_SERVICE_HANDLE_DOMAINS: .${PDS_HANDLE_DOMAIN:?Set PDS_HANDLE_DOMAIN}${PDS_LEGACY_HANDLE_DOMAIN:+,.${PDS_LEGACY_HANDLE_DOMAIN}}
       PDS_JWT_SECRET: ${PDS_JWT_SECRET:?Set PDS_JWT_SECRET}
       PDS_ADMIN_PASSWORD: ${PDS_ADMIN_PASSWORD:?Set PDS_ADMIN_PASSWORD}
       PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX: ${PDS_PLC_ROTATION_KEY_K256_PRIVATE_KEY_HEX:?Set the rotation key}
@@ -97,6 +105,13 @@ services:
       WEB_HOST: ${WEB_HOST:?Set WEB_HOST}
       PDS_HOST: ${PDS_HOST:?Set PDS_HOST}
       PDS_HANDLE_DOMAIN: ${PDS_HANDLE_DOMAIN:?Set PDS_HANDLE_DOMAIN}
+      # Unset outside a hostname migration, in which case these become `.invalid` sentinel
+      # names: valid site addresses that resolve nowhere and therefore serve nobody. The
+      # default is spelled here rather than left to the Caddyfile's `{$VAR:default}`
+      # because that form only fires for an UNSET variable, and compose always sets the
+      # ones it lists — an empty value would reach Caddy as an empty site address.
+      PDS_LEGACY_HOST: ${PDS_LEGACY_HOST:-legacy-pds.invalid}
+      PDS_LEGACY_HANDLE_DOMAIN: ${PDS_LEGACY_HANDLE_DOMAIN:-legacy.invalid}
     ports:
       - '80:80'
       - '443:443'

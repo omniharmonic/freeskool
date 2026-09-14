@@ -4,6 +4,16 @@
 #   {$PDS_HOST}                the PDS, whole: xrpc, oauth, admin, everything it serves
 #   *.{$PDS_HANDLE_DOMAIN}     every handle host AND every school host
 #
+# …and, for the length of a hostname migration only, the SAME two names on the domain we
+# are moving away from: {$PDS_LEGACY_HOST} and *.{$PDS_LEGACY_HANDLE_DOMAIN}. A DID
+# document is world-readable and slow to change; between the moment the PDS starts
+# answering to `pds.freeskool.directory` and the moment the last account's PLC operation
+# lands, some accounts still tell the network their repo is at `pds.freeskool.xyz`. Both
+# names must reach the same container for that whole window, which is why they are two
+# variables and not one. Unset, each falls back to a `.invalid` sentinel — a site block
+# for a name that cannot resolve, which costs nothing and keeps the file free of
+# conditionals. See docs/runbooks/pds-hostname-migration.md.
+#
 # The wildcard inversion (multi-school design §3). A handle host needs the PDS for exactly
 # two things — `/.well-known/atproto-did`, which is how the network resolves the handle, and
 # `/xrpc/*`, which is how a client that discovered the handle first talks to the repo. Every
@@ -76,7 +86,9 @@
 	reverse_proxy pds:3000
 }
 
-*.{$PDS_HANDLE_DOMAIN} {
+# What every handle/school host does, on the current domain and on the one being left
+# behind. One definition, for the same reason `(app)` is one definition.
+(handle_host) {
 	tls {
 		on_demand
 	}
@@ -89,6 +101,34 @@
 		reverse_proxy pds:3000
 	}
 	import app
+}
+
+*.{$PDS_HANDLE_DOMAIN} {
+	import handle_host
+}
+
+# ── Migration overlap (unset = a `.invalid` sentinel that never resolves) ────────────
+#
+# The old PDS hostname keeps serving the whole PDS, because a not-yet-migrated account's
+# DID document still names it and a client that reads that document will dial it for
+# `/xrpc/*` AND for OAuth. The old wildcard keeps serving handle resolution for the same
+# reason, and keeps serving the app so a bookmarked handle host does not 404 mid-window.
+#
+# CAVEAT, and it is the one thing to plan around: the on-demand `ask` gate
+# (`apps/appview/src/lib/tls-check.ts`) vouches for exactly ONE handle domain — whichever
+# `PDS_HANDLE_DOMAIN` currently is. During the overlap, hosts on the other domain are
+# served from certificates Caddy ALREADY holds; a name that has never been issued one
+# cannot get one. That is why the runbook does the flip and the account migration in a
+# single window rather than leaving the overlap open for days.
+{$PDS_LEGACY_HOST:legacy-pds.invalid} {
+	tls {
+		on_demand
+	}
+	reverse_proxy pds:3000
+}
+
+*.{$PDS_LEGACY_HANDLE_DOMAIN:legacy.invalid} {
+	import handle_host
 }
 
 # The on-demand "ask" gate (container-local only), proxied to the AppView, which answers
