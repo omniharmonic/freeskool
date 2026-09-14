@@ -45,6 +45,13 @@ const schema = z.object({
   SCHOOL_HANDLE: z.string().default(''),
   SCHOOL_APP_PASSWORD: z.string().default(''),
 
+  /** Taxonomy authority DID: when set, the skill tree/detail routes ignore skill records from any other DID. */
+  AUTHORITY_DID: z.string().default(''),
+  /** Handle for the taxonomy authority account (ops/documentation use only). */
+  AUTHORITY_HANDLE: z.string().default(''),
+  /** App password for the taxonomy authority account (used by seed/admin scripts, never logged). */
+  AUTHORITY_PASSWORD: z.string().default(''),
+
   /** Peer registry seed. The school record's `peers` field adds more at runtime. */
   PEER_PDS_HOSTS: z.string().default('http://localhost:3000').transform(csv),
 

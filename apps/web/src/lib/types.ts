@@ -38,6 +38,31 @@ export interface AuthMe {
   handle?: string;
   isCustodial: boolean;
   emailVerified: boolean;
+  /** Whether this member has been through `/welcome` (Task 6/11). False for
+   * everyone who signed up before onboarding existed, which is the point:
+   * they get the offer once, on their next verified sign-in. */
+  onboarded: boolean;
+}
+
+/**
+ * `GET /api/me/handle/check?handle=<prefix>` — the prefix only, never the
+ * whole handle. `reason` is present exactly when `available` is false:
+ * `invalid` (fails the 3-20 lowercase/number/dash rule), `reserved` (a name
+ * the school holds back) or `taken`.
+ */
+export interface HandleCheckResult {
+  available: boolean;
+  reason?: 'invalid' | 'reserved' | 'taken';
+}
+
+/** `PUT /api/me/handle` — answers with the FULL handle, prefix plus domain. */
+export interface SetHandleResult {
+  handle: string;
+}
+
+/** `POST /api/me/onboarded` — idempotent; the first timestamp is the one kept. */
+export interface OnboardedResult {
+  onboarded: true;
 }
 
 /**
@@ -81,12 +106,16 @@ export interface EventUriRef {
 
 /**
  * Mirrors `PublicCalendarEntry`/`FullCalendarEntry` from `projectEvent()` in
- * `apps/appview/src/http/visibility.ts:87-110` and `toCalendarEvent()` in
- * `apps/appview/src/http/routes/calendar.ts:63-76` exactly: `hostDid`,
- * `description`, `locations`, and `uris` are present only when
- * `locationRedacted` is false (the viewer is the host, has RSVP'd, has
- * confirmed attendance, or is a steward) — everyone else gets the coarser
- * public entry.
+ * `apps/appview/src/http/visibility.ts` and `toCalendarEvent()` in
+ * `apps/appview/src/http/routes/calendar.ts` exactly.
+ *
+ * `description` is the host's PUBLIC overview — it is the event record's own
+ * `description` field, world-readable in the host's repo, and is sent to
+ * everyone for a listed class. `locations`, `uris`, `attendeeNotes` and
+ * `meetingLink` are present only when `locationRedacted` is false (the viewer
+ * is the host, has RSVP'd, has confirmed attendance, or is a steward) —
+ * everyone else gets the coarser public entry. Task 19c moved the notes and the
+ * link off the public record precisely so that gate could be honoured.
  */
 export interface ImageInput { data: string; alt: string }
 
@@ -104,11 +133,16 @@ export interface CalendarEvent {
   neighborhood?: string;
   /** True when the full location was withheld from this viewer. */
   locationRedacted: boolean;
+  /** The public overview. Present for any listed class, to any viewer. */
+  description?: string;
   /** Present only when `locationRedacted` is false. */
   hostDid?: string;
-  description?: string;
   locations?: EventLocation[];
   uris?: EventUriRef[];
+  /** App-side and attendee-only (task 19c): notes the host wrote for people
+   * who RSVP'd, and the meeting link. Never on any public record. */
+  attendeeNotes?: string;
+  meetingLink?: string;
   /** Added by Task 2; absent until then. */
   venueNeeded?: boolean;
   tags?: string[];
@@ -151,6 +185,15 @@ export interface EventDetail extends CalendarEvent {
    * public fact.
    */
   visibility?: 'listed' | 'unlisted' | 'private';
+  /**
+   * Why the host called the class off. App-side on the AppView
+   * (`fs_event_extra.cancel_reason`) and never on any public record — the record
+   * carries only `status: …#cancelled`. Present to anyone who can see the class.
+   */
+  cancelledReason?: string;
+  /** True when this class is part of a recurring series — so "this one, or this
+   * and the ones after it?" is a question worth asking when cancelling. */
+  recurring?: boolean;
 }
 
 export interface EventSeriesInput {
@@ -170,12 +213,16 @@ export interface CreateEventInput {
   cover?: ImageInput | null;
   venueNeeded?: boolean;
   name: string;
-  description?: string;
+  /** Attendee-only, app-side. Replaces the pre-19c `description` input, which
+   * the AppView still accepts and maps onto this (`attendeeFields()` in
+   * `apps/appview/src/lib/events.ts`). */
+  attendeeNotes?: string;
+  /** Attendee-only, app-side. Replaces the pre-19c `uris` input. */
+  meetingLink?: string;
   startsAt: string;
   endsAt?: string;
   mode?: string;
   locations?: unknown[];
-  uris?: EventUriRef[];
   timezone?: string;
   capacity?: number;
   visibility?: 'listed' | 'unlisted' | 'private';
@@ -217,6 +264,26 @@ export interface UpdateEventResult {
   listing?: { uri: string; cid: string };
   skillLevels?: Array<{ uri: string; cid: string }>;
   unlisted?: boolean;
+}
+
+/** `POST /api/events/:id/cancel`. `reason` is app-side only; `scope: 'following'`
+ * is accepted only for a class that belongs to a recurring series. */
+export interface CancelEventInput {
+  reason?: string;
+  scope?: 'this' | 'following';
+}
+
+/** Mirrors `CancelledEvent` in `apps/appview/src/lib/events.ts`. `unlisted` is
+ * false when withdrawing the school's listing needs a steward, and absent when
+ * there was no listing of ours to withdraw. */
+export interface CancelEventResult {
+  event: { uri: string; cid: string };
+  status: string;
+  scope: 'this' | 'following';
+  unlisted?: boolean;
+  alsoCancelled: string[];
+  exdatesAdded: number;
+  notified: number;
 }
 
 // ── rsvp ─────────────────────────────────────────────────────────────────
@@ -369,6 +436,75 @@ export interface SkillTreeResponse {
   skills: SkillNode[];
 }
 
+/**
+ * `POST /api/skills` — "I couldn't find it, here is what it's called."
+ * `parentUri` is always a domain or an area (the picker only ever offers
+ * those), so a proposal can never orphan itself at the root of the taxonomy.
+ */
+export interface SkillProposeInput {
+  label: string;
+  description?: string;
+  parentUri: string;
+}
+
+/** The 201 body. `status` comes back `'proposed'` until a steward curates it. */
+export interface SkillProposeResult {
+  uri: string;
+  id: string;
+  label: string;
+  status: string;
+  tier: SkillTier;
+}
+
+/**
+ * The 409 body — the taxonomy already has this skill under some name. Rides
+ * on `ApiError.body`; the picker selects `existing` rather than making the
+ * member retype anything. 503 `AuthorityUnavailable` (the school has no
+ * curation authority configured) carries no extra fields.
+ */
+export interface SkillExistsBody {
+  error: 'SkillExists';
+  existing: SkillNode;
+}
+
+/**
+ * One row of `GET /api/admin/skills/proposals` — `apps/appview/src/http/routes/admin.ts`.
+ * `id` is the skill's OWN rkey (not the `fs_skill_proposal` row id) — the same id
+ * `POST /api/admin/skills/:id/deprecate` and `.../move` both take. `label`/`status`
+ * are absent only if the indexer hasn't caught up with a just-proposed record yet.
+ */
+export interface SkillProposalItem {
+  id: string;
+  skillUri: string;
+  label?: string;
+  status?: string;
+  path: string[];
+  proposerHandle?: string;
+  proposedAt: string;
+}
+
+export interface SkillProposalsResponse {
+  proposals: SkillProposalItem[];
+}
+
+export interface SkillDeprecateInput {
+  replacedBy?: string;
+}
+
+export interface SkillDeprecateResult {
+  uri: string;
+  status: string;
+}
+
+export interface SkillMoveInput {
+  parentUri: string;
+}
+
+export interface SkillMoveResult {
+  uri: string;
+  broader: string[];
+}
+
 export interface SkillDetail {
   uri: string;
   id: string;
@@ -381,6 +517,13 @@ export interface SkillDetail {
   ancestors: Array<{ uri: string; label: string; tier: SkillTier }>;
   children: Array<{ uri: string; label: string; status: string; tier: SkillTier }>;
   taughtIn: Array<{ event?: string; level: number }>;
+  /**
+   * Who at this school holds this skill — present ONLY for a signed-in viewer
+   * (`withViewer` in `apps/appview/src/http/routes/skills.ts`). Its absence is
+   * what tells the skill page to show the public practitioner shelf and a
+   * sign-in nudge instead of the members list.
+   */
+  people?: SkillPeople;
 }
 
 // ── me ───────────────────────────────────────────────────────────────────
@@ -408,6 +551,9 @@ export interface SkillClaimInput {
 export interface SkillClaimsSetInput {
   claims: SkillClaimInput[];
   confirmTierB?: boolean;
+  /** Required for an OAuth-door session to publish ANY public claim — the
+   * same one-time linkage confirmation `UpdateProfileInput` carries. */
+  confirmPublicLinkage?: boolean;
 }
 
 export interface SkillClaimsSetResult {
@@ -446,6 +592,11 @@ export interface MeResponse {
   thresholds: unknown;
   rsvps: MyRsvp[];
   profile: MeProfile;
+  /** `fs_member_prefs.directory_listing` — defaults true for a member who has
+   * never touched it. False means "hide me from the school directory". Sits
+   * beside `profile`, not inside it: it is a member pref, not a profile field. */
+  directoryListing?: boolean;
+  onboarded?: boolean;
 }
 
 /** `PUT /api/me`'s body — deliberately `.strict()` server-side (`profileBody`
@@ -456,11 +607,20 @@ export interface UpdateProfileInput {
   avatar?: ImageInput | null;
   displayName?: string;
   bio?: string;
+  /** The members-directory opt-out (`fs_member_prefs`), not a profile field. */
+  directoryListing?: boolean;
+  /** Required alongside `publicListing: true` for an OAuth-door session, which
+   * would otherwise get 400 `PublicLinkageConfirmRequired` — publishing from an
+   * existing account links it to this school permanently, so it is confirmed
+   * once, explicitly. */
+  confirmPublicLinkage?: boolean;
 }
 
 export interface UpdateProfileResult {
   did: string;
   profile: MeProfile;
+  /** Echoed back only when the request carried it. */
+  directoryListing?: boolean;
 }
 
 /** `GET /api/me/visibility-defaults` — what this session is allowed to make
@@ -799,3 +959,125 @@ export interface ZineMonthResponse {
 
 export interface KnowledgeResource { libraryStatus?: 'moderated'|'class-unlisted'; id: string; title: string; description?: string; skills: string[]; uri?: string; license?: string; event?: {uri:string;cid:string}; authorDid: string; authorName: string; authorHasProfile: boolean; createdAt?: string }
 export interface PublicProfile { did:string;displayName:string;bio:string;avatarUrl?:string;claims:Array<{skill:string;level:string;note?:string}>;resources:KnowledgeResource[] }
+
+// ── members directory (Task 10) ──────────────────────────────────────────
+
+/**
+ * Mirrors `MemberSummary` in `apps/appview/src/lib/members.ts` exactly.
+ * Members-only, never public (R9): every `/api/members*` route sits behind
+ * `requireViewer` and answers `noindex, nofollow`.
+ */
+export interface MemberSummary {
+  did: string;
+  handle?: string;
+  displayName?: string;
+  avatarUrl?: string;
+  bio?: string;
+  role: ViewerRole;
+  roleLabel: string;
+  claimCount: number;
+  vouchCount: number;
+  lastSeenAt: string;
+}
+
+/** `GET /api/members` — one page, `cursor` present only when more follow. */
+export interface MembersResponse {
+  members: MemberSummary[];
+  cursor?: string;
+}
+
+/** `q` matches a display-name substring; `skill` is an exact skill AT-URI.
+ * A type alias rather than an interface on purpose: `api.ts`'s `buildUrl`
+ * takes a `Record<string, QueryValue>`, and only an alias gets the implicit
+ * index signature that makes it assignable to one. */
+export type MembersQuery = {
+  q?: string;
+  skill?: string;
+  cursor?: string;
+  limit?: number;
+};
+
+/**
+ * One claim on a member's profile. `visibility` is `'school'` for claims the
+ * member kept off their public records — fair to show another member here
+ * (this view is already members-only), never anywhere public.
+ */
+export interface MemberClaim {
+  skillUri: string;
+  skillLabel: string;
+  level: string;
+  visibility: 'public' | 'school';
+  vouchCount: number;
+  /** True when the viewer has already vouched for this member's claim. */
+  viewerVouched: boolean;
+}
+
+/** Mirrors `MemberProfile` in `apps/appview/src/lib/members.ts`. 404 when the
+ * member has turned `directoryListing` off. */
+export interface MemberProfileResponse extends MemberSummary {
+  claims: MemberClaim[];
+  /** The same `{counts, role, badges}` shape as `GET /api/me/badges`. */
+  badges: MeBadgesResponse;
+  hosting: Array<{ uri: string; name: string; startsAt: string }>;
+  resources: Array<{ id: string; title: string }>;
+}
+
+// ── attestations / vouches (Task 10) ─────────────────────────────────────
+
+/** `POST /api/attestations` — 400 `SelfAttestation`, 404 `SubjectNotHolding`,
+ * 409 `AlreadyVouched` are all real answers, never transient failures. */
+export interface AttestationInput {
+  subjectDid: string;
+  skillUri: string;
+  contextEventUri?: string;
+}
+
+export interface AttestationCreated {
+  id: string;
+}
+
+export interface AttestationGiven {
+  id: string;
+  subjectDid: string;
+  skillUri: string;
+  createdAt: string;
+}
+
+/** Carries only what it takes to show an attester — a handle and/or a display
+ * name when we have one, never anything else about them (R9). */
+export interface AttestationReceived {
+  id: string;
+  attesterDid: string;
+  attesterHandle?: string;
+  attesterDisplayName?: string;
+  skillUri: string;
+  skillLabel: string;
+  createdAt: string;
+}
+
+export interface MyAttestationsResponse {
+  given: AttestationGiven[];
+  received: AttestationReceived[];
+}
+
+/** `people` on `GET /api/skills/:id` — present only for a signed-in viewer.
+ * `count` is the full visible total even when `members` is capped at 50. */
+export interface SkillPeople {
+  count: number;
+  members: Array<{
+    did: string;
+    handle?: string;
+    displayName?: string;
+    avatarUrl?: string;
+    level: string;
+    vouchCount: number;
+  }>;
+}
+
+/** `POST /api/me/import-bsky-profile` — re-pulls displayName/bio/avatar from
+ * Bluesky. `imported: false` with no `fields` means there was nothing to
+ * import (no Bluesky profile for this DID). */
+export interface ImportBskyProfileResult {
+  imported: boolean;
+  fields: string[];
+}

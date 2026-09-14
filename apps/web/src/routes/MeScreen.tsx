@@ -2,19 +2,24 @@ import { useQueryClient } from '@tanstack/react-query';
 import { LoadingState, PageState } from '../components/PageState';
 import { ImagePicker } from '../components/ImagePicker';
 import type { ImageInput } from '../lib/types';
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { applyPrefs, readPrefs, writePrefs, type ThemeChoice } from '../lib/prefs';
 import { SessionGate } from '../components/SessionGate';
 import { Screen } from '../components/Screen';
 import { Button, SkillChip, Toggle } from '../components/bits';
 import { Sheet } from '../components/Sheet';
+import { SkillPicker } from '../components/SkillPicker';
+import { HandleChooser } from '../components/HandleChooser';
+import { flattenSkills } from '../lib/skills';
 import { useInstallFlow } from '../components/InstallNudge';
 import { api, ApiError } from '../lib/api';
 import {
+  useImportBskyProfileMutation,
   useMe,
   useMeBadges,
   useMeProfile,
+  useMyAttestations,
   useMyClaims,
   useSetSkillClaimsMutation,
   useSkillTree,
@@ -22,7 +27,7 @@ import {
   useUpdateProfileMutation,
   useVisibilityDefaults,
 } from '../lib/queries';
-import type { SkillClaimInput, SkillClaimLevel, SkillClaimsResponse, SkillNode, SkillTier } from '../lib/types';
+import type { SkillClaimInput, SkillClaimLevel, SkillClaimsResponse } from '../lib/types';
 
 const CLAIM_LEVEL_LABEL: Record<SkillClaimLevel, string> = {
   learning: 'Learning',
@@ -37,6 +42,15 @@ interface EditableClaim {
   level: SkillClaimLevel;
   note?: string;
   visibility: 'public' | 'school';
+}
+
+/** "display name and bio", not "displayName, bio". */
+function formatFields(fields: string[]): string {
+  const words = fields.map((field) =>
+    field === 'displayName' ? 'display name' : field === 'bio' ? 'bio' : field === 'avatar' ? 'photo' : field,
+  );
+  if (words.length <= 1) return words[0] ?? 'profile';
+  return `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`;
 }
 
 function isClaimLevel(value: unknown): value is SkillClaimLevel {
@@ -83,16 +97,6 @@ function claimsFromServer(
   return { claims: [...fromPublic, ...fromSchool], coercedPublicCount };
 }
 
-function flattenSkills(nodes: SkillNode[], trail: string[] = []): Array<{ uri: string; path: string; tier: SkillTier }> {
-  const out: Array<{ uri: string; path: string; tier: SkillTier }> = [];
-  for (const node of nodes) {
-    const path = [...trail, node.label];
-    out.push({ uri: node.uri, path: path.join(' › '), tier: node.tier });
-    out.push(...flattenSkills(node.children, path));
-  }
-  return out;
-}
-
 export function MeScreen() {
   return <SessionGate screen prompt="Sign in to keep track of your skills, classes, and preferences."><MeContent /></SessionGate>;
 }
@@ -110,10 +114,21 @@ function MeContent() {
   const { data: visibilityDefaults, isPending: visibilityPending, isError: visibilityError, refetch: refetchVisibility } = useVisibilityDefaults();
   const { data: claimsData, isPending: claimsPending, isError: claimsLoadError, refetch: refetchClaims } = useMyClaims();
   const { data: skillTree } = useSkillTree();
-  const flatSkills = flattenSkills(skillTree?.skills ?? []);
+  const flatSkills = useMemo(() => flattenSkills(skillTree?.skills ?? []), [skillTree]);
 
+  const { data: attestations } = useMyAttestations();
   const updateProfileMutation = useUpdateProfileMutation();
   const setClaimsMutation = useSetSkillClaimsMutation();
+  const importBskyMutation = useImportBskyProfileMutation();
+
+  /**
+   * Task 7: an OAuth-door session that asks to publish anything gets one 400
+   * `PublicLinkageConfirmRequired` first — linking an existing account to this
+   * school is permanent, so it is confirmed once, out loud. This remembers
+   * which request is waiting on that confirmation.
+   */
+  const [linkageConfirm, setLinkageConfirm] = useState<null | 'profile' | 'claims'>(null);
+  const [bskyNotice, setBskyNotice] = useState<string | null>(null);
 
   const oauthLocked = visibilityDefaults?.oauthDoor ?? false;
 
@@ -129,6 +144,18 @@ function MeContent() {
   const [publicListing, setPublicListing] = useState(false);
   const [avatar, setAvatar] = useState<ImageInput | null | undefined>();
   const [profileError, setProfileError] = useState<string | null>(null);
+  // UX audit finding 3: with no display name, the title card's "Add your
+  // name" affordance opens the editor and focuses this field directly,
+  // rather than leaving the member to find it themselves.
+  const displayNameInputRef = useRef<HTMLInputElement>(null);
+  const [focusNameOnOpen, setFocusNameOnOpen] = useState(false);
+
+  useEffect(() => {
+    if (editingProfile && focusNameOnOpen) {
+      displayNameInputRef.current?.focus();
+      setFocusNameOnOpen(false);
+    }
+  }, [editingProfile, focusNameOnOpen]);
 
   useEffect(() => {
     if (!meProfile || editingProfile) return;
@@ -142,15 +169,56 @@ function MeContent() {
   // belt-and-suspenders, since the server is `.strict()` but still the source
   // of truth. On failure (400 past some other limit, 401, ...) the editor
   // stays open with the server's message, rather than closing as if it saved.
-  const saveProfile = async () => {
+  const saveProfile = async (confirmPublicLinkage = false) => {
     setProfileError(null);
     try {
       await updateProfileMutation.mutateAsync({ displayName: displayName.trim(),
-        ...(avatar !== undefined ? { avatar } : {}), bio: bio.trim(), publicListing });
+        ...(avatar !== undefined ? { avatar } : {}), bio: bio.trim(), publicListing,
+        ...(confirmPublicLinkage ? { confirmPublicLinkage: true } : {}) });
       setEditingProfile(false);
       setAvatar(undefined);
+      setLinkageConfirm(null);
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'PublicLinkageConfirmRequired') {
+        setLinkageConfirm('profile');
+        return;
+      }
       setProfileError(err instanceof ApiError ? err.message : 'Could not save your profile. Try again.');
+    }
+  };
+
+  /**
+   * Task 11: the handle. A custodial member can change theirs here (the same
+   * control `/welcome` offers); an account that arrived through the OAuth door
+   * owns its handle elsewhere, so this row just shows it. `chosenHandle` holds
+   * what the change became until `['me']` refetches under it.
+   */
+  const [editingHandle, setEditingHandle] = useState(false);
+  const [chosenHandle, setChosenHandle] = useState<string | null>(null);
+
+  /** The members directory opt-out. Not a profile field: it lives in
+   * `fs_member_prefs`, and `PUT /api/me` takes it on its own. */
+  const listedInDirectory = meProfile?.directoryListing ?? true;
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
+  const setDirectoryListing = (listed: boolean) => {
+    setDirectoryError(null);
+    updateProfileMutation.mutate(
+      { directoryListing: listed },
+      { onError: () => setDirectoryError('Could not change that. Try again.') },
+    );
+  };
+
+  const refreshFromBluesky = async () => {
+    setBskyNotice(null);
+    try {
+      const result = await importBskyMutation.mutateAsync();
+      setBskyNotice(
+        result.imported
+          ? `Brought over your ${formatFields(result.fields)} from Bluesky.`
+          : 'Nothing to bring over from Bluesky right now.',
+      );
+    } catch (err) {
+      setBskyNotice(err instanceof ApiError ? err.message : 'Could not reach Bluesky. Try again.');
     }
   };
 
@@ -169,7 +237,6 @@ function MeContent() {
   }, [claimsData, claimsInitialized, oauthLocked]);
 
   const [draftSkillUri, setDraftSkillUri] = useState('');
-  const [draftSkillSearch, setDraftSkillSearch] = useState('');
   const [draftLevel, setDraftLevel] = useState<SkillClaimLevel>('practicing');
   const [draftVisibility, setDraftVisibility] = useState<'public' | 'school'>(oauthLocked ? 'school' : 'public');
   const [claimsError, setClaimsError] = useState<string | null>(null);
@@ -179,10 +246,6 @@ function MeContent() {
   // publish/retract can go through.
   const [reauthNotice, setReauthNotice] = useState(false);
 
-  const matchingSkills = draftSkillSearch.trim()
-    ? flatSkills.filter((s) => s.path.toLowerCase().includes(draftSkillSearch.trim().toLowerCase())).slice(0, 8)
-    : [];
-
   const addClaim = () => {
     if (!draftSkillUri) return;
     setClaims((prev) => [
@@ -190,7 +253,6 @@ function MeContent() {
       { skill: draftSkillUri, level: draftLevel, visibility: oauthLocked ? 'school' : draftVisibility },
     ]);
     setDraftSkillUri('');
-    setDraftSkillSearch('');
     setDraftLevel('practicing');
     setDraftVisibility(oauthLocked ? 'school' : 'public');
   };
@@ -209,20 +271,26 @@ function MeContent() {
   // `TierBConfirmRequired` is still the real gate (a stale tree, or a claim
   // typed by URI, could disagree with what's shown), so this stays
   // try-then-confirm rather than trusting the client's own tier read.
-  const submitClaims = async (confirmTierB: boolean) => {
+  const submitClaims = async (confirmTierB: boolean, confirmPublicLinkage = false) => {
     setClaimsError(null);
     setReauthNotice(false);
-    const body: { claims: SkillClaimInput[]; confirmTierB?: boolean } = {
+    const body: { claims: SkillClaimInput[]; confirmTierB?: boolean; confirmPublicLinkage?: boolean } = {
       claims: claims.map((c) => ({ skill: c.skill, level: c.level, note: c.note, visibility: c.visibility })),
       ...(confirmTierB ? { confirmTierB: true } : {}),
+      ...(confirmPublicLinkage ? { confirmPublicLinkage: true } : {}),
     };
     try {
       const result = await setClaimsMutation.mutateAsync(body);
       setTierBConfirmOpen(false);
+      setLinkageConfirm(null);
       setReauthNotice(Boolean(result.reauthRequired));
     } catch (err) {
       if (err instanceof ApiError && err.code === 'TierBConfirmRequired') {
         setTierBConfirmOpen(true);
+        return;
+      }
+      if (err instanceof ApiError && err.code === 'PublicLinkageConfirmRequired') {
+        setLinkageConfirm('claims');
         return;
       }
       setClaimsError(err instanceof ApiError ? err.message : 'Could not save your skills. Try again.');
@@ -250,7 +318,22 @@ function MeContent() {
             {meProfile?.profile.avatarUrl ? <img src={meProfile.profile.avatarUrl} alt="Your profile image" /> : <span>{(meProfile?.profile.displayName ?? me?.handle ?? 'You').slice(0,2).toUpperCase()}</span>}
           </div>
           <div className="min-w-0 flex-1">
-            <p className="display text-lede font-bold">{meProfile?.profile.displayName || me?.handle || 'You'}</p>
+            {meProfile?.profile.displayName ? (
+              <p className="display text-lede font-bold">{meProfile.profile.displayName}</p>
+            ) : (
+              <button
+                type="button"
+                className="display text-lede font-bold text-blue text-left"
+                onClick={() => {
+                  setProfileError(null);
+                  setAvatar(undefined);
+                  setEditingProfile(true);
+                  setFocusNameOnOpen(true);
+                }}
+              >
+                Add your name
+              </button>
+            )}
             {me?.handle ? <p className="text-caption text-ink-soft">{me.handle}</p> : null}
             {meProfile?.profile.bio ? <p className="mt-3 text-body text-ink-soft">{meProfile.profile.bio}</p> : null}
           </div>
@@ -273,6 +356,7 @@ function MeContent() {
             <label className="block">
               <span className="text-caption text-ink-soft">Display name</span>
               <input
+                ref={displayNameInputRef}
                 className="mt-1.5 w-full border-[1.5px] border-ink bg-sheet px-3 py-2 text-body outline-none"
                 value={displayName}
                 maxLength={120}
@@ -290,14 +374,26 @@ function MeContent() {
             </label>
             <label className="public-profile-choice"><input type="checkbox" aria-describedby="profile-sharing-details" checked={publicListing} disabled={oauthLocked && !publicListing} onChange={e=>setPublicListing(e.target.checked)}/><span><strong>Share my profile publicly</strong></span></label><p id="profile-sharing-details" className="text-caption text-ink-soft">Share my name, bio, photo, public skill claims, and contributed resources. Show me on related skill pages. Attendance and school-only skills stay private.</p>
             {profileError ? <p className="text-body text-pink">{profileError}</p> : null}
-            <Button wide disabled={updateProfileMutation.isPending} onClick={() => void saveProfile()}>
+            <Button wide disabled={updateProfileMutation.isPending} onClick={() => void saveProfile(false)}>
               Save
             </Button>
           </div>
         ) : null}
 
+        {me?.kind === 'oauth' ? (
+          <div className="mt-3">
+            <Button variant="quiet" ink="ink" disabled={importBskyMutation.isPending} onClick={() => void refreshFromBluesky()}>
+              Refresh from Bluesky
+            </Button>
+            {bskyNotice ? <p className="mt-2 text-caption text-ink-soft">{bskyNotice}</p> : null}
+          </div>
+        ) : null}
+
         <Link to="/knowledge" search={{mine:true}} className="context-link">My knowledge contributions ↗</Link>
-        {meProfile?.profile.publicListing && me ? <Link to="/people/$did" params={{did:me.did}} className="context-link">View your public notebook ↗</Link> : null}
+        {/* `/people/$did` is the member-facing page for a signed-in viewer and the
+            opt-in public notebook for everyone else (see `router.tsx`), so this link
+            shows you what the school sees, not what a stranger does. */}
+        {me && listedInDirectory ? <Link to="/people/$did" params={{did:me.did}} className="context-link">Your page in the school directory ↗</Link> : null}
         <div className="activity-counts">
           <div className="activity-count">
             <p className="stamp text-[26px] leading-none">{badges?.counts.attended ?? 0}</p>
@@ -368,50 +464,18 @@ function MeContent() {
 
         <div className="plate mt-3 space-y-3 p-3.5">
           <p className="text-caption text-ink-soft">Add a skill</p>
-          {draftSkillUri ? (
-            <div className="flex items-center justify-between gap-3 border-[1.5px] border-ink bg-sheet px-3 py-2">
-              <span className="flex items-center gap-2 text-body">
-                <span>{flatSkills.find((s) => s.uri === draftSkillUri)?.path ?? draftSkillUri}</span>
-                {flatSkills.find((s) => s.uri === draftSkillUri)?.tier === 'B' ? (
-                  <SkillChip ink="pink">Sensitive</SkillChip>
-                ) : null}
-              </span>
-              <button type="button" className="text-caption text-blue" onClick={() => setDraftSkillUri('')}>
-                Change
-              </button>
-            </div>
-          ) : (
-            <>
-              <input
-                className="w-full border-[1.5px] border-ink bg-sheet px-3 py-2 text-body outline-none"
-                value={draftSkillSearch}
-                onChange={(e) => setDraftSkillSearch(e.target.value)}
-                placeholder="Search the skill taxonomy"
-                aria-label="Search the skill taxonomy"
-              />
-              {matchingSkills.length > 0 ? (
-                <ul className="divide-y divide-rule border-[1.5px] border-ink">
-                  {matchingSkills.map((s) => (
-                    <li key={s.uri}>
-                      <button
-                        type="button"
-                        className="block w-full px-3 py-2 text-left text-body"
-                        onClick={() => {
-                          setDraftSkillUri(s.uri);
-                          setDraftSkillSearch('');
-                          // Tier B (sensitive) defaults to school-only; Tier A to public —
-                          // an oauth-door session still always defaults to school-only.
-                          setDraftVisibility(oauthLocked || s.tier === 'B' ? 'school' : 'public');
-                        }}
-                      >
-                        {s.path}
-                      </button>
-                    </li>
-                  ))}
-                </ul>
-              ) : null}
-            </>
-          )}
+          <SkillPicker
+            skills={flatSkills}
+            value={draftSkillUri}
+            allowPropose
+            placeholder="Start typing a skill"
+            onChange={(uri, skill) => {
+              setDraftSkillUri(uri);
+              // Tier B (sensitive) defaults to school-only; Tier A to public —
+              // an oauth-door session still always defaults to school-only.
+              if (skill) setDraftVisibility(oauthLocked || skill.tier === 'B' ? 'school' : 'public');
+            }}
+          />
 
           <div>
             <span className="text-caption text-ink-soft">How much practice</span>
@@ -497,8 +561,64 @@ function MeContent() {
           Badges are labels for things you did. They are not points and nothing ranks them.
         </p>
 
+        <h2 className="mt-7 mb-2.5 text-lede font-bold">Vouches you’ve received</h2>
+        {attestations?.received.length ? (
+          <ul className="space-y-2">
+            {attestations.received.map((vouch) => (
+              <li key={vouch.id} className="text-body">
+                {vouch.attesterDisplayName || vouch.attesterHandle || 'Someone at this school'} vouched for{' '}
+                {vouch.skillLabel}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-body text-ink-soft">
+            Nobody has vouched for you yet. People vouch from your page in the school directory.
+          </p>
+        )}
+        <p className="mt-2 text-caption text-ink-faint">
+          A vouch is one person saying they have seen you do something. It is a count, never a score.
+        </p>
+
         </div><aside className="account-side" aria-label="Account preferences"><h2 id="my-settings" className="mb-4 text-lede font-bold">Settings</h2>
         <div className="plate divide-y-[1.5px] divide-rule">
+          <div className="p-3.5">
+            <div className="flex items-center justify-between gap-4">
+              <span className="min-w-0">
+                <span className="block text-body">Your handle</span>
+                <span className="block text-caption break-all text-ink-soft">{chosenHandle ?? me?.handle ?? 'Not set yet'}</span>
+              </span>
+              {me?.kind === 'custodial' ? (
+                <button
+                  type="button"
+                  onClick={() => setEditingHandle((open) => !open)}
+                  className="shrink-0 text-caption font-bold text-blue"
+                >
+                  {editingHandle ? 'Cancel' : 'Change'}
+                </button>
+              ) : null}
+            </div>
+            {me?.kind !== 'custodial' ? (
+              <p className="mt-1.5 text-caption text-ink-faint">
+                This account brought its own handle, so it is changed where that account lives.
+              </p>
+            ) : null}
+            {editingHandle && me?.handle ? (
+              <div className="mt-3">
+                <HandleChooser
+                  currentHandle={chosenHandle ?? me.handle}
+                  onSaved={(saved) => {
+                    setChosenHandle(saved);
+                    setEditingHandle(false);
+                  }}
+                />
+                <p className="mt-2 text-caption text-ink-faint">
+                  Your handle is public and lives in the AT Protocol directory permanently. The old one stops
+                  working for anyone who saved it.
+                </p>
+              </div>
+            ) : null}
+          </div>
           <div className="p-3.5">
             <p className="text-body">Appearance</p>
             <div className="mt-2.5 flex gap-1.5" role="group" aria-label="Appearance">
@@ -534,6 +654,22 @@ function MeContent() {
               label="Reduce blur"
               checked={prefs.reduceBlur}
               onChange={(reduceBlur) => setPrefs({ ...prefs, reduceBlur })}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 p-3.5">
+            <span className="min-w-0">
+              <span className="block text-body">Hide me from the school directory</span>
+              <span className="block text-caption text-ink-soft">
+                People at this school can see who else is here, and what everyone says they can share.
+                Hiding takes you out of that list and off every skill page.
+              </span>
+              {directoryError ? <span className="block text-caption text-pink">{directoryError}</span> : null}
+            </span>
+            <Toggle
+              label="Hide me from the school directory"
+              checked={!listedInDirectory}
+              onChange={(hidden) => setDirectoryListing(!hidden)}
             />
           </div>
 
@@ -596,6 +732,30 @@ function MeContent() {
           </Button>
         </div>
       </aside></div>
+
+      <Sheet
+        open={linkageConfirm !== null}
+        onClose={() => setLinkageConfirm(null)}
+        title="This links your account to the school"
+        footer={
+          <div className="flex gap-3 pb-1">
+            <Button
+              ink="pink"
+              onClick={() => void (linkageConfirm === 'claims' ? submitClaims(false, true) : saveProfile(true))}
+            >
+              Link it and share
+            </Button>
+            <Button ink="ink" variant="quiet" onClick={() => setLinkageConfirm(null)}>
+              Not now
+            </Button>
+          </div>
+        }
+      >
+        <p className="text-body">
+          Publishing from an account you already had links this account to the school for good. Anyone can
+          see the connection, and there is no way to take it back later.
+        </p>
+      </Sheet>
 
       <Sheet
         open={tierBConfirmOpen}

@@ -32,10 +32,11 @@
  *      projection shows enum only"). `approvals[].stewardDid` is accepted under the same
  *      rule for any future record that uses that shape.
  *   3. `freeschool.draft.skillAttestation` would be allowed on a recorded app-side DOUBLE
- *      opt-in (attester and subject). **No such table exists in v1** — nothing in the
- *      AppView writes an attestation at all (see the Task 2 deferral "nothing writes
- *      skillAttestation yet") — so every attestation naming another DID FAILS here, and the
- *      report says why. Whoever adds attestations adds the consent table with them.
+ *      opt-in (attester and subject). `fs_attestation` exists now, but it is the APP-SIDE
+ *      vouching feature (`lib/attestations.ts`) — it never writes a `skillAttestation`
+ *      record, and there is still no double-opt-in table for the public record itself. So
+ *      every `skillAttestation` naming another DID still FAILS here, and the report says
+ *      why. Whoever adds a public attestation record adds that consent table with it.
  *   4. A SCHOOL's own DID is never a "named other". A school is a public institutional
  *      actor, not a person: its DID is on every listing it publishes, and the `approval`
  *      lexicon's `proposal` field is explicitly "an app-side proposal id expressed as an

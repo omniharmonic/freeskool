@@ -6,6 +6,29 @@ const EVENT_URI = 'at://did:plc:host1/community.lexicon.calendar.event/abc123';
 const GOING_DID = 'did:plc:attendee1';
 const INTERESTED_DID = 'did:plc:attendee2';
 const MANUAL_DID = 'did:plc:walkin1';
+const WALKIN_DID = 'did:plc:walkin2';
+
+const directory = [
+  {
+    did: WALKIN_DID,
+    handle: 'rowan.fs.boulder',
+    displayName: 'Rowan Ash',
+    role: 20,
+    roleLabel: 'Member',
+    claimCount: 1,
+    vouchCount: 0,
+    lastSeenAt: '2026-09-10T00:00:00Z',
+  },
+  {
+    did: 'did:plc:walkin3',
+    handle: 'juniper.fs.boulder',
+    role: 20,
+    roleLabel: 'Member',
+    claimCount: 0,
+    vouchCount: 0,
+    lastSeenAt: '2026-09-09T00:00:00Z',
+  },
+];
 
 vi.mock('@tanstack/react-router', () => ({
   useParams: vi.fn(() => ({ id: EVENT_URI })),
@@ -17,6 +40,7 @@ vi.mock('../lib/api', () => {
     api: {
       events: { get: vi.fn(), roster: vi.fn() },
       attendance: { list: vi.fn(), set: vi.fn() },
+      members: { list: vi.fn() },
     },
   };
 });
@@ -64,6 +88,7 @@ describe('AttendanceScreen', () => {
     vi.mocked(api.events.roster).mockReset().mockResolvedValue(roster);
     vi.mocked(api.attendance.list).mockReset().mockResolvedValue({ total: 0, participated: 0, collapsed: false });
     vi.mocked(api.attendance.set).mockReset().mockResolvedValue({ ok: true, recorded: 1 });
+    vi.mocked(api.members.list).mockReset().mockResolvedValue({ members: directory });
   });
 
   it('refuses a non-host viewer', async () => {
@@ -104,6 +129,54 @@ describe('AttendanceScreen', () => {
       ]),
     );
     expect(await screen.findByText(/thanks — counts updated\. feedback opens for attendees now\./i)).toBeInTheDocument();
+  });
+
+  it('adds a walk-in the host picks out of the member list, by name', async () => {
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+
+    fireEvent.change(screen.getByLabelText('Search members'), { target: { value: 'rowan' } });
+    fireEvent.click(await screen.findByRole('button', { name: /Rowan Ash/ }));
+
+    // Named in the added list, never as a raw DID.
+    expect(await screen.findByText('Rowan Ash')).toBeInTheDocument();
+    expect(screen.queryByText(WALKIN_DID)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /save attendance/i }));
+
+    await waitFor(() =>
+      expect(api.attendance.set).toHaveBeenCalledWith(EVENT_URI, [
+        { did: GOING_DID, participated: true, role: 'attendee' },
+        { did: INTERESTED_DID, participated: false, role: 'attendee' },
+        { did: WALKIN_DID, participated: true, role: 'attendee' },
+      ]),
+    );
+  });
+
+  it('finds a member by their handle, and asks the server for the typed term', async () => {
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+
+    fireEvent.change(screen.getByLabelText('Search members'), { target: { value: 'juniper' } });
+
+    expect(await screen.findByRole('button', { name: /juniper\.fs\.boulder/ })).toBeInTheDocument();
+    // The debounce has to land before the typed term narrows the list.
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Rowan Ash/ })).not.toBeInTheDocument());
+    await waitFor(() => expect(api.members.list).toHaveBeenCalledWith({ q: 'juniper' }));
+  });
+
+  it('never offers somebody who is already on the list', async () => {
+    vi.mocked(api.members.list).mockResolvedValue({
+      members: [
+        { ...directory[0]!, did: GOING_DID, displayName: 'Goer', handle: 'goer.fs.boulder' },
+        directory[1]!,
+      ],
+    });
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+
+    expect(await screen.findByRole('button', { name: /juniper\.fs\.boulder/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Goer/ })).not.toBeInTheDocument();
   });
 
   it('adds someone who came without RSVPing, alongside the roster, on save', async () => {

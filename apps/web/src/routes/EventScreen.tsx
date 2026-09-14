@@ -1,7 +1,7 @@
 import { KnowledgeShelf } from '../components/KnowledgeShelf';
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Link, Navigate, useParams } from '@tanstack/react-router';
+import { Link, useParams } from '@tanstack/react-router';
 import { LoadingState, PageState } from '../components/PageState';
 import { ClassHero } from '../components/ClassArtwork';
 import { Screen } from '../components/Screen';
@@ -11,7 +11,15 @@ import { SessionGate } from '../components/SessionGate';
 import { useInstallFlow } from '../components/InstallNudge';
 import { api, ApiError } from '../lib/api';
 import { formatDayStamp, formatTime, formatTimeRange } from '../lib/dates';
-import { useEvent, useMyRsvp, useRsvpClearMutation, useRsvpMutation } from '../lib/queries';
+import {
+  useCancelEventMutation,
+  useEvent,
+  useMe,
+  useMemberProfile,
+  useMyRsvp,
+  useRsvpClearMutation,
+  useRsvpMutation,
+} from '../lib/queries';
 import type { EventDetail, EventLocation, SkillLevelRef } from '../lib/types';
 
 /** Verbatim from the plan's global constraints — do not paraphrase. */
@@ -19,17 +27,13 @@ const PERMANENCE_SENTENCE =
   'Anyone will be able to see, permanently, that you planned to be at this place at this time.';
 
 /**
- * `/event/$eventId` is the pre-Task-4 route, built around a mock short id
- * (`eventId()` in `EventCard.tsx`, the last path segment of the AT-URI). The
- * real `GET /api/events/:id` needs the FULL AT-URI — the same shape the new
- * `/events/$id/*` placeholders already use (Task 1's router skeleton) — so
- * this route now just forwards there rather than trying to resolve a partial
- * id into a full one.
+ * Machine tags written by calendar routing/exchange rather than by the host —
+ * never member-facing (UX audit finding 4). The school's actual routing-tag
+ * set isn't exposed to this client yet, so these three are named by hand:
+ * `skillshare`/`free-school` come from the school's own routing, `demo` from
+ * seed data. Any other tag is assumed host-written and still renders.
  */
-export function EventRedirect() {
-  const { eventId } = useParams({ from: '/event/$eventId' });
-  return <Navigate to="/events/$id" params={{ id: eventId }} replace />;
-}
+const ROUTING_TAGS = new Set(['skillshare', 'free-school', 'demo']);
 
 function formatAddress(location: EventLocation): string {
   const rec = location as Record<string, unknown>;
@@ -81,10 +85,24 @@ export function EventScreen() {
   const isPast = Boolean(endsAt && endsAt.getTime() < Date.now());
 
   const cancelled = event.status?.endsWith('#cancelled');
+  // The host's own meeting link first, then any legacy `uris` from a class published
+  // before task 19c. `javascript:` and friends never render.
+  const meetingLinks = [
+    ...(event.meetingLink ? [{ uri: event.meetingLink, name: 'Join the class' }] : []),
+    ...(event.uris ?? []).filter(link => link.uri !== event.meetingLink),
+  ].filter(link => { try { return ['http:','https:'].includes(new URL(link.uri).protocol); } catch { return false; } });
   return (
     <Screen title={event.name} layout="detail" back>
       <div className="safe-x">
-        {cancelled ? <p className="event-notice" role="status">This class has been cancelled. Check the calendar for other ways to learn together.</p> : null}
+        {cancelled ? (
+          <div className="event-notice" role="status">
+            <p>This class has been cancelled. Check the calendar for other ways to learn together.</p>
+            {/* App-side on the AppView, never on the public record — the record says
+                only that the class was cancelled. A cancellation nobody can read the
+                reason for sends people looking for an explanation that isn't there. */}
+            {event.cancelledReason ? <p className="mt-3">From the host: {event.cancelledReason}</p> : null}
+          </div>
+        ) : null}
         <a href="#class-details" className="event-jump context-link">Time, place &amp; RSVP ↓</a>
         <ClassHero cover={event.cover} name={event.name} />
         <div className="event-layout">
@@ -92,14 +110,17 @@ export function EventScreen() {
             <div className="flex flex-wrap items-center gap-2 mb-5">
               {event.origin === 'listed' ? <SkillChip ink="ink">Listed from another school</SkillChip> : null}
               {event.venueNeeded ? <SkillChip ink="pink">Venue needed</SkillChip> : null}
-              {(event.tags ?? []).map(tag => <SkillChip key={tag} ink="blue">{tag}</SkillChip>)}
+              {(event.tags ?? []).filter(tag => !ROUTING_TAGS.has(tag)).map(tag => <SkillChip key={tag} ink="blue">{tag}</SkillChip>)}
             </div>
             <section className="event-section"><h2>About this class</h2>
               <p className="event-description">{event.publicOverview?.description || 'The host hasn’t added a public overview yet.'}</p>
             </section>
             {event.publicOverview?.audience ? <section className="event-section"><h2>Who it’s for</h2><p className="event-description">{event.publicOverview.audience}</p></section> : null}
             {event.publicOverview?.accessibility ? <section className="event-section"><h2>Access &amp; comfort</h2><p className="event-description">{event.publicOverview.accessibility}</p></section> : null}
-            {event.description && !event.locationRedacted ? <section className="event-section"><h2>For attendees</h2><p className="event-description">{event.description}</p></section> : null}
+            {/* Task 19c: `attendeeNotes` is app-side and the API only sends it to a
+                viewer who also gets the address — the host, a steward, or someone who
+                has RSVP'd. `locationRedacted` mirrors that same gate. */}
+            {event.attendeeNotes && !event.locationRedacted ? <section className="event-section"><h2>For attendees</h2><p className="event-description">{event.attendeeNotes}</p></section> : null}
             {event.skills.length ? <section className="event-section"><h2>What you’ll learn</h2><div className="class-skill-list">{event.skills.map((skill,i)=><ClassSkill key={`${skill.skill}-${i}`} skill={skill}/>)}</div></section> : null}
             {event.materials.length > 0 || event.suppliesNote ? <section className="event-section"><h2>What to bring</h2>
               {event.materials.length ? <ul className="list-disc space-y-2 pl-5 text-body">{event.materials.map((m,i) => <li key={`${m}-${i}`}>{m}</li>)}</ul> : null}
@@ -111,19 +132,160 @@ export function EventScreen() {
               <Link to="/events/$id/edit" params={{id:event.uri}} className="fs-button fs-button-quiet">Edit this class</Link>
               <Link to="/events/$id/attendance" params={{id:event.uri}} className="fs-button fs-button-quiet">Check off attendance</Link>
               <Link to="/events/$id/feedback-summary" params={{id:event.uri}} className="fs-button fs-button-quiet col-span-2">See feedback summary</Link>
-            </div></section> : null}
+            </div>
+            {cancelled ? null : <CancelClassAction event={event} />}
+            </section> : null}
           </div>
           <aside id="class-details" className="event-rail" aria-label="Class details and RSVP">
             <p className="event-cost">Always free <span>·</span> {event.mode?.endsWith('#virtual') ? 'Online' : event.mode?.endsWith('#hybrid') ? 'In person + online' : 'In person'}</p>
             <div className="event-date"><p>{start ? formatDayStamp(start) : 'Date to be announced'}</p><p>{event.startsAt && event.endsAt ? formatTimeRange(event.startsAt,event.endsAt) : event.startsAt ? formatTime(event.startsAt) : 'Time to be announced'}</p></div>
             <dl className="event-location"><dt>Where</dt><dd>{event.mode?.endsWith('#virtual') ? <span>{event.locationRedacted ? 'Online. RSVP to see the meeting link.' : 'Online. Use the meeting link below; if none is listed, check back for details.'}</span> : event.venueNeeded ? <span>We’re looking for a space{event.neighborhood ? ` in ${event.neighborhood}` : ''}. No address yet — check back, or offer one if you have a room.</span> : event.locationRedacted ? <span>{event.neighborhood ? `Somewhere in ${event.neighborhood}. ` : "This class's host hasn't shared a neighbourhood yet. "}The exact address shows up here once you RSVP.</span> : locations.length ? locations.map((location,i) => <div key={i}>{formatAddress(location)}</div>) : <span>No address yet — check back, or offer one if you have a room.</span>}</dd></dl>
-            {!event.locationRedacted && event.uris?.length ? <div className="class-meeting-links">{event.uris.filter(link=>{try{return ['http:','https:'].includes(new URL(link.uri).protocol);}catch{return false;}}).map((link,i)=><a key={`${link.uri}-${i}`} href={link.uri} target="_blank" rel="noopener noreferrer" className="context-link">{link.name || 'Class link'} ↗</a>)}</div> : null}
+            {/* The host's meeting link is app-side now (`meetingLink`); `uris` only ever
+                still carries one on a class published before task 19c, and the API
+                gates both the same way. */}
+            {!event.locationRedacted && meetingLinks.length ? <div className="class-meeting-links">{meetingLinks.map((link,i)=><a key={`${link.uri}-${i}`} href={link.uri} target="_blank" rel="noopener noreferrer" className="context-link">{link.name || 'Class link'} ↗</a>)}</div> : null}
+            {event.hostDid ? <HostLine did={event.hostDid} /> : null}
             <h2 className="mt-6 text-body font-bold">Who's coming</h2><p className="mt-2 text-body text-ink-soft">{event.rsvps.going} going{event.rsvps.interested ? `, ${event.rsvps.interested} interested` : ''}</p>
             <div className="mt-5"><SessionGate prompt="Sign in to RSVP, invite a friend, or turn on reminders."><EventActions event={event} /></SessionGate></div>
           </aside>
         </div>
       </div>
     </Screen>
+  );
+}
+
+/**
+ * Who is teaching this class, and the way through to them.
+ *
+ * A class page that never names its host is a dead end: the one question every
+ * learner asks before they RSVP ("who is this person, and what else do they
+ * share?") had no answer here, and the member profile — vouches, other classes,
+ * notes — was reachable only through the People tab.
+ *
+ * `hostDid` is on the event for any LISTED class, to any viewer
+ * (`publicRecordFields` in `apps/appview/src/http/visibility.ts`: the record
+ * lives in the host's own repo and the DID is inside its AT-URI). The NAME is
+ * not public, though — the directory is members-only (R9) — so this renders for
+ * a signed-in member and stays silent otherwise, exactly like the roster does.
+ * A member who has hidden themselves 404s from `GET /api/members/:did`, and
+ * that too renders as nothing rather than as a broken link.
+ */
+function HostLine({ did }: { did: string }) {
+  const { data: me } = useMe();
+  const { data: host } = useMemberProfile(me ? did : undefined);
+  if (!host) return null;
+  const name = host.displayName || host.handle || 'A member';
+  return (
+    <>
+      <h2 className="mt-6 text-body font-bold">Who's teaching</h2>
+      <p className="mt-2 text-body">
+        <Link to="/people/$did" params={{ did }}>
+          {name}
+        </Link>
+      </p>
+    </>
+  );
+}
+
+
+/**
+ * "Cancel this class" — the control UX audit finding 5 says is missing everywhere.
+ *
+ * A free school cancels classes constantly (weather, illness, a venue that fell
+ * through), the edit screen already tells hosts "to reshape a series, cancel it
+ * and post a new one", and until now there was no way to do it: a host who
+ * posted the wrong thing could only edit it forever.
+ *
+ * Cancelling never deletes the class. The AppView writes `status: #cancelled` on
+ * the host's own record and keeps everything else, so someone who RSVP'd still
+ * finds the page, sees the banner, and reads the reason instead of turning up to
+ * a locked door. The reason itself stays app-side — it is shown to people who
+ * can see the class and is never written to any record.
+ */
+function CancelClassAction({ event }: { event: EventDetail }) {
+  const cancelMutation = useCancelEventMutation();
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [scope, setScope] = useState<'this' | 'following'>('this');
+  const [error, setError] = useState<string | null>(null);
+
+  const onConfirm = () => {
+    setError(null);
+    cancelMutation.mutate(
+      {
+        id: event.uri,
+        body: {
+          ...(reason.trim() ? { reason: reason.trim() } : {}),
+          ...(event.recurring ? { scope } : {}),
+        },
+      },
+      {
+        onSuccess: () => setOpen(false),
+        onError: () => setError('Could not cancel this class. Check your connection and try again.'),
+      },
+    );
+  };
+
+  return (
+    <div className="mt-4">
+      <button type="button" className="fs-button fs-button-quiet cancel-class" onClick={() => setOpen(true)}>
+        Cancel this class
+      </button>
+      <Sheet open={open} onClose={() => setOpen(false)} title="Cancel this class?">
+        <p className="text-body">
+          The class stays on the calendar marked cancelled, so nobody turns up to a closed door. Everyone who
+          RSVP'd is told.
+        </p>
+        {event.recurring ? (
+          <fieldset className="mt-5">
+            <legend className="text-caption text-ink-soft">How much of the series?</legend>
+            <label className="mt-2 flex items-center gap-2 text-body">
+              <input
+                type="radio"
+                name="cancel-scope"
+                value="this"
+                checked={scope === 'this'}
+                onChange={() => setScope('this')}
+              />
+              Just this date
+            </label>
+            <label className="mt-2 flex items-center gap-2 text-body">
+              <input
+                type="radio"
+                name="cancel-scope"
+                value="following"
+                checked={scope === 'following'}
+                onChange={() => setScope('following')}
+              />
+              This date and every one after it
+            </label>
+          </fieldset>
+        ) : null}
+        <label className="mt-5 block text-caption text-ink-soft">
+          Why, in a sentence (optional)
+          <textarea
+            className="mt-2 w-full px-3 py-2"
+            rows={3}
+            maxLength={2000}
+            value={reason}
+            onChange={e => setReason(e.currentTarget.value)}
+            placeholder="Snowed out. We'll post a new date."
+          />
+        </label>
+        <p className="mt-2 text-caption text-ink-soft">
+          The people who can see this class will read this. It is never written to a public record.
+        </p>
+        {error ? <p role="alert" className="mt-3">{error}</p> : null}
+        <div className="mt-5 flex gap-3 pb-1">
+          <Button ink="pink" onClick={onConfirm} disabled={cancelMutation.isPending}>
+            {cancelMutation.isPending ? 'Cancelling…' : 'Cancel the class'}
+          </Button>
+          <Button ink="ink" variant="quiet" onClick={() => setOpen(false)}>
+            Keep it
+          </Button>
+        </div>
+      </Sheet>
+    </div>
   );
 }
 

@@ -9,14 +9,21 @@ import { rememberSignInReturn } from '../lib/signin-return';
 type Status = 'idle' | 'sending' | 'sent' | 'error';
 
 /**
- * Two doors, in R9's order: a new Free School identity first, an existing
- * ATProto account second — the latter is now its own screen
+ * Two doors, in R9's order: the email door first, an existing ATProto
+ * account second — the latter is now its own screen
  * (`OAuthConfirmScreen`, `/oauth/confirm`) because linking an existing DID to
  * Free School is public and permanent and gets a hard confirm of its own.
  *
- * The primary door POSTs an email to `/api/auth/signup`; the AppView mints a
- * custodial identity and emails (or, with no SMTP configured, logs) a magic
- * link. `VerifyScreen` (`/verify`) is where that link lands.
+ * The primary door POSTs an email to `/api/auth/signin` (`api.auth.signin` —
+ * same handler as `/api/auth/signup` on the AppView, see
+ * `apps/appview/src/http/routes/auth.ts`): a new member gets a fresh
+ * custodial identity, a returning member gets the same account and a fresh
+ * link, and an email whose PDS account exists but got orphaned (a prior
+ * signup that lost the mail send) is quietly adopted rather than failing
+ * forever. Either way the AppView emails (or, with no SMTP configured, logs)
+ * a magic link; `VerifyScreen` (`/verify`) is where that link lands. "New
+ * here or coming back" is exactly why the button no longer distinguishes
+ * the two.
  */
 export function SignInScreen() {
   useEffect(() => rememberSignInReturn(window.location.search), []);
@@ -28,7 +35,7 @@ export function SignInScreen() {
     event.preventDefault();
     setStatus('sending');
     try {
-      await api.auth.signup({ email });
+      await api.auth.signin({ email });
       setStatus('sent');
     } catch (err) {
       setErrorMessage(err instanceof ApiError ? err.message : 'Something went wrong. Try again.');
@@ -60,6 +67,7 @@ export function SignInScreen() {
                 spellCheck={false}
                 className="mt-1.5 block w-full border-[1.5px] border-ink bg-sheet px-3 py-2.5 text-body outline-none"
               />
+              <p className="mt-1.5 text-caption text-ink-soft">New here or coming back, this is the door.</p>
             </label>
 
             {status === 'error' ? (
@@ -70,9 +78,8 @@ export function SignInScreen() {
 
             <div className="mt-6">
               <Button type="submit" wide disabled={status === 'sending' || email.trim().length < 3}>
-                {status === 'sending' ? 'Sending…' : 'Create a new Free School identity (recommended)'}
+                {status === 'sending' ? 'Sending…' : 'Continue with email'}
               </Button>
-              <p className="mt-3 text-caption text-ink-soft">Already joined? Use the same email to sign back in.</p>
               <p className="mt-2 text-caption text-ink-soft">
                 Your Free School records stay on the school's own server and are not attached to any account you
                 already have.

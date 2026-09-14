@@ -156,8 +156,20 @@ describe('how much of it does this viewer see?', () => {
     configs: [{ event: ref, visibility: 'listed', neighborhood: 'North Boulder' }],
   }
 
-  it('the public gets title, time, mode and neighborhood — and nothing else', () => {
-    const out = projectEvent(event, listed, 'public')
+  /**
+   * INTEROP GAP 5, as narrowed by TASK 19c. `description` and `hostDid` are fields of the
+   * public `community.lexicon.calendar.event` record itself — any ATProto client can read
+   * them straight from the host's repo — so withholding them from our own public API
+   * bought no privacy at all and made every site syndicating our calendar look broken.
+   * Since 19c the record's `description` is the host's PUBLIC overview and nothing else.
+   *
+   * `uris` LEFT the public projection in 19c: nothing writes them any more, so a record
+   * that still carries one is a class published under the old form, whose host was told
+   * the meeting link was for attendees. It is released by the same gate as the street
+   * address, along with the app-side `attendeeNotes` / `meetingLink` that replaced it.
+   */
+  it('the public gets the public record: title, time, mode, neighborhood, description and host — never the street, the link or the notes', () => {
+    const out = projectEvent(event, listed, 'public', { attendeeNotes: 'Side door, code 1234', meetingLink: 'https://meet.example.org/abc' })
     expect(out).toEqual({
       uri: event.uri,
       name: 'Sourdough for beginners',
@@ -169,28 +181,60 @@ describe('how much of it does this viewer see?', () => {
       locationRedacted: true,
       venueNeeded: false,
       tags: [],
+      description: 'Bring a jar.',
+      hostDid: 'did:plc:host',
     })
+    expect(JSON.stringify(out)).not.toContain('meet.example.org')
+    expect(JSON.stringify(out)).not.toContain('code 1234')
     const serialized = JSON.stringify(out)
     expect(serialized).not.toContain('Juniper')
     expect(serialized).not.toContain('80304')
     expect(serialized).not.toContain("Dana's kitchen")
-    expect(serialized).not.toContain('meet.example.org')
-    // `hostDid` is not a field on the public projection. The host's DID is still inside the
-    // event's own AT-URI, which is unavoidable and already public — the event record lives
-    // in their repo. What matters is that we add no identity of our own.
-    expect(out).not.toHaveProperty('hostDid')
-    expect(out).not.toHaveProperty('description')
     expect(out).not.toHaveProperty('locations')
-    expect(out).not.toHaveProperty('uris')
+    // Still redacted: the viewer is being shown a coarsened location, not a full one.
+    expect(out.locationRedacted).toBe(true)
   })
 
-  it.each(['rsvp', 'attendee', 'host', 'steward'] as const)('a %s viewer gets the precise location', (relation) => {
+  it('a stranger looking at an UNLISTED event gets none of those fields', () => {
+    const unlisted: ListingInputs = { listings: [], configs: [{ event: ref, visibility: 'unlisted', neighborhood: 'North Boulder' }] }
+    const out = projectEvent(event, unlisted, 'public')
+    expect(out).not.toHaveProperty('description')
+    expect(out).not.toHaveProperty('uris')
+    expect(out).not.toHaveProperty('hostDid')
+    expect(out).not.toHaveProperty('locations')
+    expect(JSON.stringify(out)).not.toContain('meet.example.org')
+    // A removed (moderated) listing is the same case, whatever the host's config says.
+    const removed: ListingInputs = {
+      listings: [{ event: ref, school: 'did:plc:school', status: 'removed' }],
+      configs: [{ event: ref, visibility: 'listed' }],
+    }
+    expect(projectEvent(event, removed, 'public')).not.toHaveProperty('description')
+  })
+
+  it.each(['rsvp', 'attendee', 'host', 'steward'] as const)('a %s viewer gets the precise location, the attendee notes and the meeting link', (relation) => {
     expect(seesFullLocation(relation)).toBe(true)
-    const out = projectEvent(event, listed, relation) as unknown as Record<string, unknown>
+    const out = projectEvent(event, listed, relation, {
+      attendeeNotes: 'Side door, code 1234',
+      meetingLink: 'https://meet.example.org/abc',
+    }) as unknown as Record<string, unknown>
     expect(out.locationRedacted).toBe(false)
     expect(JSON.stringify(out.locations)).toContain('1412 Juniper Ave')
     expect(out.description).toBe('Bring a jar.')
     expect(out.hostDid).toBe('did:plc:host')
+    // TASK 19c: the same predicate that releases the address releases these.
+    expect(out.attendeeNotes).toBe('Side door, code 1234')
+    expect(out.meetingLink).toBe('https://meet.example.org/abc')
+    expect(out.uris).toEqual([{ uri: 'https://meet.example.org/abc', name: 'Video link' }])
+  })
+
+  it('a stranger never gets the attendee notes or the meeting link, listed or not', () => {
+    const extra = { attendeeNotes: 'Side door, code 1234', meetingLink: 'https://meet.example.org/abc' }
+    for (const inputs of [listed, { listings: [], configs: [] } as ListingInputs]) {
+      const out = projectEvent(event, inputs, 'public', extra) as unknown as Record<string, unknown>
+      expect(out).not.toHaveProperty('attendeeNotes')
+      expect(out).not.toHaveProperty('meetingLink')
+      expect(out).not.toHaveProperty('uris')
+    }
   })
 
   it('falls back to locality/region when no neighborhood is configured', () => {

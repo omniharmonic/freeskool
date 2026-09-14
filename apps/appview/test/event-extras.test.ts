@@ -56,7 +56,7 @@ describe('fs_event_extra — materials / suppliesNote round-trip', () => {
 
   it('round-trips materials and a supplies note', async () => {
     if (!available) return
-    await setEventExtra(EVENT, ['a padlock', 'gloves'], 'bring your own bike if you have one')
+    await setEventExtra(EVENT, { materials: ['a padlock', 'gloves'], suppliesNote: 'bring your own bike if you have one' })
     expect(await getEventExtra(EVENT)).toEqual({
       materials: ['a padlock', 'gloves'],
       suppliesNote: 'bring your own bike if you have one',
@@ -65,15 +65,44 @@ describe('fs_event_extra — materials / suppliesNote round-trip', () => {
 
   it('a second write replaces the full value (upsert, not append)', async () => {
     if (!available) return
-    await setEventExtra(EVENT, ['gloves'], 'note one')
-    await setEventExtra(EVENT, ['a lock'])
+    await setEventExtra(EVENT, { materials: ['gloves'], suppliesNote: 'note one' })
+    await setEventExtra(EVENT, { materials: ['a lock'] })
     expect(await getEventExtra(EVENT)).toEqual({ materials: ['a lock'] })
   })
 
   it('is scoped per event', async () => {
     if (!available) return
-    await setEventExtra(EVENT, ['gloves'])
+    await setEventExtra(EVENT, { materials: ['gloves'] })
     expect(await getEventExtra('at://did:plc:host/community.lexicon.calendar.event/other')).toEqual({ materials: [] })
+  })
+})
+
+/**
+ * TASK 19c. The two fields that used to live on the PUBLIC event record — its
+ * `description` (labelled "extra notes for people attending, shown after RSVP" in the
+ * class form) and `uris[0]` (the meeting link, "available to attendees after they RSVP").
+ * Neither promise was keepable on a world-readable record, so both are rows here now.
+ */
+describe('fs_event_extra — attendeeNotes / meetingLink (task 19c)', () => {
+  it('round-trips both, alongside materials', async () => {
+    if (!available) return
+    await setEventExtra(EVENT, {
+      materials: ['gloves'],
+      attendeeNotes: 'Come to the side door; the code is 1234.',
+      meetingLink: 'https://meet.example.org/mushrooms',
+    })
+    expect(await getEventExtra(EVENT)).toEqual({
+      materials: ['gloves'],
+      attendeeNotes: 'Come to the side door; the code is 1234.',
+      meetingLink: 'https://meet.example.org/mushrooms',
+    })
+  })
+
+  it('a write that omits them CLEARS them — the full-resolved-value convention', async () => {
+    if (!available) return
+    await setEventExtra(EVENT, { materials: [], attendeeNotes: 'side door', meetingLink: 'https://meet.example.org/x' })
+    await setEventExtra(EVENT, { materials: [] })
+    expect(await getEventExtra(EVENT)).toEqual({ materials: [] })
   })
 })
 

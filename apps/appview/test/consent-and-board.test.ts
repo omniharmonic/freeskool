@@ -151,7 +151,7 @@ import { createApp } from '../src/http/app.js'
 import { createSession } from '../src/http/session.js'
 import { signSessionId } from '../src/lib/crypto.js'
 import { config } from '../src/config.js'
-import { attendance, custodialAccount, notificationFeed, steward } from '../src/db/schema.js'
+import { attendance, custodialAccount, memberPrefs, notificationFeed, skillClaimIndex, steward } from '../src/db/schema.js'
 import { openFeedbackWindow } from '../src/lib/feedback.js'
 import { rowId } from '../src/lib/ids.js'
 
@@ -178,6 +178,8 @@ beforeEach(async () => {
     'fs_notification_sent',
     'fs_notification_outbox',
     'fs_skill_tier',
+    'fs_skill_claim_index',
+    'fs_member_prefs',
   )
   repo.clear()
   state.listed = true
@@ -411,5 +413,92 @@ describe('#15: the host is told once per event, when the summary unlocks', () =>
     // running count or the timing of individual answers.
     expect((await leaveFeedback(ATTENDEE)).status).toBe(201)
     expect(await feed()).toHaveLength(1)
+  })
+})
+
+describe('Task 2: fs_skill_claim_index is rebuilt wholesale on every save', () => {
+  const indexRows = async (did: string) =>
+    testDb().select().from(skillClaimIndex).where(eq(skillClaimIndex.did, did))
+
+  it('a save with two claims leaves exactly those two rows, with the right visibility', async () => {
+    if (!available) return
+    const cookie = await cookieFor(MEMBER)
+    const res = await putClaims(cookie, [
+      { skill: SKILL_A, level: 'teaching', visibility: 'public' },
+      { skill: SKILL_B, level: 'practicing', visibility: 'school' },
+    ])
+    expect(res.status).toBe(200)
+
+    const rows = await indexRows(MEMBER)
+    expect(rows.length).toBe(2)
+    const bySkill = new Map(rows.map((r) => [r.skillUri, r]))
+    expect(bySkill.get(SKILL_A)).toMatchObject({ level: 'teaching', visibility: 'public' })
+    expect(bySkill.get(SKILL_B)).toMatchObject({ level: 'practicing', visibility: 'school' })
+  })
+
+  it('a second save with one claim leaves exactly one row', async () => {
+    if (!available) return
+    const cookie = await cookieFor(MEMBER)
+    await putClaims(cookie, [
+      { skill: SKILL_A, level: 'teaching', visibility: 'public' },
+      { skill: SKILL_B, level: 'practicing', visibility: 'school' },
+    ])
+    expect((await indexRows(MEMBER)).length).toBe(2)
+
+    await putClaims(cookie, [{ skill: SKILL_A, level: 'teaching', visibility: 'public' }])
+    const rows = await indexRows(MEMBER)
+    expect(rows.length).toBe(1)
+    expect(rows[0]?.skillUri).toBe(SKILL_A)
+  })
+
+  it('an empty save clears the index for that member', async () => {
+    if (!available) return
+    const cookie = await cookieFor(MEMBER)
+    await putClaims(cookie, [{ skill: SKILL_A, level: 'teaching', visibility: 'public' }])
+    expect((await indexRows(MEMBER)).length).toBe(1)
+
+    await putClaims(cookie, [])
+    expect((await indexRows(MEMBER)).length).toBe(0)
+  })
+
+  it("does not touch another member's index rows", async () => {
+    if (!available) return
+    await putClaims(await cookieFor(ASKER), [{ skill: SKILL_A, level: 'learning', visibility: 'school' }])
+    await putClaims(await cookieFor(MEMBER), [{ skill: SKILL_B, level: 'teaching', visibility: 'public' }])
+    expect((await indexRows(ASKER)).length).toBe(1)
+    expect((await indexRows(MEMBER)).length).toBe(1)
+  })
+})
+
+describe('Task 2: GET /api/me reports directoryListing and onboarded', () => {
+  it('defaults directoryListing to true and onboarded to false when there is no prefs row', async () => {
+    if (!available) return
+    const res = await createApp().request('/api/me', { headers: { Cookie: await cookieFor(MEMBER) } })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { directoryListing: boolean; onboarded: boolean }
+    expect(body.directoryListing).toBe(true)
+    expect(body.onboarded).toBe(false)
+  })
+
+  it('reflects an opt-out and an onboarded member from the prefs row', async () => {
+    if (!available) return
+    await testDb()
+      .insert(memberPrefs)
+      .values({ did: MEMBER, directoryListing: false, onboardedAt: new Date() })
+    const res = await createApp().request('/api/me', { headers: { Cookie: await cookieFor(MEMBER) } })
+    const body = (await res.json()) as { directoryListing: boolean; onboarded: boolean }
+    expect(body.directoryListing).toBe(false)
+    expect(body.onboarded).toBe(true)
+  })
+
+  it('sets X-Robots-Tag: noindex, nofollow on both the 200 and the 401', async () => {
+    if (!available) return
+    const ok = await createApp().request('/api/me', { headers: { Cookie: await cookieFor(MEMBER) } })
+    expect(ok.status).toBe(200)
+    expect(ok.headers.get('X-Robots-Tag')).toBe('noindex, nofollow')
+
+    const anon = await createApp().request('/api/me')
+    expect(anon.status).toBe(401)
+    expect(anon.headers.get('X-Robots-Tag')).toBe('noindex, nofollow')
   })
 })

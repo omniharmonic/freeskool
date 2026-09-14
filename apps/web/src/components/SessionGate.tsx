@@ -26,6 +26,15 @@ export function SessionGate({ children, prompt, screen = false }: SessionGatePro
     const loading = <LoadingState label="Checking your sign-in…" />;
     return screen ? <Screen title="Welcome" layout="form"><div className="safe-x">{loading}</div></Screen> : loading;
   }
+
+  // 401 is this gate's own answer — nobody is signed in, so it offers the door,
+  // below; anything else is a real failure and gets the recovery state. A
+  // refusal of steward-only DATA never reaches here: `/api/auth/me` answers any
+  // session it can read, and each admin screen refuses in its own words (see
+  // `AdminLayout`'s `RoleGate`, UX audit finding 16). Passing a 403 through to
+  // the children instead would be worse than useless: the children mount, their
+  // own `useMe()` observer refetches on mount, this gate flips back to its
+  // loading state, and the children unmount again — a refetch loop.
   if (isError && error instanceof ApiError && error.status !== 401) {
     const recovery = <PageState title="We couldn’t check your sign-in." error action={<Button onClick={() => void refetch()}>Try again</Button>}>Please try again in a moment.</PageState>;
     return screen ? <Screen title="Welcome" layout="form"><div className="safe-x">{recovery}</div></Screen> : recovery;

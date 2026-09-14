@@ -9,13 +9,15 @@
   "scripts": {
     "validate": "node scripts/validate.mjs",
     "gen": "lex gen-api ./src/generated ./lexicons/**/*.json && echo generated",
-    "seed:skills": "node scripts/seed-skills.mjs"
+    "seed:skills": "node scripts/seed-skills.mjs",
+    "test": "vitest run"
   },
   "dependencies": {
     "@atproto/lexicon": "^0.7.14"
   },
   "devDependencies": {
     "@atproto/lex-cli": "^0.10.13",
-    "typescript": "^5.9.2"
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
   }
 }

@@ -4,6 +4,7 @@ const tabs = [
   { to: '/', label: 'Calendar', glyph: CalendarGlyph },
   { to: '/skills', label: 'Skills', glyph: SkillsGlyph },
   { to: '/requests', label: 'Requests', glyph: RequestsGlyph },
+  { to: '/people', label: 'People', glyph: PeopleGlyph },
   { to: '/me', label: 'Me', glyph: MeGlyph },
 ] as const;
 
@@ -14,7 +15,7 @@ export function TabBar() {
     <nav className="tab-bar glass app-chrome" aria-label="Sections">
       <div className="flex items-stretch justify-around px-1 pt-1.5">
         {tabs.map(({ to, label, glyph: Glyph }) => {
-          const active = to === '/' ? pathname === '/' || pathname.startsWith('/event') : pathname.startsWith(to) || (to === '/skills' && pathname.startsWith('/knowledge')) || (to === '/me' && pathname.startsWith('/people'));
+          const active = to === '/' ? pathname === '/' || pathname.startsWith('/event') : pathname.startsWith(to) || (to === '/skills' && pathname.startsWith('/knowledge'));
           return (
             <Link
               key={to}
@@ -67,6 +68,16 @@ function RequestsGlyph({ active }: GlyphProps) {
     <svg width="25" height="25" viewBox="0 0 24 24" aria-hidden="true" {...stroke(active)}>
       <path d="M4 5h16v10H9l-5 4z" />
       {active ? <path d="M8 10h8" /> : null}
+    </svg>
+  );
+}
+/* Two figures, one behind the other: the directory, not one person. */
+function PeopleGlyph({ active }: GlyphProps) {
+  return (
+    <svg width="25" height="25" viewBox="0 0 24 24" aria-hidden="true" {...stroke(active)}>
+      <circle cx="9.5" cy="8.5" r="3.3" fill={active ? 'currentColor' : 'none'} />
+      <path d="M3 19.5c1.3-3.4 3.5-5 6.5-5s5.2 1.6 6.5 5" />
+      <path d="M16 5.6a3.3 3.3 0 0 1 0 6.3M18 14.9c1.6.7 2.8 2.2 3.5 4.1" />
     </svg>
   );
 }

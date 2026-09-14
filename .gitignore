@@ -14,6 +14,8 @@ infra/pds.env
 infra/seed/.authority.env
 # the dev mail sink (apps/appview/src/lib/mail.ts) — magic links and addresses, never committed
 apps/appview/.dev-mail.log
+# the demo cast (apps/appview/scripts/seed-demo.ts) — addresses and DIDs, never committed
+apps/appview/.demo-users.json
 # Playwright output (apps/web/playwright.config.ts)
 test-results/
 playwright-report/

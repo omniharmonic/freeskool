@@ -49,5 +49,5 @@ function SkillChildren({ node }: { node: SkillNode }) {
 }
 
 function SkillLink({ skill }: { skill: SkillNode }) {
-  return <Link to="/skills/$skillId" params={{ skillId: skill.uri }} className="skill-link"><span>{skill.label}</span>{skill.tier === 'B' ? <SkillChip ink="pink">Sensitive</SkillChip> : null}</Link>;
+  return <Link to="/skills/$skillId" params={{ skillId: skill.uri }} className="skill-link"><span>{skill.label}</span>{skill.tier === 'B' ? <SkillChip ink="pink">Sensitive</SkillChip> : null}{skill.status === 'proposed' ? <SkillChip ink="ink">proposed</SkillChip> : null}</Link>;
 }

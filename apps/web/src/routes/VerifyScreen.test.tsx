@@ -17,7 +17,7 @@ vi.mock('../lib/api', () => {
       this.code = code;
     }
   }
-  return { api: { auth: { verify: vi.fn() } }, ApiError };
+  return { api: { auth: { verify: vi.fn(), me: vi.fn() } }, ApiError };
 });
 
 const { useNavigate } = await import('@tanstack/react-router');
@@ -36,6 +36,17 @@ describe('VerifyScreen', () => {
     navigateSpy = vi.fn();
     useNavigateMock.mockReturnValue(navigateSpy);
     vi.mocked(api.auth.verify).mockReset();
+    // The default session behind these tests is a member who has already been
+    // through `/welcome` — the onboarding hop is the exception, not the rule.
+    vi.mocked(api.auth.me).mockReset().mockResolvedValue({
+      did: 'did:plc:wren',
+      kind: 'custodial',
+      role: 20,
+      handle: 'wren.fs.boulder',
+      isCustodial: true,
+      emailVerified: true,
+      onboarded: true,
+    });
   });
 
   it('shows an error state when ?token= is missing', () => {
@@ -68,6 +79,52 @@ describe('VerifyScreen', () => {
     expect(api.auth.verify).toHaveBeenCalledTimes(1);
     expect(api.auth.verify).toHaveBeenCalledWith('abc123');
     expect(navigateSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends a brand-new custodial member to /welcome instead of the requests board', async () => {
+    window.history.pushState({}, '', '/verify?token=abc123');
+    vi.mocked(api.auth.verify).mockResolvedValueOnce({ ok: true, did: 'did:plc:wren' });
+    vi.mocked(api.auth.me).mockResolvedValueOnce({
+      did: 'did:plc:wren',
+      kind: 'custodial',
+      role: 20,
+      handle: 'quiet-fern-4821.fs.boulder',
+      isCustodial: true,
+      emailVerified: true,
+      onboarded: false,
+    });
+
+    render(<VerifyScreen />);
+
+    await vi.waitFor(() => expect(navigateSpy).toHaveBeenCalledWith({ to: '/welcome' }));
+  });
+
+  it('does not send an account that brought its own handle to /welcome', async () => {
+    window.history.pushState({}, '', '/verify?token=abc123');
+    vi.mocked(api.auth.verify).mockResolvedValueOnce({ ok: true, did: 'did:plc:wren' });
+    vi.mocked(api.auth.me).mockResolvedValueOnce({
+      did: 'did:plc:wren',
+      kind: 'oauth',
+      role: 20,
+      handle: 'wren.bsky.social',
+      isCustodial: false,
+      emailVerified: true,
+      onboarded: false,
+    });
+
+    render(<VerifyScreen />);
+
+    await vi.waitFor(() => expect(navigateSpy).toHaveBeenCalledWith({ to: '/requests' }));
+  });
+
+  it('still signs the member in when the session lookup after verify fails', async () => {
+    window.history.pushState({}, '', '/verify?token=abc123');
+    vi.mocked(api.auth.verify).mockResolvedValueOnce({ ok: true, did: 'did:plc:wren' });
+    vi.mocked(api.auth.me).mockRejectedValueOnce(new Error('network'));
+
+    render(<VerifyScreen />);
+
+    await vi.waitFor(() => expect(navigateSpy).toHaveBeenCalledWith({ to: '/requests' }));
   });
 
   it('shows the server error message when verify rejects with an ApiError', async () => {

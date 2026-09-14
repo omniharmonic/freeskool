@@ -67,6 +67,7 @@ describe('FeedbackScreen', () => {
       role: 1,
       isCustodial: true,
       emailVerified: true,
+      onboarded: true,
     });
     vi.mocked(api.feedback.submit).mockReset().mockResolvedValue({ ok: true });
   });

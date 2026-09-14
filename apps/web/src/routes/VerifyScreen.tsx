@@ -36,7 +36,22 @@ export function VerifyScreen() {
     }
     api.auth
       .verify(token)
-      .then(() => {
+      .then(async () => {
+        // Task 11: a brand-new custodial member gets the welcome screen once —
+        // the handle they were given, a name, a face, a first skill. Anyone
+        // who has been through it (and anyone who brought their own account,
+        // handle and all) goes straight where they were headed. A failure to
+        // read the session back is not a failure to sign in: they are already
+        // in, so land them rather than stranding them on an error.
+        try {
+          const session = await api.auth.me();
+          if (session.kind === 'custodial' && !session.onboarded) {
+            void navigate({ to: '/welcome' });
+            return;
+          }
+        } catch {
+          /* fall through to the ordinary landing */
+        }
         void navigate({ to: consumeSignInReturn() });
       })
       .catch((err: unknown) => {

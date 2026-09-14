@@ -13,10 +13,22 @@
  * rather than by trusting the data.
  */
 import { Hono } from 'hono'
+import { z } from 'zod'
+import { and, eq, gte, ne } from 'drizzle-orm'
 import type { AppEnv } from '../session.js'
+import { requireViewer, withViewer } from '../session.js'
+import { config } from '../../config.js'
+import { getDb } from '../../db/index.js'
+import { skillProposal } from '../../db/schema.js'
+import { rowId } from '../../lib/ids.js'
 import { getIndexer } from '../../index/indexer.js'
 import { listCollection, sidecarsForEvent } from '../../index/queries.js'
-import { tiersFor, type SkillTierValue } from '../../lib/skill-tiers.js'
+import { tiersFor, isSensitiveLabel, setTier, type SkillTierValue } from '../../lib/skill-tiers.js'
+import { peopleForSkill } from '../../lib/members.js'
+import { authorityClient } from '../../lib/authority.js'
+import { normalizeLabel, slugify } from '../../lib/slug.js'
+import { NSID } from '../../lexicons/nsids.js'
+import { describeError, log } from '../../lib/logging.js'
 
 export const skills = new Hono<AppEnv>()
 
@@ -44,11 +56,44 @@ export interface SkillNode {
 
 const MAX_DEPTH = 12
 
+/**
+ * When `AUTHORITY_DID` is configured, ignore every skill record written by any other
+ * DID — how a dev index carrying two duplicate taxonomy authorities gets scoped down
+ * to the one that matters. Empty (the default) is a no-op.
+ */
+function scopedToAuthority<T>(records: Array<{ did: string } & T>): Array<{ did: string } & T> {
+  const authorityDid = config().AUTHORITY_DID
+  return authorityDid ? records.filter((r) => r.did === authorityDid) : records
+}
+
+/**
+ * Every taxonomy record the routes may use. The authority scope is applied IN the
+ * query, not after it: `listCollection` caps at 1000 rows, and a dev index carrying a
+ * second, stale authority (2 × 525 rows) would otherwise truncate the real one to
+ * whatever fit under the cap. The post-filter stays as belt-and-braces.
+ */
+export async function skillRecords(indexer: Awaited<ReturnType<typeof getIndexer>>) {
+  const authorityDid = config().AUTHORITY_DID
+  const { records } = await listCollection<SkillRecord>(indexer, 'skill', {
+    limit: 1000,
+    ...(authorityDid ? { did: authorityDid } : {}),
+  })
+  return scopedToAuthority(records)
+}
+
 skills.get('/skills', async (c) => {
-  const includeProposed = c.req.query('includeProposed') === '1'
+  // Production was hiding 306 of 525 seeded skills because this defaulted to
+  // excluding `proposed` nodes; now they show by default and `?includeProposed=0`
+  // restores the old, hidden behavior for anyone who wants it.
+  const includeProposed = c.req.query('includeProposed') !== '0'
+  const includeDeprecated = c.req.query('includeDeprecated') === '1'
   const indexer = await getIndexer()
-  const { records } = await listCollection<SkillRecord>(indexer, 'skill', { limit: 1000 })
-  const nodes = records.filter((r) => includeProposed || r.value.status !== 'proposed')
+  const records = await skillRecords(indexer)
+  const nodes = records.filter((r) => {
+    if (r.value.status === 'proposed') return includeProposed
+    if (r.value.status === 'deprecated') return includeDeprecated
+    return true
+  })
 
   const tiers = await tiersFor(nodes.map((n) => n.value.id))
 
@@ -92,10 +137,16 @@ skills.get('/skills', async (c) => {
   })
 })
 
-skills.get('/skills/:id', async (c) => {
+// `withViewer` never rejects (public readers keep working); it only populates
+// `c.var.viewer` when a session cookie is present, which is what gates `people` below.
+// The global `withViewer` in `http/app.ts` already covers this in production — repeated
+// here so the route behaves the same if this router is ever mounted/tested on its own.
+skills.get('/skills/:id', withViewer, async (c) => {
   const uri = decodeURIComponent(c.req.param('id'))
   const indexer = await getIndexer()
-  const { records } = await listCollection<SkillRecord>(indexer, 'skill', { limit: 1000 })
+  // Deliberately no status filter here (unlike `/skills`): a deprecated node must
+  // still resolve directly so an existing claim against it keeps working.
+  const records = await skillRecords(indexer)
   const byUri = new Map(records.map((r) => [r.uri, r]))
   const self = byUri.get(uri)
   if (!self) return c.json({ error: 'NotFound' }, 404)
@@ -124,6 +175,10 @@ skills.get('/skills/:id', async (c) => {
   // One batched lookup for self + every ancestor + every child, never one query each.
   const tiers = await tiersFor([self.value.id, ...ancestors.map((a) => a.id), ...childRecords.map((r) => r.value.id)])
 
+  // Members directory (R9): who has this skill, ONLY for a signed-in viewer — an
+  // anonymous reader of this otherwise-public endpoint must never see the roster.
+  const people = c.var.viewer ? await peopleForSkill(uri, c.var.viewer.did) : undefined
+
   return c.json({
     uri: self.uri,
     id: self.value.id,
@@ -141,5 +196,135 @@ skills.get('/skills/:id', async (c) => {
       tier: tiers[r.value.id] ?? 'A',
     })),
     taughtIn: levels.map((l) => ({ event: l.value.event?.uri, level: l.value.level })),
+    ...(people ? { people } : {}),
   })
+})
+
+const proposeBody = z.object({
+  label: z.string().trim().min(2).max(80),
+  description: z.string().trim().max(300).optional(),
+  parentUri: z.string().startsWith('at://'),
+})
+
+/** 20 proposals per member per calendar day, counted by `fs_skill_proposal` rows —
+ * generous enough for a real contributor, cheap enough to not need a token bucket. */
+const MAX_PROPOSALS_PER_DAY = 20
+
+function toSkillNode(r: { uri: string; value: SkillRecord }, tier: SkillTierValue): SkillNode {
+  return {
+    uri: r.uri,
+    id: r.value.id,
+    label: r.value.label,
+    ...(r.value.description ? { description: r.value.description } : {}),
+    status: r.value.status,
+    tier,
+    alsoUnder: (r.value.broader ?? []).slice(1),
+    children: [],
+  }
+}
+
+/**
+ * R-6: a member's proposal publishes IMMEDIATELY as `status: 'proposed'` under the
+ * taxonomy authority — no steward approval gates it into existence, only deprecate/move
+ * afterwards (`http/routes/admin.ts`). Two collision checks, deliberately distinct:
+ *
+ *   - a SLUG collision: some existing record's `id` already equals `slugify(label)`;
+ *   - a SIBLING label collision: a record under the SAME `parentUri` whose label is the
+ *     same once case and diacritics are normalized away — this catches a duplicate a
+ *     curated seed `id` would miss, since a seeded skill's `id` need not be
+ *     `slugify(label)` at all.
+ *
+ * Either way the response is 409 with the colliding node in the SAME shape the tree
+ * returns, so the web picker can jump straight to it instead of erroring blind.
+ */
+skills.post('/skills', requireViewer, async (c) => {
+  const cfg = config()
+  if (!cfg.AUTHORITY_DID || !cfg.AUTHORITY_HANDLE || !cfg.AUTHORITY_PASSWORD) {
+    return c.json({ error: 'AuthorityUnavailable' }, 503)
+  }
+
+  const parsed = proposeBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) {
+    return c.json({ error: 'InvalidRequest', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400)
+  }
+  const { label, description, parentUri } = parsed.data
+  const viewer = c.var.viewer!
+
+  // A label that is ALL punctuation/diacritics ("??", "—") slugifies to '' — refuse
+  // before it can become an empty rkey (`putRecord` would otherwise happily write one).
+  const id = slugify(label)
+  if (!id) return c.json({ error: 'InvalidLabel' }, 400)
+
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000)
+  const recent = await getDb()
+    .select({ id: skillProposal.id })
+    .from(skillProposal)
+    // `failed` rows never produced a record, so they do not count against the member.
+    .where(and(eq(skillProposal.proposerDid, viewer.did), gte(skillProposal.createdAt, since), ne(skillProposal.status, 'failed')))
+  if (recent.length >= MAX_PROPOSALS_PER_DAY) {
+    return c.json({ error: 'RateLimited', limit: MAX_PROPOSALS_PER_DAY }, 429)
+  }
+
+  const indexer = await getIndexer()
+  const records = await skillRecords(indexer)
+  const byUri = new Map(records.map((r) => [r.uri, r]))
+  const parent = byUri.get(parentUri)
+  if (!parent) return c.json({ error: 'ParentNotFound' }, 404)
+  // Any OTHER status (canonical, or already `proposed`) is a fine parent — nesting a
+  // proposal under another member's still-pending proposal is allowed; only a
+  // deprecated branch is refused.
+  if (parent.value.status === 'deprecated') return c.json({ error: 'ParentDeprecated' }, 400)
+
+  const normalized = normalizeLabel(label)
+  const collision =
+    records.find((r) => r.value.id === id) ??
+    records.find((r) => (r.value.broader ?? [])[0] === parentUri && normalizeLabel(r.value.label) === normalized)
+  if (collision) {
+    const tiers = await tiersFor([collision.value.id])
+    return c.json({ error: 'SkillExists', existing: toSkillNode(collision, tiers[collision.value.id] ?? 'A') }, 409)
+  }
+
+  /**
+   * Ordering (review round 1, blocking #2): the `fs_skill_proposal` row is written
+   * BEFORE the authority write, as `status: 'pending'`, at the `skillUri` the write will
+   * land at — deterministic, since `putSkillRecord` always writes `rkey = id` under
+   * `AUTHORITY_DID`. A crash between the two writes can then never lose attribution or
+   * let the rate limit undercount: the row exists either way.
+   *
+   *   - `putRecord` throws — the record was never created. Mark the row `'failed'`
+   *     (kept as an audit trail rather than deleted; `GET /admin/skills/proposals`
+   *     ignores `'failed'` rows) and answer 502 `AuthorityError`.
+   *   - `putRecord` succeeds but the follow-up (tiering, notify, marking the row
+   *     `'published'`) throws — the record is LIVE either way, so this still answers
+   *     201. The row stays `'pending'` with its `skillUri` set, which is enough to
+   *     reconcile later; it is not reported as a failure to the member who just wrote it.
+   */
+  const proposalId = rowId()
+  const uri = `at://${cfg.AUTHORITY_DID}/${NSID.skill}/${id}`
+  await getDb().transaction(async (tx) => {
+    await tx.insert(skillProposal).values({ id: proposalId, skillUri: uri, proposerDid: viewer.did, status: 'pending' })
+  })
+
+  const createdAt = new Date().toISOString()
+  try {
+    await authorityClient().putSkillRecord({ id, label, description, broader: [parentUri], status: 'proposed', createdAt })
+  } catch (err) {
+    await getDb().update(skillProposal).set({ status: 'failed' }).where(eq(skillProposal.id, proposalId))
+    log.warn('skill proposal: authority write failed', { code: describeError(err) })
+    return c.json({ error: 'AuthorityError' }, 502)
+  }
+
+  const tier: SkillTierValue = isSensitiveLabel(label) ? 'B' : 'A'
+  try {
+    if (tier === 'B') await setTier(id, 'B')
+    // Read-your-writes: the tree the member sees next must already include this node.
+    await indexer.notify(uri)
+    await getDb().update(skillProposal).set({ status: 'published' }).where(eq(skillProposal.id, proposalId))
+  } catch (err) {
+    // The record already exists at the authority regardless of what happens here —
+    // this is bookkeeping, not the thing that decides success for the member.
+    log.warn('skill proposal: post-write follow-up failed', { code: describeError(err) })
+  }
+
+  return c.json({ uri, id, label, status: 'proposed', tier }, 201)
 })

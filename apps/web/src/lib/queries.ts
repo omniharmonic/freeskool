@@ -6,11 +6,13 @@
  * (`queryClient.invalidateQueries({ queryKey: ['calendar'] })` matches every
  * `useCalendar(range)` variant, whatever `range` was).
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
 import type {
   AdminPolicyInput,
+  AttestationInput,
   AttendanceRow,
+  CancelEventInput,
   CreateEventInput,
   CreateRequestInput,
   FeedbackInput,
@@ -23,6 +25,9 @@ import type {
   SetNewsletterInput,
   SetPublicRoleInput,
   SkillClaimsSetInput,
+  SkillDeprecateInput,
+  SkillMoveInput,
+  SkillProposeInput,
   UpdateProfileInput,
 } from './types';
 
@@ -75,6 +80,23 @@ export function useSkillTree() {
   return useQuery({
     queryKey: ['skills'],
     queryFn: () => api.skills.tree(),
+  });
+}
+
+/**
+ * `POST /api/skills`. Never retries: 409 `SkillExists` and 503
+ * `AuthorityUnavailable` are both real answers the picker shows as copy, not
+ * transient failures. Invalidates `['skills']` so the freshly proposed node
+ * is in the tree by the time the picker renders it as a chip.
+ */
+export function useProposeSkillMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: SkillProposeInput) => api.skills.propose(body),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['skills'] });
+    },
   });
 }
 
@@ -146,6 +168,49 @@ export function useSetSkillClaimsMutation() {
       void queryClient.invalidateQueries({ queryKey: ['my-claims'] });
       void queryClient.invalidateQueries({ queryKey: ['public-profile'] });
       void queryClient.invalidateQueries({ queryKey: ['practitioners'] });
+    },
+  });
+}
+
+/**
+ * Live availability for a handle prefix (`GET /api/me/handle/check`). The
+ * caller debounces the prefix itself (300 ms in `HandleChooser`) — this only
+ * gates on there being something to ask about, and never retries: "taken" and
+ * "invalid" are answers, not failures.
+ */
+export function useHandleCheck(prefix: string) {
+  return useQuery({
+    queryKey: ['handle-check', prefix],
+    queryFn: () => api.me.checkHandle(prefix),
+    enabled: prefix.length > 0,
+    retry: false,
+    staleTime: 30_000,
+  });
+}
+
+/** `PUT /api/me/handle`. Invalidates `['me']` — the handle is on `GET
+ * /api/auth/me`, which is what every screen reads it from. */
+export function useSetHandleMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (prefix: string) => api.me.setHandle(prefix),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['me'] });
+      void queryClient.invalidateQueries({ queryKey: ['me-profile'] });
+      void queryClient.invalidateQueries({ queryKey: ['members'] });
+    },
+  });
+}
+
+/** `POST /api/me/onboarded` — `/welcome`'s last step. */
+export function useOnboardedMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.me.onboarded(),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['me'] });
     },
   });
 }
@@ -340,6 +405,47 @@ export function useSetPeersMutation() {
   });
 }
 
+/** `GET /api/admin/skills/proposals` — the steward queue for the skill taxonomy
+ * (`SkillsAdminScreen`). Also read from `AdminOverviewScreen` for the pending
+ * count, which passes `enabled: false` for a member who is not a steward: the
+ * route 403s for them, and an ordinary member opening `/admin` should not spend
+ * a refused request the browser logs as an error (UX audit finding 16).
+ * `retry: false` for the same reason — a 403 is an answer, not a blip. */
+export function useSkillProposals(enabled = true) {
+  return useQuery({
+    queryKey: ['skill-proposals'],
+    queryFn: () => api.admin.skills.proposals(),
+    enabled,
+    retry: false,
+  });
+}
+
+/** `POST /api/admin/skills/:id/deprecate`. Invalidates the proposal queue and
+ * the public taxonomy tree, since a deprecated node changes both. */
+export function useDeprecateSkillMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body = {} }: { id: string; body?: SkillDeprecateInput }) => api.admin.skills.deprecate(id, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['skill-proposals'] });
+      void queryClient.invalidateQueries({ queryKey: ['skills'] });
+    },
+  });
+}
+
+/** `POST /api/admin/skills/:id/move`. Same invalidation as deprecate — the
+ * taxonomy tree's shape changed too. */
+export function useMoveSkillMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body: SkillMoveInput }) => api.admin.skills.move(id, body),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['skill-proposals'] });
+      void queryClient.invalidateQueries({ queryKey: ['skills'] });
+    },
+  });
+}
+
 /** Composing never mutates anything server-persistent in a way the UI needs
  * to invalidate elsewhere — it only ever creates a fresh draft row the
  * caller then holds onto by id. */
@@ -420,13 +526,34 @@ export function useUpdateEventMutation() {
   });
 }
 
+/**
+ * The host calls a class off (`POST /api/events/:id/cancel`).
+ *
+ * Invalidates the class itself AND the calendar: a cancelled class stays on both
+ * — the record is never deleted — but it now reads as cancelled, and a stale
+ * cache would keep showing people a class that is not happening.
+ */
+export function useCancelEventMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body?: CancelEventInput }) => api.events.cancel(id, body),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ['event', variables.id] });
+      void queryClient.invalidateQueries({ queryKey: ['calendar'] });
+    },
+  });
+}
+
 /** Host-only counts for one class (`GET /api/events/:id/attendance`) — 401s/403s
- * for anyone but the host, so `retry: false` matches `useMe()`/`useMyRsvp()`. */
-export function useAttendance(eventId: string | undefined) {
+ * for anyone but the host, so `retry: false` matches `useMe()`/`useMyRsvp()`.
+ * `enabled` lets a caller who already knows the viewer is not the host skip the
+ * request entirely, rather than spending a 403 the browser logs as an error
+ * (UX audit finding 16). */
+export function useAttendance(eventId: string | undefined, enabled = true) {
   return useQuery({
     queryKey: ['attendance', eventId],
     queryFn: () => api.attendance.list(eventId as string),
-    enabled: Boolean(eventId),
+    enabled: Boolean(eventId) && enabled,
     retry: false,
   });
 }
@@ -442,12 +569,13 @@ export function useSetAttendanceMutation() {
 }
 
 /** Host-or-steward-only roster (`GET /api/events/:id/rsvps`) — 403s for
- * anyone else, so `retry: false` matches `useAttendance()`. */
-export function useEventRoster(eventId: string | undefined) {
+ * anyone else, so `retry: false` matches `useAttendance()`, and `enabled` lets
+ * a caller skip the request when it already knows the answer would be a 403. */
+export function useEventRoster(eventId: string | undefined, enabled = true) {
   return useQuery({
     queryKey: ['roster', eventId],
     queryFn: () => api.events.roster(eventId as string),
-    enabled: Boolean(eventId),
+    enabled: Boolean(eventId) && enabled,
     retry: false,
   });
 }
@@ -498,5 +626,87 @@ export function useOwnershipReveal(token: string) {
     retry: false,
     staleTime: Infinity,
     gcTime: Infinity,
+  });
+}
+
+// ── members directory and vouches (Task 10) ──────────────────────────────
+
+/**
+ * `GET /api/members` — the people directory. Members-only: a signed-out
+ * viewer gets a 401 that will never become anything else, so `retry: false`
+ * matches `useMe()`. Paged with the route's opaque cursor; `q`/`skill` are
+ * part of the key, so changing either starts a fresh first page.
+ */
+export function useMembers(filters: { q?: string; skill?: string } = {}) {
+  return useInfiniteQuery({
+    queryKey: ['members', filters],
+    queryFn: ({ pageParam }) =>
+      api.members.list({ ...filters, ...(pageParam ? { cursor: pageParam } : {}) }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.cursor,
+    retry: false,
+  });
+}
+
+/** One member's directory profile. A 404 means they've hidden themselves —
+ * a real answer to show as copy, never retried past. */
+export function useMemberProfile(did: string | undefined) {
+  return useQuery({
+    queryKey: ['member', did],
+    queryFn: () => api.members.get(did as string),
+    enabled: Boolean(did),
+    retry: false,
+  });
+}
+
+/** The vouches the viewer has given and received. `given` is what resolves a
+ * vouch back to the id a `DELETE` needs. */
+export function useMyAttestations() {
+  return useQuery({
+    queryKey: ['my-attestations'],
+    queryFn: () => api.me.attestations(),
+    retry: false,
+  });
+}
+
+/** Every surface that shows a vouch count or a "Vouched ✓" state. */
+function invalidateVouches(queryClient: ReturnType<typeof useQueryClient>, subjectDid?: string) {
+  void queryClient.invalidateQueries({ queryKey: ['my-attestations'] });
+  void queryClient.invalidateQueries({ queryKey: ['member', subjectDid] });
+  void queryClient.invalidateQueries({ queryKey: ['members'] });
+  void queryClient.invalidateQueries({ queryKey: ['skill'] });
+  void queryClient.invalidateQueries({ queryKey: ['me-badges'] });
+}
+
+/** `POST /api/attestations`. Never retries: 400 `SelfAttestation`, 404
+ * `SubjectNotHolding` and 409 `AlreadyVouched` are all real answers. */
+export function useVouchMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AttestationInput) => api.attestations.create(body),
+    retry: false,
+    onSuccess: (_data, body) => invalidateVouches(queryClient, body.subjectDid),
+  });
+}
+
+/** `DELETE /api/attestations/:id` — taking a vouch back. */
+export function useUnvouchMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: string; subjectDid?: string }) => api.attestations.remove(id),
+    retry: false,
+    onSuccess: (_data, variables) => invalidateVouches(queryClient, variables.subjectDid),
+  });
+}
+
+/** `POST /api/me/import-bsky-profile` — "Refresh from Bluesky" on Me. */
+export function useImportBskyProfileMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.me.importBskyProfile(),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['me-profile'] });
+    },
   });
 }

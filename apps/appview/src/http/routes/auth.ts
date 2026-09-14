@@ -2,12 +2,16 @@
  * `/api/auth/*`
  *
  *   POST /signup            primary door: mint a Free School identity from an email
+ *   POST /signin             same door, same handler — "Continue with email" on the
+ *                            PWA works whether the person is new or returning
+ *                            (`lib/custody.ts#signup` already resends the link for a
+ *                            known email, and now self-heals an orphaned PDS account)
  *   GET  /verify?token=     consume the magic link, open a session
  *   GET  /oauth/start       SECONDARY door. Requires ?confirm=1 — see ../oauth.ts
  *   POST /logout
  *   GET  /me
  */
-import { Hono } from 'hono'
+import { Hono, type Context } from 'hono'
 import { z } from 'zod'
 import { eq } from 'drizzle-orm'
 import type { AppEnv } from '../session.js'
@@ -25,7 +29,7 @@ import { oauthClient, OAuthUnavailableError } from '../oauth.js'
 import { config } from '../../config.js'
 import { roleOf } from '../../lib/roles.js'
 import { getDb } from '../../db/index.js'
-import { custodialAccount } from '../../db/schema.js'
+import { custodialAccount, memberPrefs } from '../../db/schema.js'
 import { describeError, log } from '../../lib/logging.js'
 
 export const auth = new Hono<AppEnv>()
@@ -38,7 +42,12 @@ const signupBody = z.object({
   newsletter: z.boolean().optional(),
 })
 
-auth.post('/signup', async (c) => {
+/**
+ * Shared by `/signup` and `/signin` — one door, "Continue with email", for both a new
+ * member and one coming back (`lib/custody.ts#signup` already tells the two apart by
+ * whether an `fs_custodial_account` row exists for the email). Response shape unchanged.
+ */
+async function signupHandler(c: Context<AppEnv>) {
   const parsed = signupBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest', message: 'email is required' }, 400)
   try {
@@ -60,7 +69,10 @@ auth.post('/signup', async (c) => {
     log.error('signup failed', { detail: describeError(err) })
     return c.json({ error: 'SignupFailed', message: 'could not create the account' }, 502)
   }
-})
+}
+
+auth.post('/signup', signupHandler)
+auth.post('/signin', signupHandler)
 
 auth.get('/verify', async (c) => {
   const token = c.req.query('token')
@@ -114,7 +126,11 @@ auth.post('/logout', async (c) => {
 
 auth.get('/me', requireViewer, async (c) => {
   const viewer = c.var.viewer!
-  const [role, custodial] = await Promise.all([roleOf(viewer.did), getCustodialAccount(viewer.did)])
+  const [role, custodial, prefsRows] = await Promise.all([
+    roleOf(viewer.did),
+    getCustodialAccount(viewer.did),
+    getDb().select({ onboardedAt: memberPrefs.onboardedAt }).from(memberPrefs).where(eq(memberPrefs.did, viewer.did)).limit(1),
+  ])
   return c.json({
     did: viewer.did,
     kind: viewer.kind,
@@ -122,6 +138,9 @@ auth.get('/me', requireViewer, async (c) => {
     handle: custodial?.handle,
     isCustodial: custodial?.isCustodial ?? false,
     emailVerified: Boolean(custodial?.verifiedAt),
+    // Task 6: consistent with `GET /api/me`'s own `onboarded` field — see `me.ts`'s
+    // `loadDirectoryPrefs`, which reads the same column the same way.
+    onboarded: (prefsRows[0]?.onboardedAt ?? null) != null,
   })
 })
 

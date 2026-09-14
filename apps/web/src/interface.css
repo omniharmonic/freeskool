@@ -116,6 +116,8 @@ input[type='checkbox'][switch] { width: 51px; height: 31px; }
 .event-host-tools { margin-top: 30px; padding: 24px; background: var(--c-paper-2); border: 1px solid var(--c-rule); border-radius: 10px; }
 .event-host-tools h2 { margin-bottom: 16px; font-size: 21px; font-weight: 600; }
 .event-notice { padding: 16px 20px; border-left: 3px solid var(--c-blue); background: var(--c-notice); font-size: 15px; margin-bottom: 20px; }
+.cancel-class { color: var(--c-danger); }
+.cancel-class:hover:not(:disabled) { border-color: var(--c-danger); }
 /* Editorial forms: sections have room to breathe, and publish stays clearly separated. */
 .class-editor { display: grid; gap: 22px; }.class-editor > div:has(.section-heading), .editor-opening { padding: 28px; border: 1px solid var(--c-rule); border-radius: 10px; background: var(--c-paper-2); }
 .editor-opening textarea { min-height: 130px; }.editor-opening input { font-family: var(--font-display); font-size: 22px !important; }
@@ -307,3 +309,21 @@ input[type='checkbox'][switch] { width: 51px; height: 31px; }
 .resource-extra-skill { display: flex; gap: 16px; align-items: end; }.resource-extra-skill label { flex: 1; min-width: 0; }.resource-extra-skill button { min-height: 44px; }
 
 .resource-extra-skill label { display: grid; gap: 8px; }.resource-extra-skill select { width: 100%; }
+
+/* People — the members-only directory (Task 10). One card shape serves the
+   directory, a skill page's people list, and a member's own header. */
+.member-avatar { flex-shrink: 0; display: grid; place-items: center; border-radius: 50%; overflow: hidden; background: var(--c-paper-3); color: var(--c-ink-soft); font-family: var(--font-display); line-height: 1; }
+.member-avatar img { width: 100%; height: 100%; object-fit: cover; }
+.people-filters { display: grid; gap: 16px; margin-bottom: 26px; }
+@media (min-width: 700px) { .people-filters { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); align-items: end; } }
+.member-grid { display: grid; gap: 12px; }
+@media (min-width: 760px) { .member-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.member-card { display: flex; align-items: center; gap: 16px; min-height: 44px; padding: 16px 18px; border: 1px solid var(--c-rule); border-radius: 10px; background: var(--c-paper-2); }
+.member-card-name { font-size: 17px; font-weight: 550; overflow-wrap: anywhere; }
+.member-card-handle { font-size: 12px; color: var(--c-ink-soft); margin-top: 3px; overflow-wrap: anywhere; }
+.member-card-meta { font-size: 12px; color: var(--c-ink-soft); margin-top: 5px; }
+.member-header { display: flex; align-items: center; gap: 22px; }
+.member-header .member-header-name { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .member-header { gap: 16px; } .member-header .member-avatar { width: 68px !important; height: 68px !important; font-size: 26px !important; } }
+.member-claim-group { margin-bottom: 26px; }
+.member-claim-group .section-heading { margin-bottom: 12px; }

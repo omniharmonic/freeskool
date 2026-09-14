@@ -145,3 +145,44 @@ export function Toggle({
     </button>
   );
 }
+
+/**
+ * How much practice someone claims, as a word. The server stores these as the
+ * raw enum (`fs_skill_claim_index.level`), and three screens now render them —
+ * Me, a member's profile, and a skill page's people list.
+ */
+export const CLAIM_LEVEL_LABEL: Record<string, string> = {
+  learning: 'Learning',
+  practicing: 'Practicing',
+  proficient: 'Proficient',
+  teaching: 'Teaching',
+};
+
+/** Most practised first: how a profile reads down the page. */
+export const CLAIM_LEVEL_ORDER = ['teaching', 'proficient', 'practicing', 'learning'] as const;
+
+export function claimLevelLabel(level: string): string {
+  return CLAIM_LEVEL_LABEL[level] ?? level;
+}
+
+/** Up to two letters from a name, for the avatar fallback. */
+function initialsOf(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  if (parts.length === 1) return parts[0]!.slice(0, 2).toUpperCase();
+  return (parts[0]![0]! + parts[1]![0]!).toUpperCase();
+}
+
+/**
+ * A member's picture, or their initials. The image itself is served from
+ * `/api/members/:did/avatar`, which is members-only and `no-store` — so this is
+ * never a public face, only one member looking at another. `alt=""` on purpose:
+ * the name is always right next to it, and a second reading of it is noise.
+ */
+export function MemberAvatar({ src, name, size = 48 }: { src?: string; name: string; size?: number }) {
+  return (
+    <span className="member-avatar" style={{ width: size, height: size, fontSize: Math.round(size / 2.6) }}>
+      {src ? <img src={src} alt="" /> : <span aria-hidden="true">{initialsOf(name)}</span>}
+    </span>
+  );
+}
