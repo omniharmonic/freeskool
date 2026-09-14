@@ -412,6 +412,13 @@ export interface SkillDetail {
   ancestors: Array<{ uri: string; label: string; tier: SkillTier }>;
   children: Array<{ uri: string; label: string; status: string; tier: SkillTier }>;
   taughtIn: Array<{ event?: string; level: number }>;
+  /**
+   * Who at this school holds this skill — present ONLY for a signed-in viewer
+   * (`withViewer` in `apps/appview/src/http/routes/skills.ts`). Its absence is
+   * what tells the skill page to show the public practitioner shelf and a
+   * sign-in nudge instead of the members list.
+   */
+  people?: SkillPeople;
 }
 
 // ── me ───────────────────────────────────────────────────────────────────
@@ -439,6 +446,9 @@ export interface SkillClaimInput {
 export interface SkillClaimsSetInput {
   claims: SkillClaimInput[];
   confirmTierB?: boolean;
+  /** Required for an OAuth-door session to publish ANY public claim — the
+   * same one-time linkage confirmation `UpdateProfileInput` carries. */
+  confirmPublicLinkage?: boolean;
 }
 
 export interface SkillClaimsSetResult {
@@ -477,6 +487,11 @@ export interface MeResponse {
   thresholds: unknown;
   rsvps: MyRsvp[];
   profile: MeProfile;
+  /** `fs_member_prefs.directory_listing` — defaults true for a member who has
+   * never touched it. False means "hide me from the school directory". Sits
+   * beside `profile`, not inside it: it is a member pref, not a profile field. */
+  directoryListing?: boolean;
+  onboarded?: boolean;
 }
 
 /** `PUT /api/me`'s body — deliberately `.strict()` server-side (`profileBody`
@@ -487,11 +502,20 @@ export interface UpdateProfileInput {
   avatar?: ImageInput | null;
   displayName?: string;
   bio?: string;
+  /** The members-directory opt-out (`fs_member_prefs`), not a profile field. */
+  directoryListing?: boolean;
+  /** Required alongside `publicListing: true` for an OAuth-door session, which
+   * would otherwise get 400 `PublicLinkageConfirmRequired` — publishing from an
+   * existing account links it to this school permanently, so it is confirmed
+   * once, explicitly. */
+  confirmPublicLinkage?: boolean;
 }
 
 export interface UpdateProfileResult {
   did: string;
   profile: MeProfile;
+  /** Echoed back only when the request carried it. */
+  directoryListing?: boolean;
 }
 
 /** `GET /api/me/visibility-defaults` — what this session is allowed to make
@@ -830,3 +854,125 @@ export interface ZineMonthResponse {
 
 export interface KnowledgeResource { libraryStatus?: 'moderated'|'class-unlisted'; id: string; title: string; description?: string; skills: string[]; uri?: string; license?: string; event?: {uri:string;cid:string}; authorDid: string; authorName: string; authorHasProfile: boolean; createdAt?: string }
 export interface PublicProfile { did:string;displayName:string;bio:string;avatarUrl?:string;claims:Array<{skill:string;level:string;note?:string}>;resources:KnowledgeResource[] }
+
+// ── members directory (Task 10) ──────────────────────────────────────────
+
+/**
+ * Mirrors `MemberSummary` in `apps/appview/src/lib/members.ts` exactly.
+ * Members-only, never public (R9): every `/api/members*` route sits behind
+ * `requireViewer` and answers `noindex, nofollow`.
+ */
+export interface MemberSummary {
+  did: string;
+  handle?: string;
+  displayName?: string;
+  avatarUrl?: string;
+  bio?: string;
+  role: ViewerRole;
+  roleLabel: string;
+  claimCount: number;
+  vouchCount: number;
+  lastSeenAt: string;
+}
+
+/** `GET /api/members` — one page, `cursor` present only when more follow. */
+export interface MembersResponse {
+  members: MemberSummary[];
+  cursor?: string;
+}
+
+/** `q` matches a display-name substring; `skill` is an exact skill AT-URI.
+ * A type alias rather than an interface on purpose: `api.ts`'s `buildUrl`
+ * takes a `Record<string, QueryValue>`, and only an alias gets the implicit
+ * index signature that makes it assignable to one. */
+export type MembersQuery = {
+  q?: string;
+  skill?: string;
+  cursor?: string;
+  limit?: number;
+};
+
+/**
+ * One claim on a member's profile. `visibility` is `'school'` for claims the
+ * member kept off their public records — fair to show another member here
+ * (this view is already members-only), never anywhere public.
+ */
+export interface MemberClaim {
+  skillUri: string;
+  skillLabel: string;
+  level: string;
+  visibility: 'public' | 'school';
+  vouchCount: number;
+  /** True when the viewer has already vouched for this member's claim. */
+  viewerVouched: boolean;
+}
+
+/** Mirrors `MemberProfile` in `apps/appview/src/lib/members.ts`. 404 when the
+ * member has turned `directoryListing` off. */
+export interface MemberProfileResponse extends MemberSummary {
+  claims: MemberClaim[];
+  /** The same `{counts, role, badges}` shape as `GET /api/me/badges`. */
+  badges: MeBadgesResponse;
+  hosting: Array<{ uri: string; name: string; startsAt: string }>;
+  resources: Array<{ id: string; title: string }>;
+}
+
+// ── attestations / vouches (Task 10) ─────────────────────────────────────
+
+/** `POST /api/attestations` — 400 `SelfAttestation`, 404 `SubjectNotHolding`,
+ * 409 `AlreadyVouched` are all real answers, never transient failures. */
+export interface AttestationInput {
+  subjectDid: string;
+  skillUri: string;
+  contextEventUri?: string;
+}
+
+export interface AttestationCreated {
+  id: string;
+}
+
+export interface AttestationGiven {
+  id: string;
+  subjectDid: string;
+  skillUri: string;
+  createdAt: string;
+}
+
+/** Carries only what it takes to show an attester — a handle and/or a display
+ * name when we have one, never anything else about them (R9). */
+export interface AttestationReceived {
+  id: string;
+  attesterDid: string;
+  attesterHandle?: string;
+  attesterDisplayName?: string;
+  skillUri: string;
+  skillLabel: string;
+  createdAt: string;
+}
+
+export interface MyAttestationsResponse {
+  given: AttestationGiven[];
+  received: AttestationReceived[];
+}
+
+/** `people` on `GET /api/skills/:id` — present only for a signed-in viewer.
+ * `count` is the full visible total even when `members` is capped at 50. */
+export interface SkillPeople {
+  count: number;
+  members: Array<{
+    did: string;
+    handle?: string;
+    displayName?: string;
+    avatarUrl?: string;
+    level: string;
+    vouchCount: number;
+  }>;
+}
+
+/** `POST /api/me/import-bsky-profile` — re-pulls displayName/bio/avatar from
+ * Bluesky. `imported: false` with no `fields` means there was nothing to
+ * import (no Bluesky profile for this DID). */
+export interface ImportBskyProfileResult {
+  imported: boolean;
+  fields: string[];
+}

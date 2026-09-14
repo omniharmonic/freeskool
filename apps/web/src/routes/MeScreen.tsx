@@ -14,9 +14,11 @@ import { flattenSkills } from '../lib/skills';
 import { useInstallFlow } from '../components/InstallNudge';
 import { api, ApiError } from '../lib/api';
 import {
+  useImportBskyProfileMutation,
   useMe,
   useMeBadges,
   useMeProfile,
+  useMyAttestations,
   useMyClaims,
   useSetSkillClaimsMutation,
   useSkillTree,
@@ -39,6 +41,15 @@ interface EditableClaim {
   level: SkillClaimLevel;
   note?: string;
   visibility: 'public' | 'school';
+}
+
+/** "display name and bio", not "displayName, bio". */
+function formatFields(fields: string[]): string {
+  const words = fields.map((field) =>
+    field === 'displayName' ? 'display name' : field === 'bio' ? 'bio' : field === 'avatar' ? 'photo' : field,
+  );
+  if (words.length <= 1) return words[0] ?? 'profile';
+  return `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`;
 }
 
 function isClaimLevel(value: unknown): value is SkillClaimLevel {
@@ -104,8 +115,19 @@ function MeContent() {
   const { data: skillTree } = useSkillTree();
   const flatSkills = useMemo(() => flattenSkills(skillTree?.skills ?? []), [skillTree]);
 
+  const { data: attestations } = useMyAttestations();
   const updateProfileMutation = useUpdateProfileMutation();
   const setClaimsMutation = useSetSkillClaimsMutation();
+  const importBskyMutation = useImportBskyProfileMutation();
+
+  /**
+   * Task 7: an OAuth-door session that asks to publish anything gets one 400
+   * `PublicLinkageConfirmRequired` first — linking an existing account to this
+   * school is permanent, so it is confirmed once, out loud. This remembers
+   * which request is waiting on that confirmation.
+   */
+  const [linkageConfirm, setLinkageConfirm] = useState<null | 'profile' | 'claims'>(null);
+  const [bskyNotice, setBskyNotice] = useState<string | null>(null);
 
   const oauthLocked = visibilityDefaults?.oauthDoor ?? false;
 
@@ -134,15 +156,47 @@ function MeContent() {
   // belt-and-suspenders, since the server is `.strict()` but still the source
   // of truth. On failure (400 past some other limit, 401, ...) the editor
   // stays open with the server's message, rather than closing as if it saved.
-  const saveProfile = async () => {
+  const saveProfile = async (confirmPublicLinkage = false) => {
     setProfileError(null);
     try {
       await updateProfileMutation.mutateAsync({ displayName: displayName.trim(),
-        ...(avatar !== undefined ? { avatar } : {}), bio: bio.trim(), publicListing });
+        ...(avatar !== undefined ? { avatar } : {}), bio: bio.trim(), publicListing,
+        ...(confirmPublicLinkage ? { confirmPublicLinkage: true } : {}) });
       setEditingProfile(false);
       setAvatar(undefined);
+      setLinkageConfirm(null);
     } catch (err) {
+      if (err instanceof ApiError && err.code === 'PublicLinkageConfirmRequired') {
+        setLinkageConfirm('profile');
+        return;
+      }
       setProfileError(err instanceof ApiError ? err.message : 'Could not save your profile. Try again.');
+    }
+  };
+
+  /** The members directory opt-out. Not a profile field: it lives in
+   * `fs_member_prefs`, and `PUT /api/me` takes it on its own. */
+  const listedInDirectory = meProfile?.directoryListing ?? true;
+  const [directoryError, setDirectoryError] = useState<string | null>(null);
+  const setDirectoryListing = (listed: boolean) => {
+    setDirectoryError(null);
+    updateProfileMutation.mutate(
+      { directoryListing: listed },
+      { onError: () => setDirectoryError('Could not change that. Try again.') },
+    );
+  };
+
+  const refreshFromBluesky = async () => {
+    setBskyNotice(null);
+    try {
+      const result = await importBskyMutation.mutateAsync();
+      setBskyNotice(
+        result.imported
+          ? `Brought over your ${formatFields(result.fields)} from Bluesky.`
+          : 'Nothing to bring over from Bluesky right now.',
+      );
+    } catch (err) {
+      setBskyNotice(err instanceof ApiError ? err.message : 'Could not reach Bluesky. Try again.');
     }
   };
 
@@ -195,20 +249,26 @@ function MeContent() {
   // `TierBConfirmRequired` is still the real gate (a stale tree, or a claim
   // typed by URI, could disagree with what's shown), so this stays
   // try-then-confirm rather than trusting the client's own tier read.
-  const submitClaims = async (confirmTierB: boolean) => {
+  const submitClaims = async (confirmTierB: boolean, confirmPublicLinkage = false) => {
     setClaimsError(null);
     setReauthNotice(false);
-    const body: { claims: SkillClaimInput[]; confirmTierB?: boolean } = {
+    const body: { claims: SkillClaimInput[]; confirmTierB?: boolean; confirmPublicLinkage?: boolean } = {
       claims: claims.map((c) => ({ skill: c.skill, level: c.level, note: c.note, visibility: c.visibility })),
       ...(confirmTierB ? { confirmTierB: true } : {}),
+      ...(confirmPublicLinkage ? { confirmPublicLinkage: true } : {}),
     };
     try {
       const result = await setClaimsMutation.mutateAsync(body);
       setTierBConfirmOpen(false);
+      setLinkageConfirm(null);
       setReauthNotice(Boolean(result.reauthRequired));
     } catch (err) {
       if (err instanceof ApiError && err.code === 'TierBConfirmRequired') {
         setTierBConfirmOpen(true);
+        return;
+      }
+      if (err instanceof ApiError && err.code === 'PublicLinkageConfirmRequired') {
+        setLinkageConfirm('claims');
         return;
       }
       setClaimsError(err instanceof ApiError ? err.message : 'Could not save your skills. Try again.');
@@ -276,14 +336,26 @@ function MeContent() {
             </label>
             <label className="public-profile-choice"><input type="checkbox" aria-describedby="profile-sharing-details" checked={publicListing} disabled={oauthLocked && !publicListing} onChange={e=>setPublicListing(e.target.checked)}/><span><strong>Share my profile publicly</strong></span></label><p id="profile-sharing-details" className="text-caption text-ink-soft">Share my name, bio, photo, public skill claims, and contributed resources. Show me on related skill pages. Attendance and school-only skills stay private.</p>
             {profileError ? <p className="text-body text-pink">{profileError}</p> : null}
-            <Button wide disabled={updateProfileMutation.isPending} onClick={() => void saveProfile()}>
+            <Button wide disabled={updateProfileMutation.isPending} onClick={() => void saveProfile(false)}>
               Save
             </Button>
           </div>
         ) : null}
 
+        {me?.kind === 'oauth' ? (
+          <div className="mt-3">
+            <Button variant="quiet" ink="ink" disabled={importBskyMutation.isPending} onClick={() => void refreshFromBluesky()}>
+              Refresh from Bluesky
+            </Button>
+            {bskyNotice ? <p className="mt-2 text-caption text-ink-soft">{bskyNotice}</p> : null}
+          </div>
+        ) : null}
+
         <Link to="/knowledge" search={{mine:true}} className="context-link">My knowledge contributions ↗</Link>
-        {meProfile?.profile.publicListing && me ? <Link to="/people/$did" params={{did:me.did}} className="context-link">View your public notebook ↗</Link> : null}
+        {/* `/people/$did` is the member-facing page for a signed-in viewer and the
+            opt-in public notebook for everyone else (see `router.tsx`), so this link
+            shows you what the school sees, not what a stranger does. */}
+        {me && listedInDirectory ? <Link to="/people/$did" params={{did:me.did}} className="context-link">Your page in the school directory ↗</Link> : null}
         <div className="activity-counts">
           <div className="activity-count">
             <p className="stamp text-[26px] leading-none">{badges?.counts.attended ?? 0}</p>
@@ -451,6 +523,25 @@ function MeContent() {
           Badges are labels for things you did. They are not points and nothing ranks them.
         </p>
 
+        <h2 className="mt-7 mb-2.5 text-lede font-bold">Vouches you’ve received</h2>
+        {attestations?.received.length ? (
+          <ul className="space-y-2">
+            {attestations.received.map((vouch) => (
+              <li key={vouch.id} className="text-body">
+                {vouch.attesterDisplayName || vouch.attesterHandle || 'Someone at this school'} vouched for{' '}
+                {vouch.skillLabel}
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="text-body text-ink-soft">
+            Nobody has vouched for you yet. People vouch from your page in the school directory.
+          </p>
+        )}
+        <p className="mt-2 text-caption text-ink-faint">
+          A vouch is one person saying they have seen you do something. It is a count, never a score.
+        </p>
+
         </div><aside className="account-side" aria-label="Account preferences"><h2 id="my-settings" className="mb-4 text-lede font-bold">Settings</h2>
         <div className="plate divide-y-[1.5px] divide-rule">
           <div className="p-3.5">
@@ -488,6 +579,22 @@ function MeContent() {
               label="Reduce blur"
               checked={prefs.reduceBlur}
               onChange={(reduceBlur) => setPrefs({ ...prefs, reduceBlur })}
+            />
+          </div>
+
+          <div className="flex items-center justify-between gap-4 p-3.5">
+            <span className="min-w-0">
+              <span className="block text-body">Hide me from the school directory</span>
+              <span className="block text-caption text-ink-soft">
+                People at this school can see who else is here, and what everyone says they can share.
+                Hiding takes you out of that list and off every skill page.
+              </span>
+              {directoryError ? <span className="block text-caption text-pink">{directoryError}</span> : null}
+            </span>
+            <Toggle
+              label="Hide me from the school directory"
+              checked={!listedInDirectory}
+              onChange={(hidden) => setDirectoryListing(!hidden)}
             />
           </div>
 
@@ -550,6 +657,30 @@ function MeContent() {
           </Button>
         </div>
       </aside></div>
+
+      <Sheet
+        open={linkageConfirm !== null}
+        onClose={() => setLinkageConfirm(null)}
+        title="This links your account to the school"
+        footer={
+          <div className="flex gap-3 pb-1">
+            <Button
+              ink="pink"
+              onClick={() => void (linkageConfirm === 'claims' ? submitClaims(false, true) : saveProfile(true))}
+            >
+              Link it and share
+            </Button>
+            <Button ink="ink" variant="quiet" onClick={() => setLinkageConfirm(null)}>
+              Not now
+            </Button>
+          </div>
+        }
+      >
+        <p className="text-body">
+          Publishing from an account you already had links this account to the school for good. Anyone can
+          see the connection, and there is no way to take it back later.
+        </p>
+      </Sheet>
 
       <Sheet
         open={tierBConfirmOpen}

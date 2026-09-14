@@ -1,5 +1,6 @@
 
 import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Outlet, useRouterState } from '@tanstack/react-router';
+import { useMe } from './lib/queries';
 import { FlowFrame } from './components/FlowFrame';
 import { Button } from './components/bits';
 import { TabBar } from './components/TabBar';
@@ -22,6 +23,8 @@ const FeedbackSummaryScreen = lazyRouteComponent(() => import('./routes/Feedback
 const SkillsScreen = lazyRouteComponent(() => import('./routes/SkillsScreen'), 'SkillsScreen');
 const SkillScreen = lazyRouteComponent(() => import('./routes/SkillScreen'), 'SkillScreen');
 const RequestsScreen = lazyRouteComponent(() => import('./routes/RequestsScreen'), 'RequestsScreen');
+const PeopleScreen = lazyRouteComponent(() => import('./routes/PeopleScreen'), 'PeopleScreen');
+const MemberProfileScreen = lazyRouteComponent(() => import('./routes/MemberProfileScreen'), 'MemberProfileScreen');
 const MeScreen = lazyRouteComponent(() => import('./routes/MeScreen'), 'MeScreen');
 const NotificationSettingsScreen = lazyRouteComponent(() => import('./routes/NotificationSettingsScreen'), 'NotificationSettingsScreen');
 const SignInScreen = lazyRouteComponent(() => import('./routes/SignInScreen'), 'SignInScreen');
@@ -56,6 +59,19 @@ function Shell() {
   );
 }
 
+/**
+ * `/people/$did` is two pages behind one address. A signed-in member gets the
+ * members-only directory profile (skills, vouches, what they host); everyone
+ * else gets the opt-in public notebook, which only exists for a member who
+ * asked for it. Nothing about a member is disclosed by the choice itself:
+ * both sides 404 politely when there is nothing to show.
+ */
+function PersonProfileRoute() {
+  const { isPending, data } = useMe();
+  if (isPending) return <FlowFrame title="Opening this page" description="Just a moment…">{null}</FlowFrame>;
+  return data ? <MemberProfileScreen /> : <PublicProfileScreen />;
+}
+
 const rootRoute = createRootRoute({
   component: Shell,
   notFoundComponent: () => <FlowFrame title="This page wandered off" description="The link may be old, or the address may have a typo."><Button href="/">Find a class</Button></FlowFrame>,
@@ -67,7 +83,8 @@ const routes = [
   createRoute({getParentRoute:()=>rootRoute,path:'/knowledge/new',component:NewResourceScreen}),
   createRoute({getParentRoute:()=>rootRoute,path:'/knowledge/$id',component:ResourceScreen}),
   createRoute({getParentRoute:()=>rootRoute,path:'/knowledge/$id/edit',component:EditResourceScreen}),
-  createRoute({getParentRoute:()=>rootRoute,path:'/people/$did',component:PublicProfileScreen}),
+  createRoute({getParentRoute:()=>rootRoute,path:'/people',component:PeopleScreen}),
+  createRoute({getParentRoute:()=>rootRoute,path:'/people/$did',component:PersonProfileRoute}),
   createRoute({ getParentRoute: () => rootRoute, path: '/', component: CalendarScreen }),
   // Pre-Task-4 path, kept working: it forwards to `/events/$id` (see
   // `EventRedirect`'s doc comment in `EventScreen.tsx`).

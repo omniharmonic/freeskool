@@ -6,10 +6,11 @@
  * (`queryClient.invalidateQueries({ queryKey: ['calendar'] })` matches every
  * `useCalendar(range)` variant, whatever `range` was).
  */
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from './api';
 import type {
   AdminPolicyInput,
+  AttestationInput,
   AttendanceRow,
   CreateEventInput,
   CreateRequestInput,
@@ -516,5 +517,87 @@ export function useOwnershipReveal(token: string) {
     retry: false,
     staleTime: Infinity,
     gcTime: Infinity,
+  });
+}
+
+// ── members directory and vouches (Task 10) ──────────────────────────────
+
+/**
+ * `GET /api/members` — the people directory. Members-only: a signed-out
+ * viewer gets a 401 that will never become anything else, so `retry: false`
+ * matches `useMe()`. Paged with the route's opaque cursor; `q`/`skill` are
+ * part of the key, so changing either starts a fresh first page.
+ */
+export function useMembers(filters: { q?: string; skill?: string } = {}) {
+  return useInfiniteQuery({
+    queryKey: ['members', filters],
+    queryFn: ({ pageParam }) =>
+      api.members.list({ ...filters, ...(pageParam ? { cursor: pageParam } : {}) }),
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.cursor,
+    retry: false,
+  });
+}
+
+/** One member's directory profile. A 404 means they've hidden themselves —
+ * a real answer to show as copy, never retried past. */
+export function useMemberProfile(did: string | undefined) {
+  return useQuery({
+    queryKey: ['member', did],
+    queryFn: () => api.members.get(did as string),
+    enabled: Boolean(did),
+    retry: false,
+  });
+}
+
+/** The vouches the viewer has given and received. `given` is what resolves a
+ * vouch back to the id a `DELETE` needs. */
+export function useMyAttestations() {
+  return useQuery({
+    queryKey: ['my-attestations'],
+    queryFn: () => api.me.attestations(),
+    retry: false,
+  });
+}
+
+/** Every surface that shows a vouch count or a "Vouched ✓" state. */
+function invalidateVouches(queryClient: ReturnType<typeof useQueryClient>, subjectDid?: string) {
+  void queryClient.invalidateQueries({ queryKey: ['my-attestations'] });
+  void queryClient.invalidateQueries({ queryKey: ['member', subjectDid] });
+  void queryClient.invalidateQueries({ queryKey: ['members'] });
+  void queryClient.invalidateQueries({ queryKey: ['skill'] });
+  void queryClient.invalidateQueries({ queryKey: ['me-badges'] });
+}
+
+/** `POST /api/attestations`. Never retries: 400 `SelfAttestation`, 404
+ * `SubjectNotHolding` and 409 `AlreadyVouched` are all real answers. */
+export function useVouchMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (body: AttestationInput) => api.attestations.create(body),
+    retry: false,
+    onSuccess: (_data, body) => invalidateVouches(queryClient, body.subjectDid),
+  });
+}
+
+/** `DELETE /api/attestations/:id` — taking a vouch back. */
+export function useUnvouchMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id }: { id: string; subjectDid?: string }) => api.attestations.remove(id),
+    retry: false,
+    onSuccess: (_data, variables) => invalidateVouches(queryClient, variables.subjectDid),
+  });
+}
+
+/** `POST /api/me/import-bsky-profile` — "Refresh from Bluesky" on Me. */
+export function useImportBskyProfileMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.me.importBskyProfile(),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['me-profile'] });
+    },
   });
 }

@@ -20,6 +20,13 @@
  */
 import type {
   KnowledgeResource, PublicProfile,
+  AttestationCreated,
+  AttestationInput,
+  ImportBskyProfileResult,
+  MemberProfileResponse,
+  MembersQuery,
+  MembersResponse,
+  MyAttestationsResponse,
   AdminPolicyInput,
   AdminPolicyResponse,
   AdminPolicyWriteResult,
@@ -248,11 +255,31 @@ export const api = {
     propose: (body: SkillProposeInput) => post<SkillProposeResult>('/api/skills', body),
   },
 
+  /**
+   * The members-only people directory (R9: this roster is never public). Every
+   * call here 401s for a signed-out viewer — that is the intended answer, not a
+   * failure to retry past.
+   */
+  members: {
+    list: (query: MembersQuery = {}) => get<MembersResponse>('/api/members', query),
+    /** 404 when the member has hidden themselves from the directory. */
+    get: (did: string) => get<MemberProfileResponse>(`/api/members/${encodeURIComponent(did)}`),
+  },
+
+  attestations: {
+    create: (body: AttestationInput) => post<AttestationCreated>('/api/attestations', body),
+    remove: (id: string) => del<void>(`/api/attestations/${encodeURIComponent(id)}`),
+  },
+
   me: {
     skillClaims: () => get<SkillClaimsResponse>('/api/me/skill-claims'),
     setSkillClaims: (body: SkillClaimsSetInput) => put<SkillClaimsSetResult>('/api/me/skill-claims', body),
     profile: () => get<MeResponse>('/api/me'),
     updateProfile: (body: UpdateProfileInput) => put<UpdateProfileResult>('/api/me', body),
+    /** The vouches I've given and the ones I've received. App-side only. */
+    attestations: () => get<MyAttestationsResponse>('/api/me/attestations'),
+    /** On-demand re-import; always overwrites, because asking for it means it. */
+    importBskyProfile: () => post<ImportBskyProfileResult>('/api/me/import-bsky-profile'),
     badges: () => get<MeBadgesResponse>('/api/me/badges'),
     visibilityDefaults: () => get<VisibilityDefaults>('/api/me/visibility-defaults'),
     publicRole: () => get<PublicRoleResponse>('/api/me/public-role'),

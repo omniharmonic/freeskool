@@ -54,6 +54,8 @@ vi.mock('../lib/api', () => {
         visibilityDefaults: vi.fn(),
         skillClaims: vi.fn(),
         setSkillClaims: vi.fn(),
+        attestations: vi.fn(),
+        importBskyProfile: vi.fn(),
       },
       skills: { tree: vi.fn() },
     },
@@ -119,6 +121,8 @@ describe('MeScreen', () => {
     vi.mocked(api.me.updateProfile).mockReset();
     vi.mocked(api.skills.tree).mockReset().mockResolvedValue(skillTree);
     vi.mocked(api.auth.takeOwnership).mockReset();
+    vi.mocked(api.me.attestations).mockReset().mockResolvedValue({ given: [], received: [] });
+    vi.mocked(api.me.importBskyProfile).mockReset().mockResolvedValue({ imported: true, fields: ['displayName'] });
   });
 
   async function addDeEscalationClaim() {
@@ -315,5 +319,116 @@ describe('MeScreen', () => {
 
       expect(await screen.findByText(/could not rotate the pds password/i)).toBeInTheDocument();
     });
+  });
+
+  describe('the school directory', () => {
+    it('hides you from the directory by sending directoryListing: false', async () => {
+      vi.mocked(api.me.updateProfile).mockResolvedValue({
+        did: 'did:plc:wren',
+        profile: { displayName: 'Wren Halloway' },
+        directoryListing: false,
+      });
+      renderScreen();
+
+      fireEvent.click(await screen.findByRole('switch', { name: /hide me from the school directory/i }));
+
+      await waitFor(() => expect(api.me.updateProfile).toHaveBeenCalledWith({ directoryListing: false }));
+    });
+
+    it('puts you back in the directory by sending directoryListing: true', async () => {
+      vi.mocked(api.me.profile).mockResolvedValue({
+        did: 'did:plc:wren',
+        role: 20,
+        evidence: {},
+        thresholds: {},
+        rsvps: [],
+        profile: { displayName: 'Wren Halloway' },
+        directoryListing: false,
+      });
+      vi.mocked(api.me.updateProfile).mockResolvedValue({
+        did: 'did:plc:wren',
+        profile: { displayName: 'Wren Halloway' },
+        directoryListing: true,
+      });
+      renderScreen();
+
+      fireEvent.click(await screen.findByRole('switch', { name: /hide me from the school directory/i }));
+
+      await waitFor(() => expect(api.me.updateProfile).toHaveBeenCalledWith({ directoryListing: true }));
+    });
+  });
+
+  it("lists the vouches you've received", async () => {
+    vi.mocked(api.me.attestations).mockResolvedValue({
+      given: [],
+      received: [
+        {
+          id: 'att1',
+          attesterDid: 'did:plc:juno',
+          attesterDisplayName: 'Juno Marsh',
+          skillUri: SKILL_URI,
+          skillLabel: 'De-escalation',
+          createdAt: '2026-09-10T00:00:00.000Z',
+        },
+      ],
+    });
+    renderScreen();
+
+    expect(await screen.findByText(/juno marsh/i)).toBeInTheDocument();
+    expect(screen.getByText(/vouches you.{1,3}ve received/i)).toBeInTheDocument();
+  });
+
+  it('offers "Refresh from Bluesky" only to a session signed in through an existing account', async () => {
+    renderScreen();
+    await screen.findByRole('heading', { name: 'Me' });
+    expect(screen.queryByRole('button', { name: /refresh from bluesky/i })).not.toBeInTheDocument();
+
+    vi.mocked(api.auth.me).mockResolvedValue({
+      did: 'did:plc:wren',
+      kind: 'oauth',
+      role: 20,
+      handle: 'wren.bsky.social',
+      isCustodial: false,
+      emailVerified: true,
+    });
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole('button', { name: /refresh from bluesky/i }));
+    await waitFor(() => expect(api.me.importBskyProfile).toHaveBeenCalled());
+  });
+
+  it('confirms the permanent public linkage once, then resends the profile save with confirmPublicLinkage', async () => {
+    vi.mocked(api.auth.me).mockResolvedValue({
+      did: 'did:plc:wren',
+      kind: 'oauth',
+      role: 20,
+      handle: 'wren.bsky.social',
+      isCustodial: false,
+      emailVerified: true,
+    });
+    vi.mocked(api.me.updateProfile).mockRejectedValueOnce(
+      new ApiError(
+        400,
+        'PublicLinkageConfirmRequired',
+        'publishing from an existing account links it to this school permanently; resend with confirmPublicLinkage: true',
+      ),
+    );
+    vi.mocked(api.me.updateProfile).mockResolvedValueOnce({
+      did: 'did:plc:wren',
+      profile: { displayName: 'Wren Halloway', publicListing: true },
+    });
+    renderScreen();
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));
+    fireEvent.click(screen.getByLabelText(/share my profile publicly/i));
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(await screen.findByText(/links this account to the school for good/i)).toBeInTheDocument();
+    expect(api.me.updateProfile).toHaveBeenCalledTimes(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Link it and share' }));
+
+    await waitFor(() => expect(api.me.updateProfile).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.me.updateProfile).mock.calls[1]![0]).toMatchObject({ confirmPublicLinkage: true });
   });
 });
