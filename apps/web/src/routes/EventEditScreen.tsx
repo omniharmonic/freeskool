@@ -7,7 +7,7 @@ import { LoadingState } from '../components/PageState';
 import { Screen } from '../components/Screen';
 import { Button, SectionHeading } from '../components/bits';
 import { SessionGate } from '../components/SessionGate';
-import { SkillPicker } from '../components/SkillPicker';
+import { SkillMultiPicker } from '../components/SkillPicker';
 import { flattenSkills } from '../lib/skills';
 import { api } from '../lib/api';
 import { useEvent, useMe, useSkillTree, useCreateEventMutation, useUpdateEventMutation } from '../lib/queries';
@@ -21,7 +21,7 @@ import {
   type RecurrenceState,
   type WeekdayCode,
 } from '../lib/recurrence';
-import type { CreateEventInput } from '../lib/types';
+import type { CreateEventInput, SkillLevelRef } from '../lib/types';
 
 /**
  * `/events/new` (create) and `/events/$id/edit` (edit an existing class) — one
@@ -45,6 +45,15 @@ const labelText = 'block text-caption text-ink-soft';
 const chipButton = 'border-[1.5px] border-ink px-3 py-1.5 text-caption font-medium';
 
 const SUGGESTED_TAGS = ['skillshare', 'free-school'];
+/**
+ * A sourdough class is also a fermentation class; a bike clinic is also "run a
+ * community workshop". The API has always taken an array of
+ * `freeschool.draft.skillLevel` sidecars (`CreateEventInput.skills`) — this is
+ * the ceiling the EDITOR puts on it, so the "What you'll learn" shelf on a
+ * class stays a handful of real answers rather than a tag cloud.
+ */
+const MAX_SKILLS = 3;
+const DEPTH_LABEL = ['New to it', 'Some practice', 'Go deeper'] as const;
 const TAG_PATTERN = /^[a-z0-9]+(-[a-z0-9]+)*$/;
 const RECURRENCE_LOCKED_COPY =
   "Recurrence can't be changed after a class is published yet. To reshape a series, cancel it and post a new one.";
@@ -98,8 +107,8 @@ function EventEditForm() {
   const [materials, setMaterials] = useState<string[]>([]);
   const [materialDraft, setMaterialDraft] = useState('');
   const [suppliesNote, setSuppliesNote] = useState('');
-  const [skillUri, setSkillUri] = useState('');
-  const [level, setLevel] = useState<1 | 2 | 3>(2);
+  /** Up to `MAX_SKILLS`, each with its own depth. Order is the order chosen. */
+  const [skills, setSkills] = useState<Array<{ skill: string; level: 1 | 2 | 3 }>>([]);
   const [startLocal, setStartLocal] = useState('');
   const [endLocal, setEndLocal] = useState('');
   const [visibility, setVisibility] = useState<'listed' | 'unlisted' | 'private'>('listed');
@@ -147,7 +156,9 @@ function EventEditForm() {
   useEffect(() => {
     if (!prefillRequest) return;
     setName((prev) => prev || prefillRequest.title);
-    if (prefillRequest.skill) setSkillUri((prev) => prev || prefillRequest.skill!);
+    if (prefillRequest.skill) {
+      setSkills((prev) => (prev.length > 0 ? prev : [{ skill: prefillRequest.skill!, level: 2 }]));
+    }
   }, [prefillRequest]);
 
   // Prefill once the existing class loads. Only ever runs for the edit route
@@ -181,12 +192,15 @@ function EventEditForm() {
       setRegion(typeof loc.region === 'string' ? loc.region : '');
       setPostalCode(typeof loc.postalCode === 'string' ? loc.postalCode : '');
     }
-    const firstSkill = existing.skills?.[0];
-    if (firstSkill) {
-      setSkillUri(firstSkill.skill);
-      setLevel(firstSkill.level);
-      setPrerequisites(firstSkill.prerequisites ?? '');
-    }
+    // `GET /api/events/:id` returns `skills` as the raw `freeschool.draft.skillLevel`
+    // sidecar values — `{ skill, level, prerequisites? }` each (`loadEvent` in
+    // `apps/appview/src/lib/events.ts`). A class written before this editor could
+    // attach more than one may already carry several; take them all, up to the
+    // editor's own ceiling.
+    setSkills((existing.skills ?? []).slice(0, MAX_SKILLS).map((s) => ({ skill: s.skill, level: s.level })));
+    // One shared "before learners come" note, kept on the FIRST skill — see
+    // `onSubmit`.
+    setPrerequisites(existing.skills?.find((s) => s.prerequisites)?.prerequisites ?? '');
   }, [existing]);
 
   const startsAtIso = localToIso(startLocal);
@@ -200,7 +214,25 @@ function EventEditForm() {
   }, [recurrence, startsAtIso, timezone]);
 
   const flatSkills = useMemo(() => flattenSkills(skillTree?.skills ?? []), [skillTree]);
-  const selectedSkill = flatSkills.find((s) => s.uri === skillUri);
+  const skillUris = useMemo(() => skills.map((s) => s.skill), [skills]);
+  const atSkillCeiling = skills.length >= MAX_SKILLS;
+
+  /** The multi-picker hands back the whole list; keep each row's own depth. */
+  const onSkillsChange = (uris: string[]) => {
+    setSkills((prev) =>
+      uris
+        .slice(0, MAX_SKILLS)
+        .map((uri) => prev.find((row) => row.skill === uri) ?? { skill: uri, level: 2 as const }),
+    );
+  };
+
+  const setSkillLevel = (uri: string, level: 1 | 2 | 3) => {
+    setSkills((prev) => prev.map((row) => (row.skill === uri ? { ...row, level } : row)));
+  };
+
+  /** The chip and the depth row name the same skill; the taxonomy label when
+   * we have it, the raw uri for a skill proposed this session. */
+  const labelFor = (uri: string) => flatSkills.find((s) => s.uri === uri)?.label ?? uri;
 
   // A host can be looking for a room in a known neighborhood. Clear the exact
   // address while preserving the public area; venueNeeded is stored explicitly.
@@ -301,7 +333,18 @@ function EventEditForm() {
       ...(!isEdit || visibilityTouched ? { visibility } : {}),
       ...(isEdit || neighborhood.trim() ? { neighborhood: neighborhood.trim() } : {}),
       ...(isEdit || tags.length > 0 ? { tags } : {}),
-      ...(isEdit || skillUri ? { skills: [...(skillUri ? [{ skill: skillUri, level, ...(prerequisites.trim()?{prerequisites:prerequisites.trim()}:{}) }] : []),...(existing?.skills?.slice(1)??[])] } : {}),
+      // One sidecar per chosen skill, in the order the host chose them. The
+      // shared "before learners come" note rides the FIRST one — the lexicon
+      // puts `prerequisites` on the skill level, but asking a host to write one
+      // per skill is more form than the note is worth.
+      ...(isEdit || skills.length > 0
+        ? {
+            skills: skills.map((row, i): SkillLevelRef => ({
+              ...row,
+              ...(i === 0 && prerequisites.trim() ? { prerequisites: prerequisites.trim() } : {}),
+            })),
+          }
+        : {}),
       ...(isEdit || locations ? { locations: locations ?? [] } : {}),
       ...(isEdit || materials.length > 0 ? { materials } : {}),
       ...(isEdit || suppliesNote.trim() ? { suppliesNote: suppliesNote.trim() } : {}),
@@ -402,39 +445,51 @@ function EventEditForm() {
         <ImagePicker value={cover} existingUrl={existing?.cover?.url} onChange={setCover} />
 
         <div id="class-skill">
-          <SectionHeading>Skill</SectionHeading>
+          <SectionHeading>Skills</SectionHeading>
           <div className="safe-x -mx-4">
-            <SkillPicker
+            <span className={labelText}>Skills this class shares (up to {MAX_SKILLS})</span>
+            <p className="mb-2 mt-1 text-caption text-ink-soft">
+              Pick the closest ones. Depth is what a newcomer should expect.
+            </p>
+            <SkillMultiPicker
               skills={flatSkills}
-              value={skillUri}
-              onChange={setSkillUri}
+              values={skillUris}
+              onChange={onSkillsChange}
               allowPropose
               placeholder="Start typing a skill, or leave blank"
               hint="No specific skill is fine — leave this blank."
             />
-            {selectedSkill ? (
-              <div className="mt-3">
-                <span className={labelText}>Depth</span>
-                <div className="mt-1.5 flex flex-wrap items-center gap-2">
-                  {([1, 2, 3] as const).map((n) => (
-                    <button
-                      key={n}
-                      type="button"
-                      aria-pressed={level === n}
-                      aria-label={`Level ${n}`}
-                      onClick={() => setLevel(n)}
-                      className="level-choice border border-rule px-3 text-caption"
-                      style={{ background: n === level ? 'var(--c-ink)' : 'transparent', color: n === level ? 'var(--c-paper-2)' : 'var(--c-ink)' }}
-                    >{['New to it', 'Some practice', 'Go deeper'][n - 1]}</button>
-                  ))}
-                </div>
-              </div>
+            {atSkillCeiling ? (
+              <p className="mt-1.5 text-caption text-ink-faint">
+                Three skills is the most a class can carry — remove one to swap it.
+              </p>
             ) : null}
+            {skills.map((row) => {
+              const skillLabel = labelFor(row.skill);
+              return (
+                <div className="mt-3" key={row.skill}>
+                  <span className={labelText}>Depth — {skillLabel}</span>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                    {([1, 2, 3] as const).map((n) => (
+                      <button
+                        key={n}
+                        type="button"
+                        aria-pressed={row.level === n}
+                        aria-label={`Level ${n} for ${skillLabel}`}
+                        onClick={() => setSkillLevel(row.skill, n)}
+                        className="level-choice border border-rule px-3 text-caption"
+                        style={{ background: n === row.level ? 'var(--c-ink)' : 'transparent', color: n === row.level ? 'var(--c-paper-2)' : 'var(--c-ink)' }}
+                      >{DEPTH_LABEL[n - 1]}</button>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
 
         <div id="class-when">
-          <label className="block mb-6"><span className={labelText}>Before learners come (optional)</span><textarea className={field} maxLength={256} value={prerequisites} onChange={e=>setPrerequisites(e.target.value)} placeholder="Any prior experience, tools, or preparation for this skill"/><span className="text-caption text-ink-soft">Shown publicly alongside the selected skill.</span></label>
+          <label className="block mb-6"><span className={labelText}>Before learners come (optional)</span><textarea className={field} maxLength={256} value={prerequisites} onChange={e=>setPrerequisites(e.target.value)} placeholder="Any prior experience, tools, or preparation for this skill"/><span className="text-caption text-ink-soft">Shown publicly alongside the skills above.</span></label>
           <SectionHeading>When</SectionHeading>
           <div className="safe-x -mx-4 date-fields grid grid-cols-2 gap-3">
             <label className="block">

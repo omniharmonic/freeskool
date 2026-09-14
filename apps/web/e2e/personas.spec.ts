@@ -232,7 +232,7 @@ test.describe.serial('3. A host posts a class, checks attendance, and reads the 
     await learner.close();
   });
 
-  test('he posts a class and finds its skill by typing', async () => {
+  test('he posts a class and finds both of its skills by typing', async () => {
     // In the RECENT PAST, because the seed gives Amir no past class and the two
     // steps after this one (attendance, feedback) only exist once a class is over.
     const startsAt = new Date(Date.now() - 3 * 3_600_000);
@@ -243,15 +243,21 @@ test.describe.serial('3. A host posts a class, checks attendance, and reads the 
     await host.getByLabel('About this class', { exact: true }).fill('Bring the bike that makes the noise.');
     await host.getByLabel('Starts').fill(localValue(startsAt));
     await host.getByLabel('Ends').fill(localValue(endsAt));
+    // A bike clinic is two skills, not one — the repair itself and the running
+    // of the workshop. Each carries its own depth.
     const skill = host.locator('#class-skill');
-    await pickSkill(skill, 'bicycle', 'Bicycle mechanics');
-    await expect(skill.getByText('Bicycle mechanics')).toBeVisible();
-    await host.getByRole('button', { name: '+ skillshare', exact: true }).click();
+    await pickSkill(skill, 'bicycle mechanics', 'Bicycle mechanics');
+    await pickSkill(skill, 'community bike workshop', 'Run a community bike workshop');
+    await expect(skill.getByRole('button', { name: 'Remove Bicycle mechanics' })).toBeVisible();
+    await expect(skill.getByRole('button', { name: 'Remove Run a community bike workshop' })).toBeVisible();
+    await skill.getByRole('button', { name: 'Level 1 for Bicycle mechanics' }).click();
 
     await host.getByRole('button', { name: 'Post this class' }).click();
     await expect(host.getByRole('heading', { name: className, level: 1 })).toBeVisible();
     classUrl = new URL(host.url()).pathname;
-    await expect(host.getByRole('link', { name: 'Bicycle mechanics ↗' })).toBeVisible();
+    const learn = host.locator('section').filter({ has: host.getByRole('heading', { name: 'What you’ll learn' }) });
+    await expect(learn.getByRole('link', { name: 'Bicycle mechanics ↗' })).toBeVisible();
+    await expect(learn.getByRole('link', { name: 'Run a community bike workshop ↗' })).toBeVisible();
   });
 
   test('a learner RSVPs and the host sees the count', async () => {
