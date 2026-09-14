@@ -157,7 +157,7 @@ Production hosting and launch checks: [deployment guide](docs/deployment.md). Th
 - Money of any kind. No payments, no donations, no sponsorships.
 - Private records on the protocol: v1 public records are genuinely public, and everything that should not be public is app-side instead.
 - Skill vouches are app-side counts and evidence (`fs_attestation`, never a public average); the protocol-level, portable version — a double opt-in `freeschool.draft.skillAttestation` pair that would travel with a member off this AppView — is drafted but not written in v1 (`docs/interop-audit.md` gap 15).
-- The secondary door (OAuth with an existing account) is implemented but cannot be exercised on `http://localhost`, and an OAuth session may not publish public skill claims in v1.
+- The secondary door (OAuth with an existing account) is implemented but cannot be exercised on `http://localhost`. Public skill claims and a public profile stay off by default for such a session; the member can switch them on after an explicit permanent-linkage confirmation (`confirmPublicLinkage`), because the records land in the account they chose to link.
 - Multi-school hosting from one AppView, a migration path off the custodial PDS for the *school* DID, and moderation federation.
 
 ## Decisions awaiting Benjamin
