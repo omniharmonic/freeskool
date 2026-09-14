@@ -64,39 +64,27 @@ function isClaimLevel(value: unknown): value is SkillClaimLevel {
  * should never happen, but `public[].value` is `JSON.parse`d server-side
  * from an arbitrary record — is dropped rather than rendered broken.
  *
- * B2 (#19): an OAuth-door session has its public toggles forced off
- * server-side (403 `PublicTogglesLocked` on any attempt to set
- * `visibility: 'public'`) — but a session like that can still have
- * already-published public claims from before it signed in this way, or
- * from a different door entirely. Rebuilding those claims with
- * `visibility: 'public'` here would make the whole claims list un-savable
- * (the server rejects the public ones, so *nothing* saves). When
- * `oauthLocked` is true, every public claim is coerced to `'school'` up
- * front instead; `coercedPublicCount` tells the caller whether to show the
- * one-line notice. The server retracts the now-stale public record on save
- * (a concurrent backend fix) — this screen only has to stop resubmitting it
- * as public. */
-function claimsFromServer(
-  data: SkillClaimsResponse | undefined,
-  oauthLocked: boolean,
-): { claims: EditableClaim[]; coercedPublicCount: number } {
-  if (!data) return { claims: [], coercedPublicCount: 0 };
-  let coercedPublicCount = 0;
+ * An OAuth-door session (`oauthLocked` at the call site) only changes the
+ * DEFAULT for a *new* claim — see `draftVisibility`'s initializer and
+ * `addClaim` — never what is loaded here. The server has accepted
+ * `confirmPublicLinkage: true` since the refinement release, so an
+ * already-public claim stays `'public'` and a newly public one saves once
+ * the member confirms the linkage (`PublicLinkageConfirmRequired`, handled
+ * by `submitClaims`). */
+function claimsFromServer(data: SkillClaimsResponse | undefined): EditableClaim[] {
+  if (!data) return [];
   const fromPublic: EditableClaim[] = data.public
     .filter((p) => typeof p.value.skill === 'string' && isClaimLevel(p.value.level))
-    .map((p) => {
-      if (oauthLocked) coercedPublicCount += 1;
-      return {
-        skill: p.value.skill as string,
-        level: p.value.level as SkillClaimLevel,
-        note: typeof p.value.note === 'string' ? p.value.note : undefined,
-        visibility: oauthLocked ? ('school' as const) : ('public' as const),
-      };
-    });
+    .map((p) => ({
+      skill: p.value.skill as string,
+      level: p.value.level as SkillClaimLevel,
+      note: typeof p.value.note === 'string' ? p.value.note : undefined,
+      visibility: 'public' as const,
+    }));
   const fromSchool: EditableClaim[] = data.school
     .filter((s) => isClaimLevel(s.level))
     .map((s) => ({ skill: s.skill, level: s.level as SkillClaimLevel, note: s.note, visibility: 'school' as const }));
-  return { claims: [...fromPublic, ...fromSchool], coercedPublicCount };
+  return [...fromPublic, ...fromSchool];
 }
 
 export function MeScreen() {
@@ -256,20 +244,23 @@ function MeContent() {
   // ── skill claims editor ──────────────────────────────────────────────
   const [claims, setClaims] = useState<EditableClaim[]>([]);
   const [claimsInitialized, setClaimsInitialized] = useState(false);
-  // B2: set only when loading in already-published public claims actually had
-  // to coerce one or more of them to school-only for this session.
-  const [oauthCoercedNotice, setOauthCoercedNotice] = useState(false);
   useEffect(() => {
     if (claimsInitialized || !claimsData) return;
-    const { claims: loaded, coercedPublicCount } = claimsFromServer(claimsData, oauthLocked);
-    setClaims(loaded);
-    setOauthCoercedNotice(coercedPublicCount > 0);
+    setClaims(claimsFromServer(claimsData));
     setClaimsInitialized(true);
-  }, [claimsData, claimsInitialized, oauthLocked]);
+  }, [claimsData, claimsInitialized]);
 
   const [draftSkillUri, setDraftSkillUri] = useState('');
   const [draftLevel, setDraftLevel] = useState<SkillClaimLevel>('practicing');
   const [draftVisibility, setDraftVisibility] = useState<'public' | 'school'>(oauthLocked ? 'school' : 'public');
+  // `visibilityDefaults` is still loading on mount (the screen is behind the
+  // loading state above until it resolves), so the `useState` initializer
+  // above sees `oauthLocked` as `false` — this is what actually applies the
+  // school-only DEFAULT once the real answer arrives, before the member ever
+  // sees the picker.
+  useEffect(() => {
+    if (oauthLocked) setDraftVisibility('school');
+  }, [oauthLocked]);
   const [claimsError, setClaimsError] = useState<string | null>(null);
   const [tierBConfirmOpen, setTierBConfirmOpen] = useState(false);
   // R1: the server still saved the school-only claims even though the repo credential has
@@ -281,7 +272,7 @@ function MeContent() {
     if (!draftSkillUri) return;
     setClaims((prev) => [
       ...prev.filter((c) => c.skill !== draftSkillUri),
-      { skill: draftSkillUri, level: draftLevel, visibility: oauthLocked ? 'school' : draftVisibility },
+      { skill: draftSkillUri, level: draftLevel, visibility: draftVisibility },
     ]);
     setDraftSkillUri('');
     setDraftLevel('practicing');
@@ -421,7 +412,7 @@ function MeContent() {
                 onChange={(e) => setBio(e.target.value)}
               />
             </label>
-            <label className="public-profile-choice"><input type="checkbox" aria-describedby="profile-sharing-details" checked={publicListing} disabled={oauthLocked && !publicListing} onChange={e=>setPublicListing(e.target.checked)}/><span><strong>Share my profile publicly</strong></span></label><p id="profile-sharing-details" className="text-caption text-ink-soft">Share my name, bio, photo, public skill claims, and contributed resources. Show me on related skill pages. Attendance and school-only skills stay private.</p>
+            <label className="public-profile-choice"><input type="checkbox" aria-describedby="profile-sharing-details" checked={publicListing} onChange={e=>setPublicListing(e.target.checked)}/><span><strong>Share my profile publicly</strong></span></label><p id="profile-sharing-details" className="text-caption text-ink-soft">Share my name, bio, photo, public skill claims, and contributed resources. Show me on related skill pages. Attendance and school-only skills stay private.</p>
             {profileError ? <p className="text-body text-pink">{profileError}</p> : null}
             <Button wide disabled={updateProfileMutation.isPending} onClick={() => void saveProfile(false)}>
               Save
@@ -457,13 +448,8 @@ function MeContent() {
         <h2 id="my-skills" className="mt-7 mb-2.5 text-lede font-bold">What you say you can do</h2>
         {oauthLocked ? (
           <p className="mb-2.5 border-l-[3px] border-amber pl-3 text-caption text-ink-soft">
-            Signed in with an existing account: claims here stay school-only and can't be made public in v1.
-          </p>
-        ) : null}
-        {oauthCoercedNotice ? (
-          <p className="mb-2.5 border-l-[3px] border-amber pl-3 text-caption text-ink-soft">
-            Your public claims were switched to school-only because this account signed in through another
-            provider.
+            Signed in with an existing account. Anything you make public here is written to that account's repo
+            and links it to this school permanently; you'll be asked to confirm the first time.
           </p>
         ) : null}
         {claims.length === 0 ? <p className="text-body text-ink-soft">Nothing added yet.</p> : null}
@@ -486,13 +472,11 @@ function MeContent() {
                 </div>
                 <div className="mt-2.5 flex items-center gap-1.5" role="group" aria-label={`Visibility for ${skillInfo?.path ?? claim.skill}`}>
                   {(['school', 'public'] as const).map((v) => {
-                    const disabled = v === 'public' && oauthLocked;
                     const active = claim.visibility === v;
                     return (
                       <button
                         key={v}
                         type="button"
-                        disabled={disabled}
                         aria-pressed={active}
                         onClick={() => setClaimVisibility(claim.skill, v)}
                         className="border-[1.5px] border-ink px-2.5 py-1 text-caption font-medium capitalize disabled:opacity-40"
@@ -550,31 +534,22 @@ function MeContent() {
           <div>
             <span className="text-caption text-ink-soft">Visibility</span>
             <div className="mt-1.5 flex gap-2">
-              {(['school', 'public'] as const).map((v) => {
-                const disabled = v === 'public' && oauthLocked;
-                return (
-                  <button
-                    key={v}
-                    type="button"
-                    disabled={disabled}
-                    aria-pressed={draftVisibility === v}
-                    onClick={() => setDraftVisibility(v)}
-                    className="border-[1.5px] border-ink px-3 py-1.5 text-caption font-medium capitalize disabled:opacity-40"
-                    style={{
-                      background: draftVisibility === v ? 'var(--c-ink)' : 'transparent',
-                      color: draftVisibility === v ? 'var(--c-paper-2)' : 'var(--c-ink)',
-                    }}
-                  >
-                    {v === 'school' ? 'School only' : 'Public'}
-                  </button>
-                );
-              })}
+              {(['school', 'public'] as const).map((v) => (
+                <button
+                  key={v}
+                  type="button"
+                  aria-pressed={draftVisibility === v}
+                  onClick={() => setDraftVisibility(v)}
+                  className="border-[1.5px] border-ink px-3 py-1.5 text-caption font-medium capitalize disabled:opacity-40"
+                  style={{
+                    background: draftVisibility === v ? 'var(--c-ink)' : 'transparent',
+                    color: draftVisibility === v ? 'var(--c-paper-2)' : 'var(--c-ink)',
+                  }}
+                >
+                  {v === 'school' ? 'School only' : 'Public'}
+                </button>
+              ))}
             </div>
-            {oauthLocked ? (
-              <p className="mt-1.5 text-caption text-ink-faint">
-                Signed in with an existing account — this session can't make claims public in v1.
-              </p>
-            ) : null}
           </div>
 
           <Button variant="quiet" ink="ink" onClick={addClaim} disabled={!draftSkillUri}>

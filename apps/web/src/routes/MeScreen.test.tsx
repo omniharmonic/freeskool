@@ -223,46 +223,77 @@ describe('MeScreen', () => {
     expect(screen.getByLabelText(/bio/i)).toHaveAttribute('maxLength', '2000');
   });
 
-  it('an OAuth-door session sees the Public toggle disabled, with the reason, and new claims default to school-only', async () => {
+  it('an OAuth-door session defaults new claims to school-only, states the linkage reason once, and still lets the member choose Public', async () => {
     vi.mocked(api.me.visibilityDefaults).mockResolvedValue({ oauthDoor: true, tierBConfirmRequired: true });
 
     renderScreen();
 
     expect(
-      await screen.findByText(/signed in with an existing account.*claims here stay school-only/i),
+      await screen.findByText(/signed in with an existing account\. anything you make public here is written to that account's repo/i),
     ).toBeInTheDocument();
+    // Said once — the old second notice by the draft visibility picker is gone.
+    expect(screen.queryAllByText(/can't be made public in v1/i)).toHaveLength(0);
 
+    // Defaults to school-only without being clicked...
+    expect(screen.getByRole('button', { name: 'School only' })).toHaveAttribute('aria-pressed', 'true');
+    // ...but Public is a real, unlocked choice.
     const publicToggles = await screen.findAllByRole('button', { name: 'Public' });
-    for (const toggle of publicToggles) expect(toggle).toBeDisabled();
+    for (const toggle of publicToggles) expect(toggle).not.toBeDisabled();
   });
 
-  it('B2 (#19): an OAuth-door session with an already-published PUBLIC claim saves it as school-only, with a one-line notice, instead of being unable to save at all', async () => {
+  it('an OAuth-door session with an already-published PUBLIC claim keeps it public (no coercion, no stale notice)', async () => {
     vi.mocked(api.me.visibilityDefaults).mockResolvedValue({ oauthDoor: true, tierBConfirmRequired: true });
     vi.mocked(api.me.skillClaims).mockResolvedValue({
       public: [{ uri: 'at://did:plc:wren/freeschool.draft.skillClaim/claim1', value: { skill: SKILL_URI, level: 'proficient' } }],
       school: [],
     });
-    vi.mocked(api.me.setSkillClaims).mockResolvedValue({ published: [], keptAppSide: 1 });
 
     renderScreen();
 
     expect(
-      await screen.findByText(
-        /your public claims were switched to school-only because this account signed in through another provider/i,
-      ),
-    ).toBeInTheDocument();
+      screen.queryByText(/your public claims were switched to school-only/i),
+    ).not.toBeInTheDocument();
 
-    // The claim's own visibility toggle already shows "School only" active, not "Public" —
-    // it was never resubmitted as public in the first place.
+    // Loaded exactly as the server had it — still "Public", not silently downgraded.
     const group = await screen.findByRole('group', { name: 'Visibility for De-escalation' });
-    expect(within(group).getByRole('button', { name: 'School only' })).toHaveAttribute('aria-pressed', 'true');
-    expect(within(group).getByRole('button', { name: 'Public' })).toHaveAttribute('aria-pressed', 'false');
+    expect(within(group).getByRole('button', { name: 'Public' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(group).getByRole('button', { name: 'School only' })).toHaveAttribute('aria-pressed', 'false');
+  });
 
+  it('an OAuth-door session can pick Public for a new claim; the server 400 opens the linkage confirm, and resending carries confirmPublicLinkage: true', async () => {
+    vi.mocked(api.me.visibilityDefaults).mockResolvedValue({ oauthDoor: true, tierBConfirmRequired: true });
+    vi.mocked(api.me.setSkillClaims).mockRejectedValueOnce(
+      new ApiError(
+        400,
+        'PublicLinkageConfirmRequired',
+        'publishing from an existing account links it to this school permanently; resend with confirmPublicLinkage: true',
+      ),
+    );
+    vi.mocked(api.me.setSkillClaims).mockResolvedValueOnce({
+      published: [{ uri: 'at://x', skill: SKILL_URI, level: 'practicing' }],
+      keptAppSide: 0,
+    });
+
+    renderScreen();
+
+    fireEvent.change(await screen.findByLabelText(/search the skill taxonomy/i), { target: { value: 'de-esc' } });
+    fireEvent.click(await screen.findByRole('option', { name: 'De-escalation' }));
+    // Tier B still defaults to school-only for an oauth-door session, but the
+    // member can pick Public — it must not be forced back to school on add.
+    fireEvent.click(screen.getByRole('button', { name: 'Public' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Add this skill' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save what I can do' }));
 
-    await waitFor(() => expect(api.me.setSkillClaims).toHaveBeenCalled());
-    const body = vi.mocked(api.me.setSkillClaims).mock.calls[0]![0];
-    expect(body.claims).toEqual([{ skill: SKILL_URI, level: 'proficient', note: undefined, visibility: 'school' }]);
+    expect(await screen.findByText('This links your account to the school')).toBeInTheDocument();
+    expect(api.me.setSkillClaims).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(api.me.setSkillClaims).mock.calls[0]![0].claims).toEqual([
+      { skill: SKILL_URI, level: 'practicing', note: undefined, visibility: 'public' },
+    ]);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Link it and share' }));
+
+    await waitFor(() => expect(api.me.setSkillClaims).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.me.setSkillClaims).mock.calls[1]![0]).toMatchObject({ confirmPublicLinkage: true });
   });
 
   it('selecting a Tier B skill defaults the draft visibility to school-only, and shows a "Sensitive" marker once added', async () => {
