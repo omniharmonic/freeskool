@@ -10,6 +10,7 @@ import { Screen } from '../components/Screen';
 import { Button, SkillChip, Toggle } from '../components/bits';
 import { Sheet } from '../components/Sheet';
 import { SkillPicker } from '../components/SkillPicker';
+import { HandleChooser } from '../components/HandleChooser';
 import { flattenSkills } from '../lib/skills';
 import { useInstallFlow } from '../components/InstallNudge';
 import { api, ApiError } from '../lib/api';
@@ -173,6 +174,15 @@ function MeContent() {
       setProfileError(err instanceof ApiError ? err.message : 'Could not save your profile. Try again.');
     }
   };
+
+  /**
+   * Task 11: the handle. A custodial member can change theirs here (the same
+   * control `/welcome` offers); an account that arrived through the OAuth door
+   * owns its handle elsewhere, so this row just shows it. `chosenHandle` holds
+   * what the change became until `['me']` refetches under it.
+   */
+  const [editingHandle, setEditingHandle] = useState(false);
+  const [chosenHandle, setChosenHandle] = useState<string | null>(null);
 
   /** The members directory opt-out. Not a profile field: it lives in
    * `fs_member_prefs`, and `PUT /api/me` takes it on its own. */
@@ -544,6 +554,43 @@ function MeContent() {
 
         </div><aside className="account-side" aria-label="Account preferences"><h2 id="my-settings" className="mb-4 text-lede font-bold">Settings</h2>
         <div className="plate divide-y-[1.5px] divide-rule">
+          <div className="p-3.5">
+            <div className="flex items-center justify-between gap-4">
+              <span className="min-w-0">
+                <span className="block text-body">Your handle</span>
+                <span className="block text-caption break-all text-ink-soft">{chosenHandle ?? me?.handle ?? 'Not set yet'}</span>
+              </span>
+              {me?.kind === 'custodial' ? (
+                <button
+                  type="button"
+                  onClick={() => setEditingHandle((open) => !open)}
+                  className="shrink-0 text-caption font-bold text-blue"
+                >
+                  {editingHandle ? 'Cancel' : 'Change'}
+                </button>
+              ) : null}
+            </div>
+            {me?.kind !== 'custodial' ? (
+              <p className="mt-1.5 text-caption text-ink-faint">
+                This account brought its own handle, so it is changed where that account lives.
+              </p>
+            ) : null}
+            {editingHandle && me?.handle ? (
+              <div className="mt-3">
+                <HandleChooser
+                  currentHandle={chosenHandle ?? me.handle}
+                  onSaved={(saved) => {
+                    setChosenHandle(saved);
+                    setEditingHandle(false);
+                  }}
+                />
+                <p className="mt-2 text-caption text-ink-faint">
+                  Your handle is public and lives in the AT Protocol directory permanently. The old one stops
+                  working for anyone who saved it.
+                </p>
+              </div>
+            ) : null}
+          </div>
           <div className="p-3.5">
             <p className="text-body">Appearance</p>
             <div className="mt-2.5 flex gap-1.5" role="group" aria-label="Appearance">

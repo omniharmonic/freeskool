@@ -38,6 +38,31 @@ export interface AuthMe {
   handle?: string;
   isCustodial: boolean;
   emailVerified: boolean;
+  /** Whether this member has been through `/welcome` (Task 6/11). False for
+   * everyone who signed up before onboarding existed, which is the point:
+   * they get the offer once, on their next verified sign-in. */
+  onboarded: boolean;
+}
+
+/**
+ * `GET /api/me/handle/check?handle=<prefix>` — the prefix only, never the
+ * whole handle. `reason` is present exactly when `available` is false:
+ * `invalid` (fails the 3-20 lowercase/number/dash rule), `reserved` (a name
+ * the school holds back) or `taken`.
+ */
+export interface HandleCheckResult {
+  available: boolean;
+  reason?: 'invalid' | 'reserved' | 'taken';
+}
+
+/** `PUT /api/me/handle` — answers with the FULL handle, prefix plus domain. */
+export interface SetHandleResult {
+  handle: string;
+}
+
+/** `POST /api/me/onboarded` — idempotent; the first timestamp is the one kept. */
+export interface OnboardedResult {
+  onboarded: true;
 }
 
 /**

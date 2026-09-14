@@ -93,6 +93,9 @@ import type {
   VisibilityDefaults,
   ZineMonthResponse,
   MeResponse,
+  HandleCheckResult,
+  SetHandleResult,
+  OnboardedResult,
 } from './types';
 
 export class ApiError extends Error {
@@ -284,6 +287,16 @@ export const api = {
     visibilityDefaults: () => get<VisibilityDefaults>('/api/me/visibility-defaults'),
     publicRole: () => get<PublicRoleResponse>('/api/me/public-role'),
     setPublicRole: (body: SetPublicRoleInput) => put<PublicRoleResponse>('/api/me/public-role', body),
+    /**
+     * Task 6/11: the handle a member chooses for themselves. Both calls take
+     * the PREFIX alone (`wren`), not the whole handle — the school's domain is
+     * the server's to append, and `check` refuses anything that already carries
+     * one. `setHandle` answers with the full handle it became.
+     */
+    checkHandle: (prefix: string) => get<HandleCheckResult>('/api/me/handle/check', { handle: prefix }),
+    setHandle: (prefix: string) => put<SetHandleResult>('/api/me/handle', { handle: prefix }),
+    /** Finishes `/welcome`. Safe to call twice; the first time is the one recorded. */
+    onboarded: () => post<OnboardedResult>('/api/me/onboarded'),
     newsletter: () => get<NewsletterSubscriptionResult>('/api/me/newsletter'),
     setNewsletter: (body: SetNewsletterInput) => put<NewsletterSubscriptionResult>('/api/me/newsletter', body),
   },

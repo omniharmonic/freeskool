@@ -56,6 +56,8 @@ vi.mock('../lib/api', () => {
         setSkillClaims: vi.fn(),
         attestations: vi.fn(),
         importBskyProfile: vi.fn(),
+        checkHandle: vi.fn(),
+        setHandle: vi.fn(),
       },
       skills: { tree: vi.fn() },
     },
@@ -101,6 +103,7 @@ describe('MeScreen', () => {
       handle: 'wren.fs.boulder',
       isCustodial: true,
       emailVerified: true,
+      onboarded: true,
     });
     vi.mocked(api.me.profile)
       .mockReset()
@@ -123,6 +126,8 @@ describe('MeScreen', () => {
     vi.mocked(api.auth.takeOwnership).mockReset();
     vi.mocked(api.me.attestations).mockReset().mockResolvedValue({ given: [], received: [] });
     vi.mocked(api.me.importBskyProfile).mockReset().mockResolvedValue({ imported: true, fields: ['displayName'] });
+    vi.mocked(api.me.checkHandle).mockReset().mockResolvedValue({ available: true });
+    vi.mocked(api.me.setHandle).mockReset().mockResolvedValue({ handle: 'wren-halloway.fs.boulder' });
   });
 
   async function addDeEscalationClaim() {
@@ -269,6 +274,7 @@ describe('MeScreen', () => {
         handle: 'wren.fs.boulder',
         isCustodial: false,
         emailVerified: true,
+        onboarded: true,
       });
       renderScreen();
       await screen.findByRole('heading', { name: 'Me' });
@@ -390,11 +396,45 @@ describe('MeScreen', () => {
       handle: 'wren.bsky.social',
       isCustodial: false,
       emailVerified: true,
+      onboarded: true,
     });
     renderScreen();
 
     fireEvent.click(await screen.findByRole('button', { name: /refresh from bluesky/i }));
     await waitFor(() => expect(api.me.importBskyProfile).toHaveBeenCalled());
+  });
+
+  describe('"Your handle"', () => {
+    it('shows the handle and, for a custodial account, changes it in place', async () => {
+      renderScreen();
+
+      const row = (await screen.findByText('Your handle')).closest('div') as HTMLElement;
+      expect(within(row).getByText('wren.fs.boulder')).toBeInTheDocument();
+
+      fireEvent.click(within(row).getByRole('button', { name: 'Change' }));
+      fireEvent.change(await screen.findByLabelText('Your handle'), { target: { value: 'wren-halloway' } });
+      await screen.findByText(/wren-halloway\.fs\.boulder is free/i);
+      fireEvent.click(screen.getByRole('button', { name: 'Save this handle' }));
+
+      await waitFor(() => expect(api.me.setHandle).toHaveBeenCalledWith('wren-halloway'));
+    });
+
+    it('is read-only for an account that brought its own handle', async () => {
+      vi.mocked(api.auth.me).mockResolvedValue({
+        did: 'did:plc:wren',
+        kind: 'oauth',
+        role: 20,
+        handle: 'wren.bsky.social',
+        isCustodial: false,
+        emailVerified: true,
+        onboarded: true,
+      });
+      renderScreen();
+
+      const row = (await screen.findByText('Your handle')).closest('div') as HTMLElement;
+      expect(within(row).getByText('wren.bsky.social')).toBeInTheDocument();
+      expect(within(row).queryByRole('button', { name: 'Change' })).not.toBeInTheDocument();
+    });
   });
 
   it('confirms the permanent public linkage once, then resends the profile save with confirmPublicLinkage', async () => {
@@ -405,6 +445,7 @@ describe('MeScreen', () => {
       handle: 'wren.bsky.social',
       isCustodial: false,
       emailVerified: true,
+      onboarded: true,
     });
     vi.mocked(api.me.updateProfile).mockRejectedValueOnce(
       new ApiError(

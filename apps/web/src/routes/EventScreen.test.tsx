@@ -121,6 +121,7 @@ describe('EventScreen', () => {
       role: 1,
       isCustodial: true,
       emailVerified: true,
+      onboarded: true,
     });
     vi.mocked(api.rsvp.get).mockReset().mockResolvedValue({ rsvp: null, counts: { going: 2, interested: 1 } });
     vi.mocked(api.rsvp.set)

@@ -29,6 +29,7 @@ const MeScreen = lazyRouteComponent(() => import('./routes/MeScreen'), 'MeScreen
 const NotificationSettingsScreen = lazyRouteComponent(() => import('./routes/NotificationSettingsScreen'), 'NotificationSettingsScreen');
 const SignInScreen = lazyRouteComponent(() => import('./routes/SignInScreen'), 'SignInScreen');
 const VerifyScreen = lazyRouteComponent(() => import('./routes/VerifyScreen'), 'VerifyScreen');
+const WelcomeScreen = lazyRouteComponent(() => import('./routes/WelcomeScreen'), 'WelcomeScreen');
 const OAuthConfirmScreen = lazyRouteComponent(() => import('./routes/OAuthConfirmScreen'), 'OAuthConfirmScreen');
 const ZineScreen = lazyRouteComponent(() => import('./routes/ZineScreen'), 'ZineScreen');
 const InviteScreen = lazyRouteComponent(() => import('./routes/InviteScreen'), 'InviteScreen');
@@ -44,7 +45,7 @@ const HandoffAcceptScreen = lazyRouteComponent(() => import('./routes/admin/Hand
 
 /** The zine and the sign-in flow (both doors plus the verify landing) are the
  * places without tabs. */
-const CHROMELESS = ['/zine', '/signin', '/verify', '/oauth/confirm'];
+const CHROMELESS = ['/zine', '/signin', '/verify', '/oauth/confirm', '/welcome'];
 
 function Shell() {
   const pathname = useRouterState({ select: (state) => state.location.pathname });
@@ -99,6 +100,8 @@ const routes = [
 
   createRoute({ getParentRoute: () => rootRoute, path: '/verify', component: VerifyScreen }), // Task 3
   createRoute({ getParentRoute: () => rootRoute, path: '/oauth/confirm', component: OAuthConfirmScreen }), // Task 3
+  // Where `/verify` sends a brand-new custodial member, once (Task 11).
+  createRoute({ getParentRoute: () => rootRoute, path: '/welcome', component: WelcomeScreen }),
 
   // Registered here as placeholders; each is replaced by its real screen in
   // the task named in the plan (`.superpowers/sdd/mvp-plan/task-*-brief.md`).

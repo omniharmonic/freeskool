@@ -72,7 +72,7 @@ describe('RequestsScreen', () => {
     navigateSpy.mockReset();
     vi.mocked(api.auth.me)
       .mockReset()
-      .mockResolvedValue({ did: 'did:plc:host1', kind: 'custodial', role: 20, isCustodial: true, emailVerified: true });
+      .mockResolvedValue({ did: 'did:plc:host1', kind: 'custodial', role: 20, isCustodial: true, emailVerified: true, onboarded: true });
     vi.mocked(api.requests.list).mockReset().mockResolvedValue({ requests: [openRequest] });
     vi.mocked(api.requests.rsvp).mockReset().mockResolvedValue({ interested: true, count: 7 });
     vi.mocked(api.requests.claim)

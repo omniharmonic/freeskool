@@ -78,6 +78,7 @@ describe('EventEditScreen', () => {
       role: 20,
       isCustodial: true,
       emailVerified: true,
+      onboarded: true,
     });
     vi.mocked(api.events.create)
       .mockReset()

@@ -169,6 +169,49 @@ export function useSetSkillClaimsMutation() {
   });
 }
 
+/**
+ * Live availability for a handle prefix (`GET /api/me/handle/check`). The
+ * caller debounces the prefix itself (300 ms in `HandleChooser`) — this only
+ * gates on there being something to ask about, and never retries: "taken" and
+ * "invalid" are answers, not failures.
+ */
+export function useHandleCheck(prefix: string) {
+  return useQuery({
+    queryKey: ['handle-check', prefix],
+    queryFn: () => api.me.checkHandle(prefix),
+    enabled: prefix.length > 0,
+    retry: false,
+    staleTime: 30_000,
+  });
+}
+
+/** `PUT /api/me/handle`. Invalidates `['me']` — the handle is on `GET
+ * /api/auth/me`, which is what every screen reads it from. */
+export function useSetHandleMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (prefix: string) => api.me.setHandle(prefix),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['me'] });
+      void queryClient.invalidateQueries({ queryKey: ['me-profile'] });
+      void queryClient.invalidateQueries({ queryKey: ['members'] });
+    },
+  });
+}
+
+/** `POST /api/me/onboarded` — `/welcome`'s last step. */
+export function useOnboardedMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => api.me.onboarded(),
+    retry: false,
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['me'] });
+    },
+  });
+}
+
 export function useSetPublicRoleMutation() {
   const queryClient = useQueryClient();
   return useMutation({
