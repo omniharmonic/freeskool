@@ -18,6 +18,8 @@ import { newSessionId, signSessionId, verifySessionCookie } from '../lib/crypto.
 import { roleOf } from '../lib/roles.js'
 import { Role } from '@freeschool/shared'
 import type { School } from '../lib/schools.js'
+import { legacySchoolDid } from '../lib/schools.js'
+import { joinSchool } from '../lib/membership.js'
 
 export type SessionKind = 'custodial' | 'oauth'
 
@@ -33,6 +35,16 @@ export interface Viewer {
  */
 export type AppEnv = { Variables: { viewer?: Viewer; school?: School } }
 
+/**
+ * The school this context resolved to, or the legacy one. Deliberately defensive: the
+ * scripts and unit suites that call `createSession` with a stub Context have no `var`,
+ * and a sign-in must never fail because the tenancy middleware was not in the chain.
+ */
+function schoolOf(c: Context): string {
+  const school = (c as Context<AppEnv>).var?.school
+  return school?.did || legacySchoolDid()
+}
+
 export async function createSession(c: Context, did: string, kind: SessionKind): Promise<string> {
   const id = newSessionId()
   const ttlMs = config().SESSION_TTL_DAYS * 86_400_000
@@ -46,6 +58,10 @@ export async function createSession(c: Context, did: string, kind: SessionKind):
     .insert(member)
     .values({ did, door: kind, firstSeenAt: now, lastSeenAt: now })
     .onConflictDoUpdate({ target: member.did, set: { door: kind, lastSeenAt: now } })
+  // AND the per-school fact. Signing in on a school's host IS joining that school
+  // (MS §4): `fs_member` above stays the GLOBAL presence row, `fs_membership` is what
+  // every roster, directory and skill page reads. Same chokepoint, same call.
+  await joinSchool(did, schoolOf(c), kind)
   setCookie(c, config().SESSION_COOKIE, signSessionId(id), {
     httpOnly: true,
     secure: config().isProd,
@@ -90,11 +106,19 @@ export const requireViewer: MiddlewareHandler<AppEnv> = async (c, next) => {
   await next()
 }
 
+/**
+ * A role is a role IN ONE SCHOOL (MS §2): a steward of Denver has no steward power on
+ * Boulder, and the gate is where that becomes true. 404 — not 403 — when the request
+ * resolves to no school at all, so a probe cannot tell "no school here" from "a school
+ * you may not act in" (MS §10).
+ */
 export function requireRole(min: Role): MiddlewareHandler<AppEnv> {
   return async (c, next) => {
     const viewer = c.var.viewer
     if (!viewer) return c.json({ error: 'AuthRequired' }, 401)
-    const role = await roleOf(viewer.did)
+    const school = c.var.school
+    if (!school) return c.json({ error: 'UnknownSchool' }, 404)
+    const role = await roleOf(viewer.did, school.did)
     if (role < min) return c.json({ error: 'PermissionDenied', need: min, have: role }, 403)
     await next()
   }

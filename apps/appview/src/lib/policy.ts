@@ -26,10 +26,10 @@ import { eq } from 'drizzle-orm'
 import { defaultThresholds, type Thresholds } from '@freeschool/shared'
 import { getDb } from '../db/index.js'
 import { policyCache } from '../db/schema.js'
-import { config } from '../config.js'
 import { getRecord } from './pds.js'
 import { NSID } from '../lexicons/nsids.js'
 import { describeError, log } from './logging.js'
+import { legacySchoolDid } from './schools.js'
 
 const CACHE_TTL_MS = 60_000
 const memo = new Map<string, { thresholds: Thresholds; policyUri: string | null; at: number }>()
@@ -67,7 +67,12 @@ function numeric(v: unknown, fallback: number): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : fallback
 }
 
-export async function getThresholds(schoolDid = config().SCHOOL_DID): Promise<Thresholds> {
+/**
+ * The school's thresholds, memoised per school. The DEFAULT is the legacy school and
+ * exists only for scripts and the handful of pure helpers that predate tenancy: every
+ * request path passes `currentSchool(c).did` explicitly.
+ */
+export async function getThresholds(schoolDid = legacySchoolDid()): Promise<Thresholds> {
   if (!schoolDid) return defaultThresholds
   const hit = memo.get(schoolDid)
   if (hit && Date.now() - hit.at < CACHE_TTL_MS) return hit.thresholds
@@ -84,14 +89,14 @@ export async function getThresholds(schoolDid = config().SCHOOL_DID): Promise<Th
   return (await refreshPolicyCache(schoolDid)).thresholds
 }
 
-export async function currentPolicyUri(schoolDid = config().SCHOOL_DID): Promise<string | null> {
+export async function currentPolicyUri(schoolDid = legacySchoolDid()): Promise<string | null> {
   if (!schoolDid) return null
   const row = await getDb().select().from(policyCache).where(eq(policyCache.schoolDid, schoolDid)).limit(1)
   return row[0]?.policyUri ?? (await refreshPolicyCache(schoolDid)).policyUri
 }
 
 export async function refreshPolicyCache(
-  schoolDid = config().SCHOOL_DID,
+  schoolDid = legacySchoolDid(),
 ): Promise<{ thresholds: Thresholds; policyUri: string | null }> {
   if (!schoolDid) return { thresholds: defaultThresholds, policyUri: null }
 

@@ -411,18 +411,21 @@ export const attendanceRollup = pgTable(
 /**
  * Per-member lifetime tallies, the only attendance evidence that outlives 90 days.
  *
- * MS §4 wants the PK to become `(did, school_did)` — a global tally would make Boulder
- * attendance grant Denver hosting rights. That is a WRITE-PATH change (`lib/roles.ts`
- * upserts on `did`), so it lands with Task 3; the column is here now so the backfill can
- * stamp it and so the isolation suite has something to assert against.
+ * PK `(did, school_did)` (MS §4) — the single most important key in this file: a GLOBAL
+ * tally would make Boulder attendance grant Denver hosting rights, silently, forever.
+ * `lib/roles.ts#bumpTally` upserts on both columns.
  */
-export const attendanceTally = pgTable('fs_attendance_tally', {
-  did: text('did').primaryKey(),
-  schoolDid: schoolDidColumn(),
-  attendedConfirmed: integer('attended_confirmed').notNull().default(0),
-  hostedEvents: integer('hosted_events').notNull().default(0),
-  updatedAt: ts('updated_at').notNull().defaultNow(),
-})
+export const attendanceTally = pgTable(
+  'fs_attendance_tally',
+  {
+    did: text('did').notNull(),
+    schoolDid: schoolDidColumn(),
+    attendedConfirmed: integer('attended_confirmed').notNull().default(0),
+    hostedEvents: integer('hosted_events').notNull().default(0),
+    updatedAt: ts('updated_at').notNull().defaultNow(),
+  },
+  (t) => [primaryKey({ columns: [t.did, t.schoolDid] })],
+)
 
 /* ─────────────────────────────────── feedback ─────────────────────────────────── */
 
@@ -534,17 +537,20 @@ export const moderationQueue = pgTable(
 /**
  * Founder-appointed (bootstrap) or elected stewards — the one role not derivable.
  *
- * MS §4: the PK should become `(did, school_did)`, since `did` alone silently forbids
- * being a steward of two schools. `routes/handoff.ts` upserts on `steward.did`, so the
- * PK change is Task 3's, with the write path.
+ * PK `(did, school_did)` (MS §4): `did` alone silently forbade being a steward of two
+ * schools, and a steward of Denver must be able to be an ordinary member of Boulder.
  */
-export const steward = pgTable('fs_steward', {
-  did: text('did').primaryKey(),
-  schoolDid: text('school_did').notNull(),
-  appointedAt: ts('appointed_at').notNull().defaultNow(),
-  appointedByDid: text('appointed_by_did'),
-  suspendedAt: ts('suspended_at'),
-})
+export const steward = pgTable(
+  'fs_steward',
+  {
+    did: text('did').notNull(),
+    schoolDid: text('school_did').notNull(),
+    appointedAt: ts('appointed_at').notNull().defaultNow(),
+    appointedByDid: text('appointed_by_did'),
+    suspendedAt: ts('suspended_at'),
+  },
+  (t) => [primaryKey({ columns: [t.did, t.schoolDid] })],
+)
 
 /** Cache of the school's current freeschool.draft.policy thresholds. */
 export const policyCache = pgTable('fs_policy_cache', {
@@ -554,15 +560,30 @@ export const policyCache = pgTable('fs_policy_cache', {
   fetchedAt: ts('fetched_at').notNull().defaultNow(),
 })
 
-/** Peer registry = contrail's `relays`. Seeded from env, extended by the school record. */
-export const peer = pgTable('fs_peer', {
-  host: text('host').primaryKey(),
-  /** 'env' | 'school-record' | 'admin' */
-  source: text('source').notNull(),
-  schoolDid: text('school_did'),
-  addedAt: ts('added_at').notNull().defaultNow(),
-  disabledAt: ts('disabled_at'),
-})
+/**
+ * Peer registry = contrail's `relays`. Seeded from env, extended by the school record.
+ *
+ * PK `(school_did, host)` (MS §4): each school federates with whom it chooses, and two
+ * schools may legitimately name the same peer host. Contrail's `relays` is the UNION
+ * across schools — the index is a projection of repos and stays global (MS §4, "Contrail:
+ * one index, many schools"), so `listPeerHosts()` deliberately ignores the school column.
+ *
+ * `school_did` was NULLABLE before the federation phase (it meant "seeded from env, for
+ * whichever school this deployment is"). It is `''` now, the same "not yet stamped"
+ * value every other per-school table uses, so the column can be part of a primary key.
+ */
+export const peer = pgTable(
+  'fs_peer',
+  {
+    host: text('host').notNull(),
+    /** 'env' | 'school-record' | 'admin' */
+    source: text('source').notNull(),
+    schoolDid: schoolDidColumn(),
+    addedAt: ts('added_at').notNull().defaultNow(),
+    disabledAt: ts('disabled_at'),
+  },
+  (t) => [primaryKey({ columns: [t.schoolDid, t.host] }), index('fs_peer_host_idx').on(t.host)],
+)
 
 /**
  * Everything about a class that the host meant for PEOPLE WHO ARE COMING, not for the
@@ -738,19 +759,18 @@ export const newsletterIssue = pgTable('fs_newsletter_issue', {
 export const newsletterSubscription = pgTable(
   'fs_newsletter_subscription',
   {
-    did: text('did').primaryKey(),
-    /**
-     * Subscribing to Boulder's digest is not subscribing to Denver's. MS §4 makes the PK
-     * `(did, school_did)`; `lib/newsletter-subscriptions.ts` upserts on `did`, so the PK
-     * change travels with that write path in Task 3.
-     */
+    did: text('did').notNull(),
+    /** Subscribing to Boulder's digest is not subscribing to Denver's — PK `(did, school_did)`, MS §4. */
     schoolDid: schoolDidColumn(),
     emailRef: text('email_ref').notNull(),
     subscribedAt: ts('subscribed_at').notNull().defaultNow(),
     unsubscribedAt: ts('unsubscribed_at'),
     tokenHash: text('token_hash').notNull(),
   },
-  (t) => [uniqueIndex('fs_newsletter_subscription_token_idx').on(t.tokenHash)],
+  (t) => [
+    primaryKey({ columns: [t.did, t.schoolDid] }),
+    uniqueIndex('fs_newsletter_subscription_token_idx').on(t.tokenHash),
+  ],
 )
 
 /**
@@ -809,17 +829,16 @@ export const attestation = pgTable(
     subjectDid: text('subject_did').notNull(),
     skillUri: text('skill_uri').notNull(),
     /**
-     * A vouch is scoped to the school it was given in (R9, MS §2/§10). MS §4 widens the
-     * unique index to `(attester, subject, skill, school_did)`; `lib/attestations.ts`
-     * names the current three columns as its `ON CONFLICT` target, so widening the index
-     * without that call is an immediate runtime error — it goes with Task 3.
+     * A vouch is scoped to the school it was given in (R9, MS §2/§10): rendering a
+     * Boulder vouch on a Denver profile would disclose that both people belong to
+     * Boulder. In the unique index below, and in every count query.
      */
     schoolDid: schoolDidColumn(),
     contextEventUri: text('context_event_uri'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [
-    uniqueIndex('fs_attestation_unique').on(t.attesterDid, t.subjectDid, t.skillUri),
+    uniqueIndex('fs_attestation_unique').on(t.attesterDid, t.subjectDid, t.skillUri, t.schoolDid),
     index('fs_attestation_subject_idx').on(t.subjectDid),
   ],
 )

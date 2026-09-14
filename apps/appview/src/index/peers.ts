@@ -10,11 +10,13 @@
  *      resolved to its PDS endpoint and added with source='school-record'
  *   3. `PUT /api/admin/peers` (source='admin')
  */
-import { eq, isNull } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { peer } from '../db/schema.js'
 import { config } from '../config.js'
 import { resolvePdsEndpoint } from '../lib/identity.js'
+import { legacySchoolDid } from '../lib/schools.js'
+import { schoolScope } from '../lib/school-scope.js'
 
 export type PeerSource = 'env' | 'school-record' | 'admin'
 
@@ -23,43 +25,62 @@ function normalizeHost(host: string): string {
   return `${u.protocol}//${u.host}`
 }
 
+/**
+ * `PEER_PDS_HOSTS` seeds the LEGACY school's peer list: it is one env var and there is
+ * more than one school (MS Appendix B — "seeds `fs_peer` for the default school;
+ * per-school after that").
+ */
 export async function seedPeersFromEnv(): Promise<void> {
   const db = getDb()
   for (const host of config().PEER_PDS_HOSTS) {
     await db
       .insert(peer)
-      .values({ host: normalizeHost(host), source: 'env' })
+      .values({ host: normalizeHost(host), source: 'env', schoolDid: legacySchoolDid() })
       .onConflictDoNothing()
   }
 }
 
-export async function addPeer(host: string, source: PeerSource, schoolDid?: string): Promise<void> {
+export async function addPeer(host: string, source: PeerSource, schoolDid = legacySchoolDid()): Promise<void> {
   await getDb()
     .insert(peer)
-    .values({ host: normalizeHost(host), source, schoolDid: schoolDid ?? null })
+    .values({ host: normalizeHost(host), source, schoolDid })
     .onConflictDoUpdate({
-      target: peer.host,
-      set: { source, schoolDid: schoolDid ?? null, disabledAt: null },
+      target: [peer.schoolDid, peer.host],
+      set: { source, disabledAt: null },
     })
 }
 
-export async function disablePeer(host: string): Promise<void> {
+export async function disablePeer(host: string, schoolDid = legacySchoolDid()): Promise<void> {
   await getDb()
     .update(peer)
     .set({ disabledAt: new Date() })
-    .where(eq(peer.host, normalizeHost(host)))
+    .where(and(eq(peer.host, normalizeHost(host)), schoolScope(peer.schoolDid, schoolDid)))
 }
 
-export async function listPeers(): Promise<Array<{ host: string; source: string; schoolDid: string | null }>> {
+/** ONE school's peers — what `GET/PUT /api/admin/peers` shows a steward. */
+export async function listPeers(schoolDid = legacySchoolDid()): Promise<Array<{ host: string; source: string; schoolDid: string }>> {
   const rows = await getDb()
     .select({ host: peer.host, source: peer.source, schoolDid: peer.schoolDid })
     .from(peer)
-    .where(isNull(peer.disabledAt))
+    .where(and(isNull(peer.disabledAt), schoolScope(peer.schoolDid, schoolDid)))
   return rows
 }
 
+/**
+ * EVERY school's peers, deduplicated. contrail's index is global — a repo belongs to a
+ * DID, not to a school (MS §4, "Contrail: one index, many schools") — so the thing we
+ * hand contrail as `relays` is the UNION, and the per-school view is computed at read
+ * time. This is the one peer query that deliberately ignores the school column.
+ */
+export async function allPeers(): Promise<Array<{ host: string; source: string; schoolDid: string }>> {
+  return getDb()
+    .select({ host: peer.host, source: peer.source, schoolDid: peer.schoolDid })
+    .from(peer)
+    .where(isNull(peer.disabledAt))
+}
+
 export async function activePeerHosts(): Promise<string[]> {
-  return (await listPeers()).map((r) => r.host)
+  return [...new Set((await allPeers()).map((r) => r.host))]
 }
 
 /**

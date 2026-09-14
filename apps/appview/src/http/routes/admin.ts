@@ -25,7 +25,9 @@ import { getDb } from '../../db/index.js'
 import { appMeta, attendance, moderationQueue, newsletterIssue, skillProposal } from '../../db/schema.js'
 import { rowId, tid } from '../../lib/ids.js'
 import { bumpTally } from '../../lib/roles.js'
-import { schoolActor, schoolDid } from '../../lib/school-actor.js'
+import { actorFor, asDid } from '../../lib/school-actors.js'
+import { currentSchool } from '../school-context.js'
+import { schoolScope } from '../../lib/school-scope.js'
 import { SchoolActError, type Approval, type SchoolAction } from '@freeschool/school-actor'
 import { NSID } from '../../lexicons/nsids.js'
 import { currentPolicyUri, getThresholds, refreshPolicyCache } from '../../lib/policy.js'
@@ -50,7 +52,7 @@ admin.use('*', requireViewer, requireRole(Role.Steward))
 /* policy */
 
 admin.get('/policy', async (c) => {
-  const did = schoolDid()
+  const did = currentSchool(c).did
   const uri = await currentPolicyUri(did)
   const rkey = uri?.split('/').pop()
   const record = rkey ? await getRecord(did, NSID.policy, rkey) : null
@@ -93,8 +95,9 @@ admin.put('/policy', async (c) => {
   const viewer = c.var.viewer!
   const now = new Date().toISOString()
   const rkey = tid()
-  const did = schoolDid()
+  const did = currentSchool(c).did
   const caller = viewer.did as `did:${string}`
+  const actor = await actorFor(did)
   const approvals = parsed.data.approvals ?? []
   // The rkey is ours, so the policy's at-uri is known BEFORE it is written — which is what
   // lets the two writes be ordered (#16).
@@ -118,8 +121,8 @@ admin.put('/policy', async (c) => {
     const school = await getRecord(did, NSID.school, 'self')
     const previousPolicyUri = typeof school?.value?.policy === 'string' ? school.value.policy : undefined
     if (school) {
-      await schoolActor().putRecordAsSchool({
-        schoolDid: did,
+      await actor.putRecordAsSchool({
+        schoolDid: asDid(did),
         callerDid: caller,
         scope: NSID.school,
         action: 'write-policy',
@@ -132,8 +135,8 @@ admin.put('/policy', async (c) => {
 
     let res: { uri: string; cid: string; auditId: string }
     try {
-      res = await schoolActor().putRecordAsSchool({
-        schoolDid: did,
+      res = await actor.putRecordAsSchool({
+        schoolDid: asDid(did),
         callerDid: caller,
         scope: NSID.policy,
         action: 'write-policy',
@@ -154,9 +157,9 @@ admin.put('/policy', async (c) => {
       // Undo the pointer, so the school still names the policy that is actually in force.
       // Best effort: if THIS fails too, A2's fail-closed read is the backstop.
       if (school) {
-        await schoolActor()
+        await actor
           .putRecordAsSchool({
-            schoolDid: did,
+            schoolDid: asDid(did),
             callerDid: caller,
             scope: NSID.school,
             action: 'write-policy',
@@ -206,14 +209,17 @@ const moderationBody = z.object({
 })
 
 admin.get('/moderation', async (c) => {
+  const did = currentSchool(c).did
   const status = c.req.query('status') ?? 'open'
   const rows = await getDb()
     .select()
     .from(moderationQueue)
-    .where(eq(moderationQueue.status, status))
+    // A steward sees their OWN school's case file and no other (MS §10): not the reason,
+    // not the subject, not that a case exists.
+    .where(and(eq(moderationQueue.status, status), schoolScope(moderationQueue.schoolDid, did)))
     .orderBy(desc(moderationQueue.createdAt))
     .limit(100)
-  const thresholds = await getThresholds()
+  const thresholds = await getThresholds(did)
   return c.json({
     requiredApprovals: thresholds.destructiveActionStewards,
     items: rows.map((r) => ({
@@ -238,6 +244,7 @@ admin.post('/moderation', async (c) => {
   const id = rowId()
   await getDb().insert(moderationQueue).values({
     id,
+    schoolDid: currentSchool(c).did,
     action: parsed.data.action,
     subjectUri: parsed.data.subjectUri ?? null,
     subjectDid: parsed.data.subjectDid ?? null,
@@ -252,7 +259,12 @@ admin.post('/moderation', async (c) => {
 admin.post('/moderation/:id/approve', async (c) => {
   const id = c.req.param('id')
   const viewer = c.var.viewer!
-  const rows = await getDb().select().from(moderationQueue).where(eq(moderationQueue.id, id)).limit(1)
+  const did = currentSchool(c).did
+  const rows = await getDb()
+    .select()
+    .from(moderationQueue)
+    .where(and(eq(moderationQueue.id, id), schoolScope(moderationQueue.schoolDid, did)))
+    .limit(1)
   const row = rows[0]
   if (!row) return c.json({ error: 'NotFound' }, 404)
   const approvals = asApprovals(row.approvals)
@@ -261,14 +273,20 @@ admin.post('/moderation/:id/approve', async (c) => {
   }
   const next: Approval[] = [...approvals, { stewardDid: viewer.did as `did:${string}`, at: new Date().toISOString() }]
   await getDb().update(moderationQueue).set({ approvals: next }).where(eq(moderationQueue.id, id))
-  const thresholds = await getThresholds()
+  const thresholds = await getThresholds(did)
   return c.json({ approvals: next, required: thresholds.destructiveActionStewards })
 })
 
 admin.post('/moderation/:id/execute', async (c) => {
   const id = c.req.param('id')
   const viewer = c.var.viewer!
-  const rows = await getDb().select().from(moderationQueue).where(eq(moderationQueue.id, id)).limit(1)
+  const did = currentSchool(c).did
+  const actor = await actorFor(did)
+  const rows = await getDb()
+    .select()
+    .from(moderationQueue)
+    .where(and(eq(moderationQueue.id, id), schoolScope(moderationQueue.schoolDid, did)))
+    .limit(1)
   const row = rows[0]
   if (!row) return c.json({ error: 'NotFound' }, 404)
   if (row.status !== 'open') return c.json({ error: 'AlreadyResolved', status: row.status }, 409)
@@ -301,14 +319,14 @@ admin.post('/moderation/:id/execute', async (c) => {
   }
   const approvals = asApprovals(row.approvals)
   try {
-    const result = await schoolActor().putRecordAsSchool({
-      schoolDid: schoolDid(),
+    const result = await actor.putRecordAsSchool({
+      schoolDid: asDid(did),
       callerDid: viewer.did as `did:${string}`,
       scope: NSID.moderationAction,
       action: row.action as SchoolAction,
       collection: NSID.moderationAction,
       rkey: tid(),
-      record: publicModerationRecord(row.action, await currentPolicyUri(schoolDid()), approvals),
+      record: publicModerationRecord(row.action, await currentPolicyUri(did), approvals),
       audit: { reason: row.reason, approvals },
     })
 
@@ -327,9 +345,9 @@ admin.post('/moderation/:id/execute', async (c) => {
     // record genuinely un-hides the class.
     if (eventRef && (row.action === 'remove-listing' || row.action === 'restore-listing')) {
       const status = row.action === 'remove-listing' ? 'removed' : 'listed'
-      const listing = await schoolActor()
+      const listing = await actor
         .putRecordAsSchool({
-          schoolDid: schoolDid(),
+          schoolDid: asDid(did),
           callerDid: viewer.did as `did:${string}`,
           scope: NSID.eventListing,
           action: row.action,
@@ -338,7 +356,7 @@ admin.post('/moderation/:id/execute', async (c) => {
           record: {
             $type: NSID.eventListing,
             event: eventRef,
-            school: schoolDid(),
+            school: did,
             status,
             createdAt: new Date().toISOString(),
           },
@@ -359,7 +377,7 @@ admin.post('/moderation/:id/execute', async (c) => {
     // gave: an event alone voids the whole sheet, a DID alone voids that person's
     // attendance everywhere, both narrows to one row.
     if (row.action === 'void-attendance' && (row.subjectUri || row.subjectDid)) {
-      effects.attendanceVoided = await voidAttendance(row.subjectUri, row.subjectDid)
+      effects.attendanceVoided = await voidAttendance(row.subjectUri, row.subjectDid, did)
     }
 
     await getDb()
@@ -376,7 +394,7 @@ admin.post('/moderation/:id/execute', async (c) => {
 /* peers */
 
 admin.get('/peers', async (c) => {
-  const peers = await listPeers()
+  const peers = await listPeers(currentSchool(c).did)
   const probed = c.req.query('probe') === '1' ? await Promise.all(peers.map((p) => probePeer(p.host))) : undefined
   return c.json({ peers, probed })
 })
@@ -389,18 +407,20 @@ const peersBody = z.object({
 admin.put('/peers', async (c) => {
   const parsed = peersBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
-  for (const host of parsed.data.add ?? []) await addPeer(host, 'admin')
-  for (const host of parsed.data.remove ?? []) await disablePeer(host)
-  // The peer list IS contrail's `relays`, so the indexer has to be rebuilt.
+  const did = currentSchool(c).did
+  for (const host of parsed.data.add ?? []) await addPeer(host, 'admin', did)
+  for (const host of parsed.data.remove ?? []) await disablePeer(host, did)
+  // The peer list IS contrail's `relays` — the UNION across schools, since the index is
+  // global (MS §4) — so the indexer has to be rebuilt whichever school edited it.
   resetIndexer()
-  return c.json({ peers: await listPeers() })
+  return c.json({ peers: await listPeers(did) })
 })
 
 /* newsletter */
 
 admin.post('/newsletter', async (c) => {
   const period = c.req.query('period') ?? new Date().toISOString().slice(0, 7)
-  const draft = await composeNewsletterIssue(period)
+  const draft = await composeNewsletterIssue(period, currentSchool(c).did)
   return c.json({ subject: `Free School, ${draft.month}`, body: draft.text, ...draft }, 201)
 })
 
@@ -414,6 +434,7 @@ admin.get('/newsletter', async (c) => {
       recipientCount: newsletterIssue.recipientCount,
     })
     .from(newsletterIssue)
+    .where(schoolScope(newsletterIssue.schoolDid, currentSchool(c).did))
     .orderBy(desc(newsletterIssue.month))
     .limit(24)
   return c.json({ drafts: rows })
@@ -421,7 +442,7 @@ admin.get('/newsletter', async (c) => {
 
 admin.post('/newsletter/:id/send', async (c) => {
   const id = c.req.param('id')
-  const result = await sendNewsletterIssue(id)
+  const result = await sendNewsletterIssue(id, currentSchool(c).did)
   if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status as 404 | 409)
   return c.json({ ok: true, recipientCount: result.recipientCount })
 })
@@ -468,7 +489,9 @@ admin.get('/skills/proposals', async (c) => {
   const rows = await getDb()
     .select()
     .from(skillProposal)
-    .where(ne(skillProposal.status, 'failed'))
+    // Attribution is per school (MS §6): the taxonomy is shared, the proposal queue is
+    // this school's own.
+    .where(and(ne(skillProposal.status, 'failed'), schoolScope(skillProposal.schoolDid, currentSchool(c).did)))
     .orderBy(desc(skillProposal.createdAt))
     .limit(200)
   const indexer = await getIndexer()
@@ -597,9 +620,9 @@ function publicModerationRecord(
  * rather than a second decrement, and only rows with `participated` — a "they did not take
  * part" row never incremented anything. `bumpTally` floors each counter at 0.
  */
-async function voidAttendance(subjectUri: string | null, subjectDid: string | null): Promise<number> {
+async function voidAttendance(subjectUri: string | null, subjectDid: string | null, schoolDid: string): Promise<number> {
   const db = getDb()
-  const where = [isNull(attendance.voidedAt)]
+  const where = [isNull(attendance.voidedAt), schoolScope(attendance.schoolDid, schoolDid)]
   if (subjectUri) where.push(eq(attendance.eventUri, subjectUri))
   if (subjectDid) where.push(eq(attendance.attendeeDid, subjectDid))
   const voided = await db
@@ -608,7 +631,7 @@ async function voidAttendance(subjectUri: string | null, subjectDid: string | nu
     .where(and(...where))
     .returning({ attendeeDid: attendance.attendeeDid, participated: attendance.participated })
   for (const r of voided) {
-    if (r.participated) await bumpTally(r.attendeeDid, { attendedConfirmed: -1 })
+    if (r.participated) await bumpTally(r.attendeeDid, { attendedConfirmed: -1 }, schoolDid)
   }
   return voided.length
 }

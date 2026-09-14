@@ -85,6 +85,13 @@
       "when": 1789363783630,
       "tag": "0011_legal_spirit",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1789365442769,
+      "tag": "0012_pale_iron_man",
+      "breakpoints": true
     }
   ]
 }
