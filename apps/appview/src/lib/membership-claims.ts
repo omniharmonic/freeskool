@@ -44,9 +44,9 @@ import type { Did } from '@freeschool/school-actor'
 import { getDb } from '../db/index.js'
 import { memberPrefs } from '../db/schema.js'
 import { getThresholds } from './policy.js'
-import { schoolActor } from './school-actor.js'
+import { actorFor } from './school-actors.js'
+import { legacySchoolDid } from './schools.js'
 import { getRecord } from './pds.js'
-import { config } from '../config.js'
 import { NSID } from '../lexicons/nsids.js'
 import { describeError, log } from './logging.js'
 
@@ -76,7 +76,7 @@ export async function isPublicRoleOptIn(did: string): Promise<boolean> {
  * caller may follow up with `publishRoleClaim` using the subject's current role, as
  * `http/routes/me.ts#PUT /public-role` does).
  */
-export async function setPublicRoleOptIn(did: string, publicRole: boolean, schoolDid = config().SCHOOL_DID): Promise<void> {
+export async function setPublicRoleOptIn(did: string, publicRole: boolean, schoolDid = legacySchoolDid()): Promise<void> {
   await getDb()
     .insert(memberPrefs)
     .values({ did, publicRole, updatedAt: new Date() })
@@ -101,7 +101,7 @@ export interface PublishResult {
  */
 export async function retractRoleClaim(schoolDid: Did, subjectDid: Did): Promise<void> {
   try {
-    await schoolActor().deleteRecordAsSchool({
+    await (await actorFor(schoolDid)).deleteRecordAsSchool({
       schoolDid,
       callerDid: subjectDid,
       scope: NSID.membership,
@@ -165,7 +165,7 @@ export async function publishRoleClaim(
   try {
     const rkey = membershipClaimRkey(schoolDid, subjectDid)
     const existingCid = await (deps.fetchExistingCid ?? fetchExistingCid)(schoolDid, subjectDid)
-    const res = await schoolActor().putRecordAsSchool({
+    const res = await (await actorFor(schoolDid)).putRecordAsSchool({
       schoolDid,
       // The subject is the caller: they already qualify (role >= Host, just checked),
       // and they are the one who opted in. No steward involvement needed to publish a
