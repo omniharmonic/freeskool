@@ -20,6 +20,7 @@
     "create-school": "tsx scripts/create-school.ts",
     "appoint-steward": "tsx scripts/appoint-steward.ts",
     "backfill-skill-claims": "tsx scripts/backfill-skill-claims.ts",
+    "backfill-school": "tsx scripts/backfill-school.ts",
     "privacy-audit": "tsx scripts/privacy-audit.ts",
     "smoke": "tsx scripts/smoke.ts",
     "seed:demo": "tsx scripts/seed-demo.ts",

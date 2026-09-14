@@ -27,6 +27,117 @@ const bytea = customType<{ data: Buffer; driverData: Buffer }>({
 
 const ts = (n: string) => timestamp(n, { withTimezone: true })
 
+/**
+ * Every per-school table carries this. `''` is the "not yet stamped" value rather than
+ * NULL so no reader has to special-case three states, and so adding the column is a
+ * catalogue-only change in Postgres (a non-volatile DEFAULT never rewrites the table).
+ * `scripts/backfill-school.ts` replaces every `''` with the legacy `SCHOOL_DID`, and
+ * Task 3 is what makes readers filter on it. See MS §4 and §9 A–C.
+ */
+const schoolDidColumn = () => text('school_did').notNull().default('')
+
+/* ──────────────────────────────────── schools ─────────────────────────────────── */
+
+/**
+ * One row per school this AppView hosts. In v1 there is exactly one — Boulder — written
+ * by `ensureLegacySchoolRow()` at boot from `SCHOOL_DID`/`SCHOOL_HANDLE` (`lib/schools.ts`).
+ *
+ * `label` is the subdomain label (`boulder` in `boulder.freeskool.xyz`) and is what the
+ * reserved-label list in `lib/handles.ts` protects; it is unique because it IS a hostname.
+ */
+export const school = pgTable(
+  'fs_school',
+  {
+    did: text('did').primaryKey(),
+    label: text('label').notNull(),
+    name: text('name').notNull(),
+    city: text('city'),
+    handle: text('handle').notNull(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+    /** 'active' | 'provisioning' | 'archived' — MS §4's `status`, named for MS §8's flow. */
+    creationState: text('creation_state').notNull().default('active'),
+  },
+  (t) => [uniqueIndex('fs_school_label_idx').on(t.label)],
+)
+
+/**
+ * Host → school. The canonical row is the host the school is served from; aliases are
+ * additional hosts that resolve to the same school (the apex IS Boulder for now, and
+ * `boulder.<suffix>` is its alias — MS §3 and §9 B).
+ */
+export const schoolDomain = pgTable(
+  'fs_school_domain',
+  {
+    host: text('host').primaryKey(),
+    schoolDid: text('school_did').notNull(),
+    /** 'canonical' | 'alias' */
+    kind: text('kind').notNull().default('alias'),
+  },
+  (t) => [index('fs_school_domain_school_idx').on(t.schoolDid)],
+)
+
+/**
+ * A DID's membership OF ONE SCHOOL — the per-school replacement for `fs_member` (MS §4,
+ * §9 E). `fs_member` stays authoritative until Task 3 switches readers; this table is
+ * written by the backfill and, from Task 3 on, by the session path.
+ *
+ * `directoryListing` moves here from `fs_member_prefs` because "list me in the directory"
+ * is a per-school answer (R9: Boulder's roster is not Denver's). The old column stays for
+ * now and the backfill copies it.
+ *
+ * `leftAt` is how leaving a school works (spec ruling 10): the row survives so the
+ * member's own public records still make sense, but they drop out of that school's
+ * directory and skill pages.
+ */
+export const membership = pgTable(
+  'fs_membership',
+  {
+    did: text('did').notNull(),
+    schoolDid: text('school_did').notNull(),
+    /** 'custodial' | 'oauth' — the door most recently used for THIS school. */
+    door: text('door').notNull(),
+    directoryListing: boolean('directory_listing').notNull().default(true),
+    joinedAt: ts('joined_at').notNull().defaultNow(),
+    lastSeenAt: ts('last_seen_at').notNull().defaultNow(),
+    leftAt: ts('left_at'),
+  },
+  (t) => [
+    primaryKey({ columns: [t.did, t.schoolDid] }),
+    index('fs_membership_school_idx').on(t.schoolDid, t.lastSeenAt),
+  ],
+)
+
+/**
+ * The school actor's app password, AES-256-GCM wrapped under the SAME versioned
+ * `CUSTODY_KEYS` a custodial member's password is (`lib/crypto.ts#wrapSecret`). This is
+ * what replaces the single `SCHOOL_APP_PASSWORD` env var once there is more than one
+ * school (MS §5); the backfill imports the env value into the legacy school's row.
+ */
+export const schoolCredential = pgTable('fs_school_credential', {
+  schoolDid: text('school_did').primaryKey(),
+  keyVersion: text('key_version').notNull(),
+  /** AES-256-GCM: 12-byte iv || ciphertext || 16-byte tag. Never logged, never returned. */
+  appPasswordWrapped: bytea('app_password_wrapped'),
+  rotatedAt: ts('rotated_at').notNull().defaultNow(),
+})
+
+/**
+ * Which school a class was created in (MS §4). Authorship stops identifying the calendar
+ * once a member can belong to two schools, so the school is recorded at creation time.
+ *
+ * NOT backfilled: event records live in contrail's index, not in `fs_*`, so there is no
+ * row here for any class created before Task 3. An ABSENT row means "the legacy school" —
+ * readers must fall back to `legacySchoolDid()`, never treat absence as "no school".
+ */
+export const eventSchool = pgTable(
+  'fs_event_school',
+  {
+    eventUri: text('event_uri').primaryKey(),
+    schoolDid: text('school_did').notNull(),
+  },
+  (t) => [index('fs_event_school_school_idx').on(t.schoolDid)],
+)
+
 /* ───────────────────────────── sessions & identity ───────────────────────────── */
 
 /**
@@ -40,6 +151,8 @@ export const session = pgTable(
     did: text('did').notNull(),
     /** 'custodial' = our PDS account; 'oauth' = existing account via the secondary door. */
     kind: text('kind').notNull(),
+    /** Which school this browser is currently looking at; resolved per request (Task 4). */
+    currentSchoolDid: text('current_school_did'),
     createdAt: ts('created_at').notNull().defaultNow(),
     expiresAt: ts('expires_at').notNull(),
   },
@@ -146,6 +259,7 @@ export const invite = pgTable(
   'fs_invite',
   {
     code: text('code').primaryKey(),
+    schoolDid: schoolDidColumn(),
     inviterDid: text('inviter_did'),
     usedByDid: text('used_by_did'),
     usedAt: ts('used_at'),
@@ -199,6 +313,8 @@ export const requestRsvp = pgTable(
   {
     requestUri: text('request_uri').notNull(),
     did: text('did').notNull(),
+    /** Denormalised from the request's school so a threshold is counted within one city. */
+    schoolDid: schoolDidColumn(),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
   (t) => [primaryKey({ columns: [t.requestUri, t.did] }), index('fs_request_rsvp_req_idx').on(t.requestUri)],
@@ -233,6 +349,8 @@ export const rsvp = pgTable(
     id: text('id').primaryKey(),
     eventUri: text('event_uri').notNull(),
     did: text('did').notNull(),
+    /** Denormalised from `fs_event_school` so a capacity/waitlist query never crosses schools. */
+    schoolDid: schoolDidColumn(),
     /**
      * 'going' | 'interested' | 'notgoing' | 'waitlisted'. `waitlisted` is never what a
      * caller requests — the server assigns it instead of 'going' when `capacity` is set
@@ -262,6 +380,8 @@ export const attendance = pgTable(
     eventUri: text('event_uri').notNull(),
     attendeeDid: text('attendee_did').notNull(),
     attestedByDid: text('attested_by_did').notNull(),
+    /** Evidence for a role is evidence in ONE school (MS §4). */
+    schoolDid: schoolDidColumn(),
     participated: boolean('participated').notNull().default(true),
     /** 'attendee' | 'assistant' | 'co-host' */
     role: text('role').notNull().default('attendee'),
@@ -280,15 +400,25 @@ export const attendanceRollup = pgTable(
   'fs_attendance_rollup',
   {
     eventUri: text('event_uri').primaryKey(),
+    /** Not a scope (the event already is one) — the retention job needs it per school. */
+    schoolDid: schoolDidColumn(),
     participatedCount: integer('participated_count').notNull().default(0),
     totalCount: integer('total_count').notNull().default(0),
     collapsedAt: ts('collapsed_at').notNull().defaultNow(),
   },
 )
 
-/** Per-member lifetime tallies, the only attendance evidence that outlives 90 days. */
+/**
+ * Per-member lifetime tallies, the only attendance evidence that outlives 90 days.
+ *
+ * MS §4 wants the PK to become `(did, school_did)` — a global tally would make Boulder
+ * attendance grant Denver hosting rights. That is a WRITE-PATH change (`lib/roles.ts`
+ * upserts on `did`), so it lands with Task 3; the column is here now so the backfill can
+ * stamp it and so the isolation suite has something to assert against.
+ */
 export const attendanceTally = pgTable('fs_attendance_tally', {
   did: text('did').primaryKey(),
+  schoolDid: schoolDidColumn(),
   attendedConfirmed: integer('attended_confirmed').notNull().default(0),
   hostedEvents: integer('hosted_events').notNull().default(0),
   updatedAt: ts('updated_at').notNull().defaultNow(),
@@ -339,6 +469,8 @@ export const feedback = pgTable(
     eventUri: text('event_uri').notNull(),
     /** Denormalized so the summary can be computed without touching the index. */
     hostDid: text('host_did').notNull(),
+    /** k-anonymity is computed WITHIN one school (MS §4) — never across the network. */
+    schoolDid: schoolDidColumn(),
     /** 'positive' | 'negative' */
     direction: text('direction').notNull(),
     aspects: jsonb('aspects'),
@@ -367,13 +499,18 @@ export const audit = pgTable(
     policySource: text('policy_source').notNull(),
     at: ts('at').notNull(),
   },
-  (t) => [index('fs_audit_at_idx').on(t.at), index('fs_audit_action_idx').on(t.action)],
+  (t) => [
+    index('fs_audit_at_idx').on(t.at),
+    index('fs_audit_action_idx').on(t.action),
+    index('fs_audit_school_at_idx').on(t.schoolDid, t.at),
+  ],
 )
 
 export const moderationQueue = pgTable(
   'fs_moderation_queue',
   {
     id: text('id').primaryKey(),
+    schoolDid: schoolDidColumn(),
     subjectUri: text('subject_uri'),
     subjectDid: text('subject_did'),
     /** the SchoolAction the steward is proposing */
@@ -388,10 +525,19 @@ export const moderationQueue = pgTable(
     resolvedAt: ts('resolved_at'),
     resultUri: text('result_uri'),
   },
-  (t) => [index('fs_moderation_status_idx').on(t.status)],
+  (t) => [
+    index('fs_moderation_status_idx').on(t.status),
+    index('fs_moderation_school_status_idx').on(t.schoolDid, t.status),
+  ],
 )
 
-/** Founder-appointed (bootstrap) or elected stewards — the one role not derivable. */
+/**
+ * Founder-appointed (bootstrap) or elected stewards — the one role not derivable.
+ *
+ * MS §4: the PK should become `(did, school_did)`, since `did` alone silently forbids
+ * being a steward of two schools. `routes/handoff.ts` upserts on `steward.did`, so the
+ * PK change is Task 3's, with the write path.
+ */
 export const steward = pgTable('fs_steward', {
   did: text('did').primaryKey(),
   schoolDid: text('school_did').notNull(),
@@ -509,6 +655,7 @@ export const notificationSent = pgTable(
   {
     dedupKey: text('dedup_key').primaryKey(),
     did: text('did').notNull(),
+    schoolDid: schoolDidColumn(),
     category: text('category').notNull(),
     claimedAt: ts('claimed_at').notNull().defaultNow(),
     sentAt: ts('sent_at'),
@@ -521,6 +668,8 @@ export const notificationOutbox = pgTable(
   {
     id: text('id').primaryKey(),
     did: text('did').notNull(),
+    /** So one school's notifications can be paused without touching another's (MS §4). */
+    schoolDid: schoolDidColumn(),
     category: text('category').notNull(),
     dedupKey: text('dedup_key').notNull(),
     /** Declarative Web Push / email payload. Never contains an actor for feedback.*. */
@@ -545,6 +694,8 @@ export const notificationFeed = pgTable(
   {
     id: text('id').primaryKey(),
     did: text('did').notNull(),
+    /** So a feed row can say WHICH school it is about (MS §4). */
+    schoolDid: schoolDidColumn(),
     category: text('category').notNull(),
     title: text('title').notNull(),
     body: text('body'),
@@ -564,6 +715,8 @@ export const notificationFeed = pgTable(
  */
 export const newsletterIssue = pgTable('fs_newsletter_issue', {
   id: text('id').primaryKey(),
+  /** One monthly digest per city (MS §4). */
+  schoolDid: schoolDidColumn(),
   month: text('month').notNull(),
   html: text('html').notNull(),
   text: text('text').notNull(),
@@ -586,6 +739,12 @@ export const newsletterSubscription = pgTable(
   'fs_newsletter_subscription',
   {
     did: text('did').primaryKey(),
+    /**
+     * Subscribing to Boulder's digest is not subscribing to Denver's. MS §4 makes the PK
+     * `(did, school_did)`; `lib/newsletter-subscriptions.ts` upserts on `did`, so the PK
+     * change travels with that write path in Task 3.
+     */
+    schoolDid: schoolDidColumn(),
     emailRef: text('email_ref').notNull(),
     subscribedAt: ts('subscribed_at').notNull().defaultNow(),
     unsubscribedAt: ts('unsubscribed_at'),
@@ -598,6 +757,11 @@ export const newsletterSubscription = pgTable(
  * Opt-in to having one's DERIVED role published as a public `coop.lexicon.membership`
  * claim (`lib/membership-claims.ts`). OFF by default — R9: no public record may name a
  * DID its holder did not choose to.
+ *
+ * MS §4 splits this table: `directoryListing` (and later `publicRole`, `onboardedAt`) are
+ * per-school answers and belong on `fs_membership`. The columns stay here and stay
+ * authoritative until Task 3 switches readers; `scripts/backfill-school.ts` copies
+ * `directoryListing` across so the two agree from the moment the new table exists.
  */
 export const memberPrefs = pgTable('fs_member_prefs', {
   did: text('did').primaryKey(),
@@ -644,6 +808,13 @@ export const attestation = pgTable(
     attesterDid: text('attester_did').notNull(),
     subjectDid: text('subject_did').notNull(),
     skillUri: text('skill_uri').notNull(),
+    /**
+     * A vouch is scoped to the school it was given in (R9, MS §2/§10). MS §4 widens the
+     * unique index to `(attester, subject, skill, school_did)`; `lib/attestations.ts`
+     * names the current three columns as its `ON CONFLICT` target, so widening the index
+     * without that call is an immediate runtime error — it goes with Task 3.
+     */
+    schoolDid: schoolDidColumn(),
     contextEventUri: text('context_event_uri'),
     createdAt: ts('created_at').notNull().defaultNow(),
   },
@@ -657,6 +828,8 @@ export const attestation = pgTable(
 export const skillProposal = pgTable('fs_skill_proposal', {
   id: text('id').primaryKey(), // rowId() from lib/ids.ts
   skillUri: text('skill_uri').notNull(),
+  /** Attribution only: the taxonomy itself stays one authority (MS §6). */
+  schoolDid: schoolDidColumn(),
   proposerDid: text('proposer_did').notNull(),
   status: text('status').notNull().default('published'), // published|deprecated
   createdAt: ts('created_at').notNull().defaultNow(),
@@ -671,6 +844,8 @@ export const handoff = pgTable(
   'fs_handoff',
   {
     id: text('id').primaryKey(),
+    /** A steward hand-off is for one school (MS §4). */
+    schoolDid: schoolDidColumn(),
     fromDid: text('from_did').notNull(),
     toDid: text('to_did'),
     tokenHash: text('token_hash').notNull(),
@@ -727,6 +902,11 @@ export const appMeta = pgTable('fs_app_meta', {
 })
 
 export const schema = {
+  school,
+  schoolDomain,
+  membership,
+  schoolCredential,
+  eventSchool,
   session,
   oauthState,
   oauthSession,

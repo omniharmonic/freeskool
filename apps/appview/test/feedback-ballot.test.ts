@@ -63,8 +63,10 @@ describe('in the database', () => {
       sql`select column_name from information_schema.columns where table_name = 'fs_feedback'`,
     )
     const names = (cols.rows as Array<{ column_name: string }>).map((r) => r.column_name).sort()
-    expect(names).toEqual(['aspects', 'day', 'direction', 'event_uri', 'host_did', 'id', 'text'])
-    // host_did is the SUBJECT of the feedback, not its author. Nothing else is a DID.
+    expect(names).toEqual(['aspects', 'day', 'direction', 'event_uri', 'host_did', 'id', 'school_did', 'text'])
+    // host_did is the SUBJECT of the feedback and school_did is the SCHOOL it was given
+    // in (MS §4: k-anonymity is computed within one school). Neither is its author, and
+    // nothing else here is a DID at all.
     expect(names.filter((n) => n.includes('author') || n.includes('ballot') || n.includes('attendee'))).toEqual([])
   })
 
