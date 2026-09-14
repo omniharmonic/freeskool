@@ -53,6 +53,22 @@ export const school = pgTable(
     name: text('name').notNull(),
     city: text('city'),
     handle: text('handle').notNull(),
+    /**
+     * The PDS this school's repo lives on — the shared one for every school we mint
+     * (MS §4/§8). `''` on rows written before the column existed, which every reader
+     * must treat as `config().PDS_URL`; there was exactly one PDS when they were
+     * written, so that is not a guess.
+     */
+    pdsUrl: text('pds_url').notNull().default(''),
+    /**
+     * `'app'` — we hold an app password for this school's account — or `'external'`,
+     * a founder's own DID we were handed a credential for (MS §8 "bring your own").
+     * Only `'app'` is reachable in this phase; the column exists so the second case
+     * does not need a migration to become possible.
+     */
+    custody: text('custody').notNull().default('app'),
+    /** The founder, when a school was created through `createSchool` (MS §4). Never public. */
+    createdByDid: text('created_by_did'),
     createdAt: ts('created_at').notNull().defaultNow(),
     /** 'active' | 'provisioning' | 'archived' — MS §4's `status`, named for MS §8's flow. */
     creationState: text('creation_state').notNull().default('active'),
@@ -72,6 +88,12 @@ export const schoolDomain = pgTable(
     schoolDid: text('school_did').notNull(),
     /** 'canonical' | 'alias' */
     kind: text('kind').notNull().default('alias'),
+    /**
+     * When this host was proved to point at us (MS §4). A host we mint under our own
+     * suffix is verified the moment it is written; a city's own domain is not, and this
+     * column is what a later DNS check stamps. NULL means "not checked", never "bad".
+     */
+    verifiedAt: ts('verified_at'),
   },
   (t) => [index('fs_school_domain_school_idx').on(t.schoolDid)],
 )
@@ -125,10 +147,23 @@ export const membership = pgTable(
  */
 export const schoolCredential = pgTable('fs_school_credential', {
   schoolDid: text('school_did').primaryKey(),
+  /**
+   * What we log in AS (MS §5): the school's handle, or its DID. Kept here rather than
+   * read off `fs_school.handle` because the two can disagree for a while — a handle
+   * migration (MS §3) rewrites the school row before the PDS has finished, and a
+   * credential that logs in under a stale identifier still works. `''` on rows written
+   * before this column existed; `credentialFor()` falls back to the school's handle.
+   */
+  identifier: text('identifier').notNull().default(''),
   keyVersion: text('key_version').notNull(),
   /** AES-256-GCM: 12-byte iv || ciphertext || 16-byte tag. Never logged, never returned. */
   appPasswordWrapped: bytea('app_password_wrapped'),
   rotatedAt: ts('rotated_at').notNull().defaultNow(),
+  /** Last successful use, and last failure — MS §5's isolation story: a school whose
+   * credential is revoked fails only its own writes, and a steward needs to be told
+   * which school that is. Stamped by the rotation script and the session's error path. */
+  lastOkAt: ts('last_ok_at'),
+  lastErrorAt: ts('last_error_at'),
 })
 
 /**

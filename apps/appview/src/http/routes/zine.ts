@@ -97,8 +97,12 @@ zine.get('/zine/:yyyyMm', async (c) => {
     const inputs = { listings: listings.map((l) => l.value), configs: configs.map((x) => x.value) }
     // Same authorship-based inclusion as the calendar (see http/visibility.ts).
     // Same two-fact rule as the calendar: created in THIS school, and ours by authorship.
-    const ourEvent = (eventSchools.get(e.uri) ?? legacySchoolDid()) === schoolDid
-    const { show } = calendarInclusion(ourEvent && (ownDids.has(e.did) || ownDids.has(hosts.get(e.uri) ?? e.did)), inputs)
+    // Same rule as the calendar: a stamped class was created here and stays here even
+    // after its host leaves (ruling 10); an unstamped one is decided by authorship.
+    const stamped = eventSchools.get(e.uri)
+    const ourEvent = (stamped ?? legacySchoolDid()) === schoolDid
+    const ours = ourEvent && (stamped ? true : ownDids.has(e.did) || ownDids.has(hosts.get(e.uri) ?? e.did))
+    const { show } = calendarInclusion(ours, inputs)
     if (!show) continue
     // 'public': this endpoint has no session at all, by design (R9 — no public endpoint
     // enumerates members, and the zine is for anyone to print).

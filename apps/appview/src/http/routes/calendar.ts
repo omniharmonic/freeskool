@@ -104,8 +104,18 @@ async function visibleEvents(
      * (`fs_event_school`) AND its author or host belongs to it. A host who teaches in both
      * Boulder and Denver has classes on each calendar, not both on both.
      */
-    const ourEvent = (eventSchools.get(e.uri) ?? legacySchoolDid()) === currentSchoolDid
-    const { show, origin } = calendarInclusion(ourEvent && (ownDids.has(e.did) || ownDids.has(hostDid)), inputs)
+    /**
+     * A STAMPED class needs no authorship check: `fs_event_school` is the record that it
+     * was created HERE, written by the create path from the session's own school, and it
+     * survives its host LEAVING this school (spec ruling 10 — "keeps their classes on that
+     * calendar", because they are public records the member wrote about a class that
+     * really happened here). Authorship is still what decides for an UNSTAMPED class,
+     * where the school is a fallback guess and there is no row to trust.
+     */
+    const stamped = eventSchools.get(e.uri)
+    const ourEvent = (stamped ?? legacySchoolDid()) === currentSchoolDid
+    const ours = ourEvent && (stamped ? true : ownDids.has(e.did) || ownDids.has(hostDid))
+    const { show, origin } = calendarInclusion(ours, inputs)
     if (!show) continue
     out.push({ uri: e.uri, hostDid, event: toCalendarEvent(e.uri, hostDid, e.value), inputs, origin })
   }

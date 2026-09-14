@@ -23,7 +23,7 @@
  */
 import { and, eq, isNull } from 'drizzle-orm'
 import { getDb, type Db } from '../db/index.js'
-import { membership, memberPrefs } from '../db/schema.js'
+import { member, membership, memberPrefs, steward } from '../db/schema.js'
 import { legacySchoolDid } from './schools.js'
 
 export type MembershipDoor = 'custodial' | 'oauth'
@@ -173,13 +173,56 @@ export async function setPublicRole(
 }
 
 /**
- * Leaving a school (spec ruling 10): the row survives — the member's own public records
- * still make sense — but they drop out of this school's directory and skill pages, and
- * their published role claim is retracted by the caller.
+ * LEAVING A SCHOOL (spec ruling 10). Three things happen and a fourth deliberately does
+ * not:
+ *
+ *   - `left_at` is stamped, which is what every per-school reader already filters on;
+ *   - `directory_listing` goes false, so the member is gone from the people directory
+ *     and from skill pages even for a reader that only checks the listing flag;
+ *   - the published role claim is retracted BY THE CALLER (`routes/schools.ts`), because
+ *     retraction is a PDS write through that school's actor and this module does no I/O
+ *     beyond its own table;
+ *   - THE CLASSES STAY. They are `community.lexicon.calendar.event` records in the
+ *     member's own repo and they really did happen on this school's calendar; deleting
+ *     them is not ours to do and un-listing them would rewrite the city's history.
+ *
+ * The row itself survives, so re-joining is `joinSchool` clearing `left_at` rather than a
+ * new membership with a new `joined_at`. Re-joining does NOT re-list them in the
+ * directory: leaving was the stronger statement, and silently re-publishing someone's
+ * name because they looked at the site again is exactly the R9 failure mode. The Me
+ * screen's own toggle is one tap.
+ *
+ * Returns false when there was no membership row to end — `routes/schools.ts` turns that
+ * into a 404, never a 403 (MS §10: a 403 would confirm the school has a roster to be off).
  */
-export async function leaveSchool(did: string, schoolDid: string, db: Db = getDb()): Promise<void> {
-  await db
+export async function leaveSchool(did: string, schoolDid: string, db: Db = getDb()): Promise<boolean> {
+  if (!schoolDid) return false
+  const rows = await db
     .update(membership)
-    .set({ leftAt: new Date() })
-    .where(and(eq(membership.did, did), eq(membership.schoolDid, schoolDid)))
+    .set({ leftAt: new Date(), directoryListing: false })
+    .where(and(eq(membership.did, did), eq(membership.schoolDid, schoolDid), isNull(membership.leftAt)))
+    .returning({ did: membership.did })
+  return rows.length > 0
+}
+
+/**
+ * THE FIRST STEWARD, appointed rather than derived — the one role `lib/roles.ts` cannot
+ * compute, because every path to it (`POST /api/admin/moderation` with `set-role`, the
+ * hand-off flow) already requires a steward. It starts here, and only here:
+ * `createSchool` calls it for the founder (MS §8 step 5) and `scripts/appoint-steward.ts`
+ * is the operator's second chance, for the usual case where the founder had no DID yet
+ * when the school was minted.
+ *
+ * Idempotent. Also writes the GLOBAL `fs_member` presence row, because `roleOf` wants a
+ * steward to be a known member and an appointee may never have had a session.
+ */
+export async function appointSteward(did: string, schoolDid: string, db: Db = getDb()): Promise<void> {
+  if (!did.startsWith('did:')) throw new Error('a steward is appointed by DID')
+  if (!schoolDid) throw new Error('a steward is a steward OF a school; none was given')
+  await db.insert(steward).values({ did, schoolDid, appointedAt: new Date() }).onConflictDoNothing()
+  const seenAt = new Date()
+  await db
+    .insert(member)
+    .values({ did, door: 'custodial', firstSeenAt: seenAt, lastSeenAt: seenAt })
+    .onConflictDoUpdate({ target: member.did, set: { lastSeenAt: seenAt } })
 }

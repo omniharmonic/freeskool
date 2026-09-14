@@ -31,6 +31,7 @@ import { oauthRoutes } from './routes/oauth.js'
 import { invites } from './routes/invites.js'
 import { zine } from './routes/zine.js'
 import { school } from './routes/school.js'
+import { schools } from './routes/schools.js'
 import { newsletterRoutes } from './routes/newsletter.js'
 import { knowledge } from './routes/knowledge.js'
 import { handoffRoutes } from './routes/handoff.js'
@@ -92,6 +93,7 @@ export function createApp() {
   app.route('/api', invites)
   app.route('/api', zine)
   app.route('/api', school)
+  app.route('/api', schools)
   app.route('/api', newsletterRoutes)
   app.route('/api', handoffRoutes)
   app.route('/api', attestations)
