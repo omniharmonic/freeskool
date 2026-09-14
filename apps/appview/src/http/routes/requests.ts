@@ -37,6 +37,7 @@ import { getRecordByUri, listCollection, parseAtUri, sidecarsForEvent } from '..
 import { getRecord } from '../../lib/pds.js'
 import { resolvePdsEndpoint } from '../../lib/identity.js'
 import { countInterested, isInterested, meetsThreshold, toggleInterest } from '../../lib/request-rsvp.js'
+import { createRequest } from '../../lib/requests.js'
 
 export const requests = new Hono<AppEnv>()
 
@@ -102,22 +103,7 @@ requests.post('/requests', requireViewer, async (c) => {
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
   const viewer = c.var.viewer!
   try {
-    const agent = await actorAgent(viewer)
-    const res = await agent.com.atproto.repo.putRecord({
-      repo: viewer.did,
-      collection: NSID.request,
-      rkey: tid(),
-      record: {
-        $type: NSID.request,
-        ...parsed.data,
-        status: 'open',
-        createdAt: new Date().toISOString(),
-      } as Record<string, unknown>,
-      validate: false,
-    })
-    const indexer = await getIndexer()
-    await indexer.notify(res.data.uri).catch(() => {})
-    return c.json({ uri: res.data.uri, cid: res.data.cid }, 201)
+    return c.json(await createRequest(viewer, parsed.data), 201)
   } catch (err) {
     if (err instanceof NoActorCredentialError) return c.json({ error: 'ReauthRequired' }, 401)
     throw err

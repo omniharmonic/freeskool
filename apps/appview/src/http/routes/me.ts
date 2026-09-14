@@ -35,62 +35,52 @@
  *     body before a public claim for it is written, for any session. 400
  *     `TierBConfirmRequired`.
  */
-import { normalizeImage, type StoredImage } from '../../lib/images.js'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { XRPCError } from '@atproto/api'
 import { and, desc, eq, inArray, sql } from 'drizzle-orm'
 import type { AppEnv, SessionKind } from '../session.js'
 import { requireViewer } from '../session.js'
 import { evidenceFor, roleOf } from '../../lib/roles.js'
 import { myRsvps } from '../../lib/rsvp.js'
-import { actorAgent, NoActorCredentialError } from '../../lib/actor-agent.js'
-import { NSID } from '../../lexicons/nsids.js'
-import { tid } from '../../lib/ids.js'
 import { getIndexer } from '../../index/indexer.js'
 import { getRecordByUri, listCollection } from '../../index/queries.js'
 import { getDb } from '../../db/index.js'
-import { appMeta, attendanceTally, attestation, custodialAccount, memberPrefs, skillClaimIndex } from '../../db/schema.js'
+import { appMeta, attendanceTally, attestation, custodialAccount, memberPrefs } from '../../db/schema.js'
 import { getThresholds } from '../../lib/policy.js'
-import { tierOf, type SkillTierValue } from '../../lib/skill-tiers.js'
 import { config } from '../../config.js'
+import {
+  loadDirectoryPrefs,
+  loadProfile,
+  PROFILE_KEY,
+  saveProfile,
+  type Profile,
+} from '../../lib/profile.js'
+import {
+  checkPublicClaims,
+  loadAppSideClaims,
+  resolveSkillTier,
+  setSkillClaims,
+  skillClaimRkey,
+  tierOfSkillUri,
+} from '../../lib/skill-claims.js'
+import { setChosenHandle, isHandleTaken } from '../../lib/handle-change.js'
 import { isPublicRoleOptIn, publishRoleClaim, setPublicRoleOptIn } from '../../lib/membership-claims.js'
 import { badgeSentences, type VouchCount } from '../../lib/badges.js'
 import { receivedWithAttesters, vouchCountsFor } from '../../lib/attestations.js'
 import { importBlueskyProfile } from '../../lib/bsky-profile.js'
 import { isValidChosenHandle, normalizeHandlePrefix } from '../../lib/handles.js'
-import { PdsError, resolveHandle } from '../../lib/pds.js'
+import { PdsError } from '../../lib/pds.js'
 
 export const me = new Hono<AppEnv>()
 
 me.use('*', requireViewer)
 
-/** Exported for `http/routes/events.ts`'s roster `displayName` lookup (review I3). */
-export const PROFILE_KEY = (did: string) => `profile:${did}`
-
-export interface Profile {
-  publicListing?: boolean
-  avatar?: StoredImage
-  displayName?: string
-  bio?: string
-}
-
-/** Exported for `lib/attestations.ts`-adjacent enrichment below and for tests. */
-export async function loadProfile(did: string): Promise<Profile> {
-  const rows = await getDb().select().from(appMeta).where(eq(appMeta.key, PROFILE_KEY(did))).limit(1)
-  return (rows[0]?.value as Profile | undefined) ?? {}
-}
-
 /**
- * `fs_member_prefs` row for the directory/onboarding flags — `directoryListing`
- * defaults true and `onboarded` false when the member has no row yet (see the column
- * comments on `memberPrefs` in `db/schema.ts`).
+ * The profile itself now lives in `lib/profile.ts` (so `scripts/seed-demo.ts` writes one
+ * the same way this route does). Re-exported here because `lib/bsky-profile.ts`,
+ * `lib/members.ts` and the test suites all reach for them at this path.
  */
-async function loadDirectoryPrefs(did: string): Promise<{ directoryListing: boolean; onboarded: boolean }> {
-  const rows = await getDb().select().from(memberPrefs).where(eq(memberPrefs.did, did)).limit(1)
-  const row = rows[0]
-  return { directoryListing: row?.directoryListing ?? true, onboarded: row?.onboardedAt != null }
-}
+export { PROFILE_KEY, loadProfile, type Profile }
 
 me.get('/', async (c) => {
   const did = c.var.viewer!.did
@@ -149,25 +139,8 @@ me.put('/', async (c) => {
       400,
     )
   }
-  const existing = await loadProfile(viewer.did)
-  const profile: Profile = {
-    ...existing,
-    ...(parsed.data.publicListing !== undefined ? {publicListing: parsed.data.publicListing} : {}),
-    ...(parsed.data.avatar !== undefined ? { avatar: parsed.data.avatar ? await normalizeImage(parsed.data.avatar, true) : undefined } : {}),
-    ...(parsed.data.displayName !== undefined ? { displayName: parsed.data.displayName } : {}),
-    ...(parsed.data.bio !== undefined ? { bio: parsed.data.bio } : {}),
-  }
-  await getDb()
-    .insert(appMeta)
-    .values({ key: PROFILE_KEY(viewer.did), value: profile, updatedAt: new Date() })
-    .onConflictDoUpdate({ target: appMeta.key, set: { value: profile, updatedAt: new Date() } })
-  if (parsed.data.directoryListing !== undefined) {
-    const now = new Date()
-    await getDb()
-      .insert(memberPrefs)
-      .values({ did: viewer.did, directoryListing: parsed.data.directoryListing, updatedAt: now })
-      .onConflictDoUpdate({ target: memberPrefs.did, set: { directoryListing: parsed.data.directoryListing, updatedAt: now } })
-  }
+  const { confirmPublicLinkage: _confirm, ...fields } = parsed.data
+  const profile = await saveProfile(viewer.did, fields)
   return c.json({
     did: viewer.did,
     profile: visibleProfile(profile),
@@ -220,17 +193,6 @@ me.get('/visibility-defaults', async (c) => {
  * is still the primary source `handlesForDids` checks first, and is updated unconditionally
  * on a successful change.
  */
-const HANDLE_CACHE_KEY = (did: string) => `handle:${did}`
-const HANDLE_CHANGES_KEY = (did: string) => `handle-changes:${did}`
-const HANDLE_CHANGE_LIMIT = 3
-const HANDLE_CHANGE_WINDOW_MS = 24 * 60 * 60 * 1000
-
-async function isHandleTaken(fullHandle: string): Promise<boolean> {
-  const rows = await getDb().select({ did: custodialAccount.did }).from(custodialAccount).where(eq(custodialAccount.handle, fullHandle)).limit(1)
-  if (rows.length > 0) return true
-  return (await resolveHandle(fullHandle)) != null
-}
-
 me.get('/handle/check', async (c) => {
   const prefix = normalizeHandlePrefix(c.req.query('handle') ?? '')
   const format = isValidChosenHandle(prefix)
@@ -247,66 +209,19 @@ me.get('/handle/check', async (c) => {
   }
 })
 
-/** Recent (within the last 24h) handle-change timestamps for `did`, oldest first. */
-async function recentHandleChanges(did: string): Promise<string[]> {
-  const rows = await getDb().select({ value: appMeta.value }).from(appMeta).where(eq(appMeta.key, HANDLE_CHANGES_KEY(did))).limit(1)
-  const all = Array.isArray(rows[0]?.value) ? (rows[0]!.value as string[]) : []
-  const cutoff = Date.now() - HANDLE_CHANGE_WINDOW_MS
-  return all.filter((iso) => new Date(iso).getTime() > cutoff)
-}
-
-async function recordHandleChange(did: string, recent: string[]): Promise<void> {
-  const value = [...recent, new Date().toISOString()]
-  await getDb()
-    .insert(appMeta)
-    .values({ key: HANDLE_CHANGES_KEY(did), value, updatedAt: new Date() })
-    .onConflictDoUpdate({ target: appMeta.key, set: { value, updatedAt: new Date() } })
-}
-
 const handleBody = z.object({ handle: z.string() }).strict()
 
 me.put('/handle', async (c) => {
-  const viewer = c.var.viewer!
-  if (viewer.kind !== 'custodial') return c.json({ error: 'NotCustodial' }, 403)
-
   const parsed = handleBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
-
-  const prefix = normalizeHandlePrefix(parsed.data.handle)
-  const format = isValidChosenHandle(prefix)
-  if (!format.ok) return c.json({ error: 'InvalidHandle', reason: format.reason }, 400)
-
-  const recent = await recentHandleChanges(viewer.did)
-  if (recent.length >= HANDLE_CHANGE_LIMIT) {
-    return c.json({ error: 'TooManyHandleChanges', message: `at most ${HANDLE_CHANGE_LIMIT} handle changes per day` }, 429)
+  const result = await setChosenHandle(c.var.viewer!, parsed.data.handle)
+  if (!result.ok) {
+    return c.json(
+      { error: result.error, ...(result.reason ? { reason: result.reason } : {}), ...(result.message ? { message: result.message } : {}) },
+      result.status,
+    )
   }
-
-  const fullHandle = `${prefix}.${config().handleDomain}`
-
-  try {
-    const agent = await actorAgent(viewer)
-    await agent.com.atproto.identity.updateHandle({ handle: fullHandle })
-  } catch (err) {
-    if (err instanceof XRPCError && err.error === 'HandleNotAvailable') return c.json({ error: 'HandleTaken' }, 409)
-    if (err instanceof XRPCError && err.error === 'InvalidHandle') return c.json({ error: 'InvalidHandle' }, 400)
-    // Defensive, matching the GET check's mapping: a PdsError here would mean the PDS
-    // could not be reached/answered at all, never that the handle is unavailable.
-    if (err instanceof PdsError) return c.json({ error: 'PdsUnavailable' }, 502)
-    throw err
-  }
-
-  const now = new Date()
-  await getDb()
-    .update(custodialAccount)
-    .set({ handle: fullHandle })
-    .where(eq(custodialAccount.did, viewer.did))
-  await getDb()
-    .insert(appMeta)
-    .values({ key: HANDLE_CACHE_KEY(viewer.did), value: { handle: fullHandle, resolvedAt: now.toISOString() }, updatedAt: now })
-    .onConflictDoUpdate({ target: appMeta.key, set: { value: { handle: fullHandle, resolvedAt: now.toISOString() }, updatedAt: now } })
-  await recordHandleChange(viewer.did, recent)
-
-  return c.json({ handle: fullHandle })
+  return c.json({ handle: result.handle })
 })
 
 /**
@@ -546,248 +461,29 @@ const claimsBody = z.object({
   confirmPublicLinkage: z.boolean().optional(),
 })
 
-const APP_SIDE_CLAIMS_KEY = (did: string) => `skill-claims:${did}`
-
 /**
- * The two forced-off rules, as one pure decision — testable without a session, a
- * database, or an HTTP request. `claimTiers` is the tier of every claim in THIS request
- * that asks for `visibility: 'public'`.
+ * The claim-writing core (the A6 retraction, the app-side set, `fs_skill_claim_index`)
+ * lives in `lib/skill-claims.ts` so `scripts/seed-demo.ts` writes claims the same way a
+ * member does. Re-exported here because `test/me-visibility.test.ts` and
+ * `test/skill-tiers.test.ts` import them at this path.
  */
-export function checkPublicClaims(
-  sessionKind: SessionKind,
-  claimTiers: SkillTierValue[],
-  confirmTierB: boolean,
-  confirmPublicLinkage = false,
-): { ok: true } | { ok: false; status: 400; error: string; message: string } {
-  if (claimTiers.length === 0) return { ok: true }
-  if (sessionKind === 'oauth' && !confirmPublicLinkage) {
-    return {
-      ok: false,
-      status: 400,
-      error: 'PublicLinkageConfirmRequired',
-      message: 'publishing from an existing account links it to this school permanently; resend with confirmPublicLinkage: true',
-    }
-  }
-  if (claimTiers.includes('B') && !confirmTierB) {
-    return {
-      ok: false,
-      status: 400,
-      error: 'TierBConfirmRequired',
-      message: 'this is a sensitive skill; resend with confirmTierB: true to publish it',
-    }
-  }
-  return { ok: true }
-}
-
-/**
- * FAILS CLOSED: a skill we cannot resolve a slug for (not indexed yet, or missing its
- * `id`) is treated as Tier B for the public-visibility decision — we cannot verify it is
- * safe to default-public, so we do not. `tierOf` itself still defaults an unlisted but
- * RESOLVED skill to Tier A (most skills are ordinary); this is specifically about a
- * skill we cannot look up at all. Split from `tierOfSkillUri` so the decision is testable
- * without the indexer.
- */
-export async function resolveSkillTier(skillId: string | undefined): Promise<SkillTierValue> {
-  if (!skillId) return 'B'
-  return tierOf(skillId)
-}
-
-/** The skill AT-URI's taxonomy slug (`value.id`), for a tier lookup — see `resolveSkillTier`. */
-export async function tierOfSkillUri(skillUri: string): Promise<SkillTierValue> {
-  const indexer = await getIndexer()
-  const skill = await getRecordByUri<{ id?: string }>(indexer, 'skill', skillUri)
-  return resolveSkillTier(skill?.value.id)
-}
-
-/** Cheap "is anything of mine published?", from the index. See `needsRepo` below. */
-async function hasPublishedClaim(did: string): Promise<boolean> {
-  try {
-    const indexer = await getIndexer()
-    const { records } = await listCollection(indexer, 'skillClaim', { did, limit: 1 })
-    return records.length > 0
-  } catch {
-    // Index unavailable: assume there MIGHT be something to withdraw. Failing towards
-    // "try to retract" is the right direction for a consent withdrawal.
-    return true
-  }
-}
-
-/**
- * R1: an index-based estimate of how many currently-public `skillClaim` records this
- * request could not retract, used ONLY when the repo write itself could not be attempted
- * (`NoActorCredentialError` — see `me.put('/skill-claims')` below). `keep` is the set of
- * rkeys this request wants to remain public; anything else counts as pending. A record
- * whose rkey cannot be parsed counts as pending too — the same fail-towards-caution
- * direction as `hasPublishedClaim`.
- */
-async function countPendingRetractions(did: string, keep: Set<string>): Promise<number> {
-  try {
-    const indexer = await getIndexer()
-    const { records } = await listCollection(indexer, 'skillClaim', { did, limit: 200 })
-    return records.filter((r) => {
-      const rkey = r.uri.split('/').pop()
-      return !rkey || !keep.has(rkey)
-    }).length
-  } catch {
-    return 0
-  }
-}
-
-/**
- * One claim per skill, so re-stating a level updates the existing record rather than
- * accumulating duplicates — and so that a claim can be found again in order to DELETE it
- * (A6) without keeping an app-side uri index beside the repo.
- */
-export function skillClaimRkey(skillUri: string): string {
-  return (skillUri.split('/').pop() ?? tid()).slice(0, 15)
-}
+export { checkPublicClaims, resolveSkillTier, tierOfSkillUri, skillClaimRkey }
 
 me.put('/skill-claims', async (c) => {
   const parsed = claimsBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
-  const viewer = c.var.viewer!
-  const now = new Date().toISOString()
-
-  const toPublish = parsed.data.claims.filter((x) => x.visibility === 'public')
-  if (toPublish.length > 0) {
-    const tiers = await Promise.all(toPublish.map((claim) => tierOfSkillUri(claim.skill)))
-    const check = checkPublicClaims(viewer.kind, tiers, parsed.data.confirmTierB ?? false, parsed.data.confirmPublicLinkage ?? false)
-    if (!check.ok) return c.json({ error: check.error, message: check.message }, check.status)
-  }
-
-  const published: Array<{ uri: string; skill: string; level: string }> = []
-  const retracted: string[] = []
-  // The rkeys this request wants to EXIST publicly afterwards. Anything else in the repo
-  // is consent that has been withdrawn.
-  const keep = new Set(toPublish.map((claim) => skillClaimRkey(claim.skill)))
-
-  /**
-   * R1: PERSIST THE APP-SIDE CLAIM SET FIRST, BEFORE TOUCHING THE REPO.
-   *
-   * `needsRepo` below is true whenever anything is published OR anything might need
-   * retracting — which is most saves. If the repo write then fails with a lapsed
-   * credential (`NoActorCredentialError`), that must not cost a member their school-only
-   * save: a member who only changed a 'school'-visibility claim, or who also has an
-   * unrelated stale public claim sitting in their repo, should not lose their whole save
-   * because of a credential problem that has nothing to do with what they just typed.
-   * So the app-side set is written unconditionally, before the repo is ever touched.
-   */
-  const appSide: Array<{ skill: string; level: string; note?: string }> = []
-  for (const claim of parsed.data.claims) {
-    if (claim.visibility === 'school') {
-      appSide.push({ skill: claim.skill, level: claim.level, ...(claim.note ? { note: claim.note } : {}) })
-    }
-  }
-  const indexedAt = new Date()
-  await getDb().transaction(async (tx) => {
-    await tx
-      .insert(appMeta)
-      .values({ key: APP_SIDE_CLAIMS_KEY(viewer.did), value: appSide, updatedAt: indexedAt })
-      .onConflictDoUpdate({ target: appMeta.key, set: { value: appSide, updatedAt: indexedAt } })
-
-    // `fs_skill_claim_index` is a query-only projection of the member's WHOLE claim set
-    // (public and school), rebuilt wholesale here: delete-then-insert in the same
-    // transaction as the app-side write, so the two never disagree about what was just
-    // saved. See the table's doc comment in `db/schema.ts`.
-    await tx.delete(skillClaimIndex).where(eq(skillClaimIndex.did, viewer.did))
-    if (parsed.data.claims.length > 0) {
-      await tx.insert(skillClaimIndex).values(
-        parsed.data.claims.map((claim) => ({
-          did: viewer.did,
-          skillUri: claim.skill,
-          level: claim.level,
-          visibility: claim.visibility,
-          updatedAt: indexedAt,
-        })),
-      )
-    }
-  })
-
-  /**
-   * Does this request need the member's own credential at all? Publishing obviously does;
-   * so does a RETRACTION, and a retraction is only possible if something is published. The
-   * index answers that cheaply, and answering it first is what keeps an app-side-only save
-   * ('school' visibility, nothing public, nothing to withdraw) working for a session whose
-   * OAuth authorization has lapsed — it writes no records either way.
-   */
-  const needsRepo = toPublish.length > 0 || (await hasPublishedClaim(viewer.did))
-
-  if (needsRepo) try {
-    const agent = await actorAgent(viewer)
-
-    /**
-     * A6. Read the member's OWN repo — `listRecords` on their own PDS through their own
-     * session, not the index: the index is eventually consistent, and "we could not see it,
-     * so we left it published" is the wrong way for a consent withdrawal to fail.
-     *
-     * Read BEFORE publishing, so the records written a few lines down are never candidates
-     * for their own deletion.
-     */
-    const existing = await agent.com.atproto.repo
-      .listRecords({ repo: viewer.did, collection: NSID.skillClaim, limit: 100 })
-      .then((res) => res.data.records.map((r) => r.uri))
-      .catch(() => [] as string[])
-
-    for (const claim of toPublish) {
-      const res = await agent.com.atproto.repo.putRecord({
-        repo: viewer.did,
-        collection: NSID.skillClaim,
-        rkey: skillClaimRkey(claim.skill),
-        record: {
-          $type: NSID.skillClaim,
-          skill: claim.skill,
-          level: claim.level,
-          ...(claim.note ? { note: claim.note } : {}),
-          createdAt: now,
-        } as Record<string, unknown>,
-        validate: false,
-      })
-      published.push({ uri: res.data.uri, skill: claim.skill, level: claim.level })
-    }
-
-    for (const uri of existing) {
-      const rkey = uri.split('/').pop()
-      if (!rkey || keep.has(rkey)) continue
-      await agent.com.atproto.repo
-        .deleteRecord({ repo: viewer.did, collection: NSID.skillClaim, rkey })
-        .then(() => retracted.push(uri))
-        .catch(() => {
-          /* best effort per record; the rest of the withdrawal still happens */
-        })
-    }
-
-    if (published.length > 0 || retracted.length > 0) {
-      const indexer = await getIndexer()
-      // The DELETED uris need the notify too, not just the new ones: an authoritative
-      // not-found from the PDS is what tells contrail to drop a record from the index.
-      await indexer.notify([...published.map((p) => p.uri), ...retracted]).catch(() => {})
-    }
-  } catch (err) {
-    if (err instanceof NoActorCredentialError) {
-      // R1: the app-side claim set is already saved (above, before the repo was ever
-      // touched) — this is not a failed save, it is a save that could not reach the PDS.
-      // 200, not 401: a 401 here told the UI the whole PUT failed, which discarded the
-      // school-only write that had, in fact, already happened.
-      const pendingRetractions = await countPendingRetractions(viewer.did, keep)
-      return c.json({ published, retracted, keptAppSide: appSide.length, reauthRequired: true, pendingRetractions })
-    }
-    throw err
-  }
-
-  return c.json({ published, retracted, keptAppSide: appSide.length })
+  const result = await setSkillClaims(c.var.viewer!, parsed.data)
+  if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status)
+  const { ok: _ok, ...body } = result
+  return c.json(body)
 })
 
 me.get('/skill-claims', async (c) => {
   const viewer = c.var.viewer!
   const indexer = await getIndexer()
   const res = await indexer.contrail.query('skillClaim', { did: viewer.did, limit: 200 }, indexer.db)
-  const rows = await getDb()
-    .select()
-    .from(appMeta)
-    .where(and(eq(appMeta.key, APP_SIDE_CLAIMS_KEY(viewer.did))))
-    .limit(1)
   return c.json({
     public: res.records.map((r) => ({ uri: r.uri, value: JSON.parse(r.record ?? '{}') })),
-    school: rows[0]?.value ?? [],
+    school: await loadAppSideClaims(viewer.did),
   })
 })

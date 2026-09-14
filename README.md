@@ -82,6 +82,20 @@ To act as a steward (the `/admin` screens), appoint yourself once — steward is
 STEWARD_DID=did:plc:... pnpm --filter @freeschool/appview appoint-steward
 ```
 
+### 6. Seed the demo school (optional, and the fastest way to see the whole thing)
+
+```bash
+pnpm --filter @freeschool/appview seed:demo
+```
+
+Twelve fictional members — four hosts, five learners, two facilitators-in-the-making and a steward — with profiles, identicon avatars, chosen handles, skill claims, nine classes (three recurring, two still looking for a venue, two in the past with attendance already taken, one unlisted), RSVPs, six needs-board requests with interest, ten vouches and five sets of field notes.
+
+Everything is written through the same functions the HTTP routes call — `signup()` mints real accounts on the reference PDS, classes land in their host's own repo, the school writes its own curation listings — so what you are looking at is the real thing, not fixtures. It refuses to run with `NODE_ENV=production` or against a PDS host outside `ALLOWED_PRIVATE_PDS_HOSTS`, and it is idempotent: re-running reuses every account and skips anything already there.
+
+It prints counts and one path. The path is **`apps/appview/.demo-users.json`** (gitignored — it holds addresses and DIDs), which `apps/web/e2e/personas.ts` reads so a Playwright test can `signInAs(page, 'amir')` through the real magic-link door. To sign in as one by hand, use `demo+<slug>@freeskool.test` on `/signin` and read the link out of `apps/appview/.dev-mail.log`.
+
+The hosts have to actually be allowed to host, so the seed checks the school's policy first and stops with an explanation if the hosting bar is above zero — a `pnpm e2e` run killed mid-test leaves it at 5, and `/admin/policy` is where a steward puts it back.
+
 Running a second stack beside a first (the e2e suite does this): `APPVIEW_PORT=4100 APPVIEW_PUBLIC_URL=http://localhost:4100 … pnpm --filter @freeschool/appview dev` and `APPVIEW_PROXY_TARGET=http://localhost:4100 pnpm --filter @freeschool/web dev`.
 
 **Signing in with an existing ATProto account cannot work on `http://localhost`** — a confidential OAuth client needs an `https:` `client_id` with a real hostname — so those routes answer `503 OAuthNotConfigured` locally, by design. See `apps/appview/README.md` §5. The primary door (a new Free School identity) is unaffected, and is the door the project wants people to use.
