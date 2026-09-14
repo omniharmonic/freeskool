@@ -9,6 +9,7 @@
  */
 import { AtpAgent, type AtpSessionData } from '@atproto/api'
 import { config } from '../config.js'
+import { log } from './logging.js'
 
 export class PdsError extends Error {
   constructor(
@@ -96,6 +97,12 @@ export async function searchAccountByEmail(email: string): Promise<AdminAccountS
     )
   }
   const accounts = Array.isArray(json.accounts) ? (json.accounts as Array<{ did?: string; handle?: string }>) : []
+  // REVIEW ROUND 1 (should-fix): more than one match means we cannot safely say WHICH
+  // account this email's orphan self-heal should adopt — refuse rather than guess.
+  if (accounts.length > 1) {
+    log.warn('admin.searchAccounts returned more than one match for a signup email')
+    return null
+  }
   const first = accounts[0]
   if (!first?.did || !first.handle) return null
   return { did: first.did, handle: first.handle }
@@ -117,12 +124,30 @@ export async function createAccount(input: {
   return xrpc<CreatedAccount>('com.atproto.server.createAccount', input)
 }
 
+/**
+ * `null` means "no such handle" — the ONLY thing a caller (e.g. `routes/me.ts`'s
+ * handle-availability check) may read as "available". Review round 1 (blocking): the
+ * previous version treated ANY non-ok response as "no such handle", so a PDS outage made
+ * `GET /api/me/handle/check` answer `available: true`. Now only the PDS's genuine
+ * not-found answer (400, in either spelling a real PDS uses) returns `null`; anything
+ * else non-2xx — a 5xx, a differently-shaped 400 — throws `PdsError` instead, so the
+ * caller can tell "not registered" apart from "could not ask".
+ */
 export async function resolveHandle(handle: string, base = config().PDS_URL): Promise<string | null> {
   const url = `${base.replace(/\/$/, '')}/xrpc/com.atproto.identity.resolveHandle?handle=${encodeURIComponent(handle)}`
   const res = await fetch(url)
-  if (!res.ok) return null
-  const json = (await res.json()) as { did?: string }
-  return json.did ?? null
+  if (res.ok) {
+    const json = (await res.json()) as { did?: string }
+    return json.did ?? null
+  }
+  const text = await res.text()
+  const json = text ? (JSON.parse(text) as Record<string, unknown>) : {}
+  const error = typeof json.error === 'string' ? json.error : undefined
+  const message = typeof json.message === 'string' ? json.message : undefined
+  if (res.status === 400 && (error === 'HandleNotFound' || (error === 'InvalidRequest' && message === 'Unable to resolve handle'))) {
+    return null
+  }
+  throw new PdsError(message ?? 'PDS com.atproto.identity.resolveHandle failed', res.status, error)
 }
 
 /** An authenticated agent for one actor. Callers must NOT cache the school's agent. */

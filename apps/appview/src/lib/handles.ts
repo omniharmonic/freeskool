@@ -45,11 +45,26 @@ export const RESERVED_HANDLE_PREFIXES = ['admin', 'www', 'pds', 'skills', 'bould
 
 /**
  * Pure format/reserved check for a chosen handle PREFIX (not the full `prefix.domain`
- * handle) — no DB, no PDS. `routes/me.ts` layers the actual availability check
- * (`taken`) on top of this, since that one needs I/O.
+ * handle) — no DB, no PDS. Deliberately STRICT (case-sensitive): `routes/me.ts` is the
+ * one that normalizes (`normalizeHandlePrefix`, below) before calling this, so a
+ * mobile keyboard's auto-capitalization never reads as "invalid" to the member. This
+ * function itself makes no assumption about whether its input was normalized.
+ * `routes/me.ts` layers the actual availability check (`taken`) on top of this, since
+ * that one needs I/O.
  */
 export function isValidChosenHandle(prefix: string): { ok: true } | { ok: false; reason: 'invalid' | 'reserved' } {
   if (!HANDLE_PREFIX_RE.test(prefix)) return { ok: false, reason: 'invalid' }
   if (RESERVED_HANDLE_PREFIXES.includes(prefix)) return { ok: false, reason: 'reserved' }
   return { ok: true }
+}
+
+/**
+ * Trims and lowercases a member-typed handle prefix BEFORE it reaches
+ * `isValidChosenHandle` — review round 1 (should-fix): a phone's auto-capitalized first
+ * letter (or pasted leading/trailing whitespace) must not turn an otherwise-fine prefix
+ * into "invalid". The PDS itself is case-insensitive about handles, so lowercasing here
+ * loses nothing.
+ */
+export function normalizeHandlePrefix(prefix: string): string {
+  return prefix.trim().toLowerCase()
 }

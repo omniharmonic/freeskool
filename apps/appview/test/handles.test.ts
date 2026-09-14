@@ -7,7 +7,7 @@
  * `test/me-handle.test.ts`.
  */
 import { describe, expect, it } from 'vitest'
-import { HANDLE_PREFIX_RE, isValidChosenHandle, RESERVED_HANDLE_PREFIXES } from '../src/lib/handles.js'
+import { HANDLE_PREFIX_RE, isValidChosenHandle, normalizeHandlePrefix, RESERVED_HANDLE_PREFIXES } from '../src/lib/handles.js'
 
 describe('HANDLE_PREFIX_RE', () => {
   it('matches the brief\'s exact pattern', () => {
@@ -56,5 +56,24 @@ describe('isValidChosenHandle', () => {
 
   it('accepts internal dashes', () => {
     expect(isValidChosenHandle('calm-otter')).toEqual({ ok: true })
+  })
+})
+
+describe('normalizeHandlePrefix', () => {
+  // Review round 1 (should-fix): the pure validator stays strict about case — a route
+  // is expected to normalize BEFORE calling it (see `routes/me.ts`'s `handle/check` and
+  // `PUT /handle`), so a phone's auto-capitalized first letter never reads as invalid.
+  it('lowercases, so what would otherwise be "invalid" to isValidChosenHandle becomes valid once normalized', () => {
+    expect(isValidChosenHandle('CalmOtter')).toEqual({ ok: false, reason: 'invalid' })
+    expect(normalizeHandlePrefix('CalmOtter')).toBe('calmotter')
+    expect(isValidChosenHandle(normalizeHandlePrefix('CalmOtter'))).toEqual({ ok: true })
+  })
+
+  it('trims surrounding whitespace', () => {
+    expect(normalizeHandlePrefix('  calmotter  ')).toBe('calmotter')
+  })
+
+  it('is a no-op on an already-normalized prefix', () => {
+    expect(normalizeHandlePrefix('calmotter417')).toBe('calmotter417')
   })
 })

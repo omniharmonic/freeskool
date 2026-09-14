@@ -11,6 +11,12 @@
  *     rate-limited to 3 changes per DID per 24h (429 `TooManyHandleChanges`).
  *   - `POST /api/me/onboarded` — idempotent; `GET /api/auth/me` and `GET /api/me` both
  *     reflect it.
+ *
+ * Review round 1 (blocking): `lib/pds.ts#resolveHandle` used to treat ANY non-ok PDS
+ * response as "no such handle", so an outage made the check endpoint answer
+ * `available: true`. `../src/lib/pds.js` is deliberately left UNMOCKED here — `fetch`
+ * itself is stubbed instead — so these tests exercise the real `resolveHandle` and its
+ * new 400-HandleNotFound/else-throws distinction, not a hand-rolled substitute for it.
  */
 process.env.SCHOOL_DID = 'did:plc:me-handle-test-school'
 process.env.DATABASE_URL ??= 'postgres://freeschool:freeschool@localhost:5434/freeschool'
@@ -25,20 +31,41 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import type { Context } from 'hono'
 import { XRPCError } from '@atproto/api'
 
-/** Full handles the fake PDS considers already registered — set per test. */
+type PdsResolveMode = 'notFound' | 'ok' | 'down'
+
+/** Drives the stubbed `fetch`'s `com.atproto.identity.resolveHandle` response. */
 const { pdsState } = vi.hoisted(() => ({
-  pdsState: { taken: new Set<string>(), updateError: undefined as 'HandleNotAvailable' | 'InvalidHandle' | undefined },
+  pdsState: {
+    resolveMode: 'notFound' as PdsResolveMode,
+    resolvedDid: 'did:plc:someone-else',
+    updateError: undefined as 'HandleNotAvailable' | 'InvalidHandle' | undefined,
+    updateDown: false,
+  },
 }))
 
-vi.mock('../src/lib/pds.js', async () => {
-  const actual = await vi.importActual<typeof import('../src/lib/pds.js')>('../src/lib/pds.js')
-  return {
-    ...actual,
-    async resolveHandle(handle: string) {
-      return pdsState.taken.has(handle) ? 'did:plc:someone-else' : null
-    },
-  }
-})
+const realFetch = global.fetch
+
+function fakeResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+}
+
+/**
+ * The ONLY thing stubbed on `lib/pds.ts`'s behalf: `fetch` itself. `resolveHandle` runs
+ * for real against these canned responses, so a bug in ITS 400-vs-everything-else logic
+ * would show up here exactly as it would against a live PDS.
+ */
+vi.stubGlobal(
+  'fetch',
+  vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = typeof input === 'string' ? input : input.toString()
+    if (url.includes('com.atproto.identity.resolveHandle')) {
+      if (pdsState.resolveMode === 'ok') return fakeResponse(200, { did: pdsState.resolvedDid })
+      if (pdsState.resolveMode === 'down') return fakeResponse(503, { error: 'InternalServerError', message: 'the PDS is down' })
+      return fakeResponse(400, { error: 'HandleNotFound', message: 'Unable to resolve handle' })
+    }
+    return realFetch(input, init)
+  }),
+)
 
 /** Calls the fake agent recorded, so the happy path can assert what was sent to the PDS. */
 const { agentCalls } = vi.hoisted(() => ({ agentCalls: [] as string[] }))
@@ -54,6 +81,10 @@ vi.mock('../src/lib/actor-agent.js', async () => {
             identity: {
               async updateHandle(input: { handle: string }) {
                 agentCalls.push(input.handle)
+                if (pdsState.updateDown) {
+                  const { PdsError } = await import('../src/lib/pds.js')
+                  throw new PdsError('the PDS is down', 503)
+                }
                 if (pdsState.updateError) {
                   throw new XRPCError(400, pdsState.updateError, 'rejected by the PDS')
                 }
@@ -85,8 +116,10 @@ beforeAll(async () => {
 beforeEach(async () => {
   if (!available) return
   await truncate('fs_member', 'fs_member_prefs', 'fs_custodial_account', 'fs_session', 'fs_app_meta')
-  pdsState.taken.clear()
+  pdsState.resolveMode = 'notFound'
+  pdsState.resolvedDid = 'did:plc:someone-else'
   pdsState.updateError = undefined
+  pdsState.updateDown = false
   agentCalls.length = 0
 })
 
@@ -120,9 +153,17 @@ describe('GET /api/me/handle/check', () => {
   it('reports invalid for a malformed prefix, without touching the PDS or the DB', async () => {
     if (!available) return
     const cookie = await signIn(ALICE)
-    const res = await createApp().request('/api/me/handle/check?handle=CalmOtter', { headers: { Cookie: cookie } })
+    const res = await createApp().request('/api/me/handle/check?handle=calm_otter', { headers: { Cookie: cookie } })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ available: false, reason: 'invalid' })
+  })
+
+  // Review round 1 (should-fix): mobile auto-capitalization must not read as invalid.
+  it('normalizes an uppercase/whitespace-padded prefix before validating it', async () => {
+    if (!available) return
+    const cookie = await signIn(ALICE)
+    const res = await createApp().request(`/api/me/handle/check?handle=${encodeURIComponent(' CalmOtter ')}`, { headers: { Cookie: cookie } })
+    expect(await res.json()).toEqual({ available: true })
   })
 
   it('reports reserved for a reserved prefix', async () => {
@@ -140,19 +181,30 @@ describe('GET /api/me/handle/check', () => {
     expect(await res.json()).toEqual({ available: false, reason: 'taken' })
   })
 
-  it('reports taken when the PDS resolves the handle (no local row)', async () => {
+  it('reports taken when the PDS resolves the handle, 200 (no local row)', async () => {
     if (!available) return
-    pdsState.taken.add('brightwren.test')
+    pdsState.resolveMode = 'ok'
     const cookie = await signIn(ALICE)
     const res = await createApp().request('/api/me/handle/check?handle=brightwren', { headers: { Cookie: cookie } })
     expect(await res.json()).toEqual({ available: false, reason: 'taken' })
   })
 
-  it('reports available for a well-formed, unclaimed prefix', async () => {
+  it('reports available when the PDS answers 400 HandleNotFound', async () => {
     if (!available) return
+    pdsState.resolveMode = 'notFound'
     const cookie = await signIn(ALICE)
     const res = await createApp().request('/api/me/handle/check?handle=brandnewhandle', { headers: { Cookie: cookie } })
     expect(await res.json()).toEqual({ available: true })
+  })
+
+  // Review round 1 (blocking): a PDS outage must never read as "available".
+  it('502 PdsUnavailable when the PDS answers 503, never available: true', async () => {
+    if (!available) return
+    pdsState.resolveMode = 'down'
+    const cookie = await signIn(ALICE)
+    const res = await createApp().request('/api/me/handle/check?handle=brandnewhandle', { headers: { Cookie: cookie } })
+    expect(res.status).toBe(502)
+    expect(await res.json()).toEqual({ error: 'PdsUnavailable' })
   })
 })
 
@@ -202,6 +254,40 @@ describe('PUT /api/me/handle', () => {
 
     const cacheRows = await testDb().select().from(appMeta).where(eq(appMeta.key, `handle:${ALICE}`)).limit(1)
     expect((cacheRows[0]?.value as { handle?: string } | undefined)?.handle).toBe('brandnewhandle.test')
+  })
+
+  // Review round 1 (should-fix): normalizes BEFORE validating, same as the check endpoint.
+  it('normalizes an uppercase/whitespace-padded prefix before sending it to the PDS', async () => {
+    if (!available) return
+    await addCustodial(ALICE, 'oldhandle.test')
+    const cookie = await signIn(ALICE)
+    const res = await createApp().request('/api/me/handle', {
+      method: 'PUT',
+      headers: { Cookie: cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ handle: ' CalmOtter ' }),
+    })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ handle: 'calmotter.test' })
+    expect(agentCalls).toEqual(['calmotter.test'])
+  })
+
+  // Review round 1 (blocking, mapping applied defensively here too): a PDS failure
+  // during the update itself must read as "could not reach the PDS", never a rejection.
+  it('502 PdsUnavailable when the PDS cannot be reached during the update', async () => {
+    if (!available) return
+    await addCustodial(ALICE, 'oldhandle.test')
+    pdsState.updateDown = true
+    const cookie = await signIn(ALICE)
+    const res = await createApp().request('/api/me/handle', {
+      method: 'PUT',
+      headers: { Cookie: cookie, 'content-type': 'application/json' },
+      body: JSON.stringify({ handle: 'somehandle' }),
+    })
+    expect(res.status).toBe(502)
+    expect((await res.json()) as { error: string }).toMatchObject({ error: 'PdsUnavailable' })
+
+    const rows = await testDb().select().from(custodialAccount).where(eq(custodialAccount.did, ALICE)).limit(1)
+    expect(rows[0]?.handle).toBe('oldhandle.test')
   })
 
   it('409 HandleTaken when the PDS rejects with HandleNotAvailable', async () => {

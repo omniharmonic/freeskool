@@ -58,8 +58,8 @@ import { isPublicRoleOptIn, publishRoleClaim, setPublicRoleOptIn } from '../../l
 import { badgeSentences, type VouchCount } from '../../lib/badges.js'
 import { receivedWithAttesters, vouchCountsFor } from '../../lib/attestations.js'
 import { importBlueskyProfile } from '../../lib/bsky-profile.js'
-import { isValidChosenHandle } from '../../lib/handles.js'
-import { resolveHandle } from '../../lib/pds.js'
+import { isValidChosenHandle, normalizeHandlePrefix } from '../../lib/handles.js'
+import { PdsError, resolveHandle } from '../../lib/pds.js'
 
 export const me = new Hono<AppEnv>()
 
@@ -232,12 +232,19 @@ async function isHandleTaken(fullHandle: string): Promise<boolean> {
 }
 
 me.get('/handle/check', async (c) => {
-  const prefix = c.req.query('handle') ?? ''
+  const prefix = normalizeHandlePrefix(c.req.query('handle') ?? '')
   const format = isValidChosenHandle(prefix)
   if (!format.ok) return c.json({ available: false, reason: format.reason })
   const fullHandle = `${prefix}.${config().handleDomain}`
-  if (await isHandleTaken(fullHandle)) return c.json({ available: false, reason: 'taken' })
-  return c.json({ available: true })
+  try {
+    if (await isHandleTaken(fullHandle)) return c.json({ available: false, reason: 'taken' })
+    return c.json({ available: true })
+  } catch (err) {
+    // Review round 1 (blocking): a PDS outage must never read as "available" — only a
+    // genuine not-found answer does (see `lib/pds.ts#resolveHandle`).
+    if (err instanceof PdsError) return c.json({ error: 'PdsUnavailable' }, 502)
+    throw err
+  }
 })
 
 /** Recent (within the last 24h) handle-change timestamps for `did`, oldest first. */
@@ -265,7 +272,8 @@ me.put('/handle', async (c) => {
   const parsed = handleBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
 
-  const format = isValidChosenHandle(parsed.data.handle)
+  const prefix = normalizeHandlePrefix(parsed.data.handle)
+  const format = isValidChosenHandle(prefix)
   if (!format.ok) return c.json({ error: 'InvalidHandle', reason: format.reason }, 400)
 
   const recent = await recentHandleChanges(viewer.did)
@@ -273,7 +281,7 @@ me.put('/handle', async (c) => {
     return c.json({ error: 'TooManyHandleChanges', message: `at most ${HANDLE_CHANGE_LIMIT} handle changes per day` }, 429)
   }
 
-  const fullHandle = `${parsed.data.handle}.${config().handleDomain}`
+  const fullHandle = `${prefix}.${config().handleDomain}`
 
   try {
     const agent = await actorAgent(viewer)
@@ -281,6 +289,9 @@ me.put('/handle', async (c) => {
   } catch (err) {
     if (err instanceof XRPCError && err.error === 'HandleNotAvailable') return c.json({ error: 'HandleTaken' }, 409)
     if (err instanceof XRPCError && err.error === 'InvalidHandle') return c.json({ error: 'InvalidHandle' }, 400)
+    // Defensive, matching the GET check's mapping: a PdsError here would mean the PDS
+    // could not be reached/answered at all, never that the handle is unavailable.
+    if (err instanceof PdsError) return c.json({ error: 'PdsUnavailable' }, 502)
     throw err
   }
 
