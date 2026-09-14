@@ -20,8 +20,9 @@ import { and, desc, eq, isNull } from 'drizzle-orm'
 import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireRole, requireViewer } from '../session.js'
+import { config } from '../../config.js'
 import { getDb } from '../../db/index.js'
-import { appMeta, attendance, moderationQueue, newsletterIssue } from '../../db/schema.js'
+import { appMeta, attendance, moderationQueue, newsletterIssue, skillProposal } from '../../db/schema.js'
 import { rowId, tid } from '../../lib/ids.js'
 import { bumpTally } from '../../lib/roles.js'
 import { schoolActor, schoolDid } from '../../lib/school-actor.js'
@@ -32,6 +33,12 @@ import { getRecord } from '../../lib/pds.js'
 import { addPeer, disablePeer, listPeers, probePeer } from '../../index/peers.js'
 import { getIndexer, resetIndexer } from '../../index/indexer.js'
 import { composeNewsletterIssue, sendNewsletterIssue } from '../../jobs/newsletter.js'
+import { authorityClient } from '../../lib/authority.js'
+import { skillRecords } from './skills.js'
+// `handlesForDids` lives in `me.ts` (DID -> handle, custodial account first, then the
+// index's `identities` table); `lib/members.ts` imports it from there rather than
+// duplicating it, and so do we.
+import { handlesForDids } from './me.js'
 
 export const admin = new Hono<AppEnv>()
 
@@ -389,6 +396,103 @@ admin.post('/newsletter/:id/send', async (c) => {
   const result = await sendNewsletterIssue(id)
   if (!result.ok) return c.json({ error: result.error, message: result.message }, result.status as 404 | 409)
   return c.json({ ok: true, recipientCount: result.recipientCount })
+})
+
+/* skill taxonomy (R-6: proposals publish immediately; a steward's only levers are
+ * deprecate and move) */
+
+/** `false` when the authority credential this router needs isn't configured — the
+ * same 503 shape `POST /api/skills` uses, so a steward sees the same story a member does. */
+function authorityUnconfigured(): boolean {
+  const c = config()
+  return !c.AUTHORITY_DID || !c.AUTHORITY_HANDLE || !c.AUTHORITY_PASSWORD
+}
+
+/** The path from the taxonomy root to this skill, as labels — same ancestor walk
+ * `GET /api/skills/:id` does, over the SAME already-fetched record set (one query, not
+ * one per row of the proposal queue). */
+function pathFor(byUri: Map<string, { uri: string; value: { label: string; broader?: string[] } }>, uri: string): string[] {
+  const labels: string[] = []
+  const seen = new Set<string>()
+  let cursor = byUri.get(uri)
+  while (cursor && !seen.has(cursor.uri)) {
+    labels.unshift(cursor.value.label)
+    seen.add(cursor.uri)
+    const parentUri = cursor.value.broader?.[0]
+    cursor = parentUri ? byUri.get(parentUri) : undefined
+  }
+  return labels
+}
+
+/**
+ * The proposal queue. Every `fs_skill_proposal` row, joined against the indexed record
+ * for its current label/status/path (a proposal can be deprecated or moved after the
+ * fact, and the record — not the row written at proposal time — is the truth for that).
+ * The proposer is shown as a HANDLE, never a bare DID (R9's spirit: this is a steward
+ * surface, not a public one, but there is no reason to show more than a handle here).
+ */
+admin.get('/skills/proposals', async (c) => {
+  const rows = await getDb().select().from(skillProposal).orderBy(desc(skillProposal.createdAt)).limit(200)
+  const indexer = await getIndexer()
+  const records = await skillRecords(indexer)
+  const byUri = new Map(records.map((r) => [r.uri, r]))
+  const handles = await handlesForDids(rows.map((r) => r.proposerDid))
+
+  return c.json({
+    proposals: rows.map((r) => {
+      const record = byUri.get(r.skillUri)
+      return {
+        // The web-facing id is the skill's OWN rkey (not the app-side proposal row id) —
+        // `POST /skills/:id/deprecate` and `/move` below take the same id.
+        id: record?.value.id ?? r.skillUri.split('/').pop(),
+        skillUri: r.skillUri,
+        label: record?.value.label,
+        status: record?.value.status ?? r.status,
+        path: pathFor(byUri, r.skillUri),
+        proposerHandle: handles[r.proposerDid],
+        proposedAt: r.createdAt,
+      }
+    }),
+  })
+})
+
+const deprecateBody = z.object({ replacedBy: z.string().startsWith('at://').optional() })
+
+/** `:id` is the SKILL's rkey (e.g. `bike-repair`), not the `fs_skill_proposal` row id —
+ * the proposal record above already gives the web picker that rkey as `id`. */
+admin.post('/skills/:id/deprecate', async (c) => {
+  if (authorityUnconfigured()) return c.json({ error: 'AuthorityUnavailable' }, 503)
+  const parsed = deprecateBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
+
+  const uri = `at://${config().AUTHORITY_DID}/${NSID.skill}/${c.req.param('id')}`
+  try {
+    const result = await authorityClient().deprecateSkill(uri, parsed.data.replacedBy)
+    await getDb().update(skillProposal).set({ status: 'deprecated' }).where(eq(skillProposal.skillUri, result.uri))
+    const indexer = await getIndexer()
+    await indexer.notify(result.uri)
+    return c.json({ uri: result.uri, status: 'deprecated' })
+  } catch (err) {
+    return c.json({ error: 'AuthorityError', message: err instanceof Error ? err.message : 'unknown' }, 502)
+  }
+})
+
+const moveBody = z.object({ parentUri: z.string().startsWith('at://') })
+
+admin.post('/skills/:id/move', async (c) => {
+  if (authorityUnconfigured()) return c.json({ error: 'AuthorityUnavailable' }, 503)
+  const parsed = moveBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
+
+  const uri = `at://${config().AUTHORITY_DID}/${NSID.skill}/${c.req.param('id')}`
+  try {
+    const result = await authorityClient().moveSkill(uri, parsed.data.parentUri)
+    const indexer = await getIndexer()
+    await indexer.notify(result.uri)
+    return c.json({ uri: result.uri, broader: [parsed.data.parentUri] })
+  } catch (err) {
+    return c.json({ error: 'AuthorityError', message: err instanceof Error ? err.message : 'unknown' }, 502)
+  }
 })
 
 /**
