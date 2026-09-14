@@ -33,9 +33,9 @@ import { eq } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { seriesOccurrence } from '../db/schema.js'
 import { getIndexer } from '../index/indexer.js'
-import { listCollection, parseAtUri, sidecarsForEvent } from '../index/queries.js'
-import type { EventConfig } from '../lexicons/coop.js'
-import { routeListing, schoolRoutingTags } from '../lib/events.js'
+import { getRecordByUri, listCollection, parseAtUri, sidecarsForEvent } from '../index/queries.js'
+import type { EventConfig, EventListing } from '../lexicons/coop.js'
+import { routeListing, routesOnTags, schoolRoutingTags } from '../lib/events.js'
 import { NSID } from '../lexicons/nsids.js'
 import { normalizeInstant, occurrenceRkey } from '../lib/crypto.js'
 import { schoolActor, schoolDid } from '../lib/school-actor.js'
@@ -210,18 +210,74 @@ export async function materializeSeries(
 
   const [presentation, extra] = await Promise.all([getPresentation(series.firstEvent.uri), getEventExtra(series.firstEvent.uri)])
   const routing = await templateRouting(series.firstEvent.uri)
+  // Captured here rather than read inside the closures below: TypeScript cannot keep the
+  // `if (!template) return` narrowing across a function boundary, and neither should we.
+  const templateName = String(template.value.name ?? 'class')
   // Fetched at most once per series, and only if something might actually be listed:
   // `schoolRoutingTags()` is a live read of the school's own record.
   let schoolTags: string[] | undefined
   const routingTags = async () => (schoolTags ??= await schoolRoutingTags())
+  // "Does this series route at all?", answered at most once per series. Cheap enough to
+  // ask before touching the index for every already-materialized occurrence.
+  let routes: boolean | undefined
+  const seriesRoutes = async () => {
+    if (routes === undefined) {
+      routes =
+        routing.visibility === 'listed' &&
+        routing.tags.length > 0 &&
+        routesOnTags(routing.tags, await routingTags())
+    }
+    return routes
+  }
+
+  /**
+   * REVIEW ROUND 1 (blocking). An occurrence written on an earlier tick — when the
+   * host's config sidecar had not yet reached our index, so the series could not be
+   * proven to route — is skipped by the `existing` check below before anything asks
+   * whether it should be listed. Without this, that occurrence is NEVER listed: the drop
+   * is permanent, not "until the next run".
+   *
+   * Idempotent, and it respects a steward's removal: we write a listing only when the
+   * index shows NO listing for this occurrence at all. A `removed` one is still a
+   * listing, and re-listing what a steward took down is exactly the stickiness bug
+   * `decideListingEdit` exists to prevent.
+   */
+  async function relistIfMissing(eventUri: string | null, sequence: number): Promise<void> {
+    if (!eventUri) return
+    try {
+      const indexer = await getIndexer()
+      const already = await sidecarsForEvent<EventListing>(indexer, 'eventListing', eventUri)
+      if (already.length > 0) return
+      const cid = (await getRecordByUri(indexer, 'event', eventUri))?.cid ?? (await cidFromPds(eventUri))
+      // A strongRef needs both halves; no cid means no listing rather than an invalid one.
+      if (!cid) return
+      await routeListing({
+        event: { uri: eventUri, cid },
+        name: templateName,
+        tags: routing.tags,
+        visibility: routing.visibility,
+        callerDid: seriesAuthorDid as `did:${string}`,
+        schoolTags: await routingTags(),
+        action: 'materialize-occurrence',
+        auditReason: `list occurrence ${sequence} (config indexed after it was materialized)`,
+      })
+    } catch (err) {
+      // Best effort, like the first-pass listing: the occurrence exists either way and
+      // the next tick will try again.
+      log.warn('could not back-fill an occurrence listing', { detail: describeError(err) })
+    }
+  }
   const db = getDb()
-  const existing = new Set(
+  // rkey -> the occurrence event we already wrote for it. The URI matters as much as the
+  // key: a previously materialized occurrence may still be missing its listing (see
+  // `relistIfMissing`), and that is only fixable if we know which event to list.
+  const existing = new Map(
     (
       await db
-        .select({ rkey: seriesOccurrence.occurrenceRkey })
+        .select({ rkey: seriesOccurrence.occurrenceRkey, eventUri: seriesOccurrence.eventUri })
         .from(seriesOccurrence)
         .where(eq(seriesOccurrence.seriesUri, seriesUri))
-    ).map((r) => r.rkey),
+    ).map((r) => [r.rkey, r.eventUri] as const),
   )
 
   let written = 0
@@ -238,6 +294,7 @@ export async function materializeSeries(
     const rkey = occurrenceRkey(parts.rkey, originalStartsAt)
     if (existing.has(rkey)) {
       skipped++
+      if (await seriesRoutes()) await relistIfMissing(existing.get(rkey) ?? null, i + 1)
       continue
     }
 
@@ -252,21 +309,27 @@ export async function materializeSeries(
       record: {
         $type: NSID.event,
         name: template.value.name,
-        ...(template.value.description ? { description: template.value.description } : {}),
+        // Task 19c: the record's `description` is the PUBLIC overview, taken from the
+        // template's app-side presentation — never the template record's own field,
+        // which on a class published before 19c holds the host's attendee notes. The
+        // notes and the meeting link ride along in `fs_event_extra` below instead, and
+        // `uris` is not copied at all (nothing writes it any more).
+        ...(presentation.publicOverview?.description?.trim()
+          ? { description: presentation.publicOverview.description.trim() }
+          : {}),
         createdAt: new Date().toISOString(),
         startsAt: originalStartsAt,
         ...(endsAt ? { endsAt } : {}),
         ...(template.value.mode ? { mode: template.value.mode } : {}),
         status: `${NSID.event}#scheduled`,
         ...(template.value.locations ? { locations: template.value.locations } : {}),
-        ...(template.value.uris ? { uris: template.value.uris } : {}),
         rsvpExpected: template.value.rsvpExpected ?? true,
       },
       audit: { reason: `materialize occurrence ${i + 1} of series ${parts.rkey}` },
     })
 
     await savePresentation(event.uri, presentation)
-    await setEventExtra(event.uri, extra.materials, extra.suppliesNote)
+    await setEventExtra(event.uri, extra)
 
     await schoolActor().putRecordAsSchool({
       schoolDid: schoolDid(),
@@ -289,10 +352,10 @@ export async function materializeSeries(
     // Route it to peers, as the school — through the SAME gate a directly created class
     // goes through (`lib/events.ts#routeListing`), with the template's own tags. No
     // routed tag, or an unlisted/private series, means no listing at all.
-    if (routing.tags.length > 0 && routing.visibility === 'listed') {
+    if (await seriesRoutes()) {
       await routeListing({
         event: { uri: event.uri, cid: event.cid },
-        name: String(template.value.name ?? 'class'),
+        name: templateName,
         tags: routing.tags,
         visibility: routing.visibility,
         callerDid: seriesAuthorDid as `did:${string}`,
@@ -326,6 +389,15 @@ export async function materializeSeries(
     await indexer.backfillFromPeers({ concurrency: 5 }).catch(() => {})
   }
   return { written, skipped }
+}
+
+/** The cid of a record straight from its repo, when the index has not caught up. */
+async function cidFromPds(uri: string): Promise<string | null> {
+  const parts = parseAtUri(uri)
+  if (!parts) return null
+  const endpoint = await resolvePdsEndpoint(parts.did)
+  if (!endpoint) return null
+  return (await getRecord(parts.did, parts.collection, parts.rkey, endpoint))?.cid ?? null
 }
 
 async function loadTemplate(eventUri: string) {

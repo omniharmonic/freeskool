@@ -27,6 +27,8 @@ const SERIES = `at://${HOST}/freeschool.draft.series/weekly`
 const config = vi.hoisted(() => ({
   tags: [] as string[],
   visibility: 'listed' as 'listed' | 'unlisted' | 'private',
+  /** False = the host's config sidecar has not reached our index yet (backfill lag). */
+  indexed: true,
 }))
 
 vi.mock('../src/lib/identity.js', async () => ({
@@ -57,21 +59,55 @@ vi.mock('../src/index/indexer.js', () => ({
   getIndexer: async () => ({ backfillFromPeers: async () => {} }),
 }))
 
+/**
+ * Which occurrence events the index currently sees a `coop.lexicon.event.listing` for.
+ * The fake school actor below adds to it on every listing write, so the job's
+ * "is this occurrence already listed?" question gets a truthful answer across ticks.
+ */
+const listedEvents = vi.hoisted(() => new Set<string>())
+
 vi.mock('../src/index/queries.js', async () => ({
   ...(await vi.importActual('../src/index/queries.js')),
-  sidecarsForEvent: async (_indexer: unknown, short: string) =>
-    short === 'eventConfig'
-      ? [
-          {
-            uri: `at://${HOST}/coop.lexicon.event.config/one`,
-            did: HOST,
-            collection: 'coop.lexicon.event.config',
-            rkey: 'one',
-            cid: 'bafyconfig',
-            value: { event: { uri: TEMPLATE, cid: 'bafytemplate' }, visibility: config.visibility, tags: config.tags },
-          },
-        ]
-      : [],
+  sidecarsForEvent: async (_indexer: unknown, short: string, uri: string) => {
+    if (short === 'eventConfig') {
+      // An empty config array is the "not indexed yet" case, not "no tags".
+      return config.indexed
+        ? [
+            {
+              uri: `at://${HOST}/coop.lexicon.event.config/one`,
+              did: HOST,
+              collection: 'coop.lexicon.event.config',
+              rkey: 'one',
+              cid: 'bafyconfig',
+              value: { event: { uri: TEMPLATE, cid: 'bafytemplate' }, visibility: config.visibility, tags: config.tags },
+            },
+          ]
+        : []
+    }
+    if (short === 'eventListing' && listedEvents.has(uri)) {
+      return [
+        {
+          uri: `at://did:plc:school/coop.lexicon.event.listing/${encodeURIComponent(uri)}`,
+          did: 'did:plc:school',
+          collection: 'coop.lexicon.event.listing',
+          rkey: 'x',
+          cid: 'bafylisting',
+          value: { event: { uri, cid: 'bafyoccurrence' }, school: 'did:plc:school', status: 'listed' },
+        },
+      ]
+    }
+    return []
+  },
+  // Every occurrence the school wrote is in the index with a cid, so a back-filled
+  // listing can carry a real strongRef.
+  getRecordByUri: async (_indexer: unknown, _short: string, uri: string) => ({
+    uri,
+    did: 'did:plc:school',
+    collection: 'community.lexicon.calendar.event',
+    rkey: uri.split('/').pop()!,
+    cid: 'bafyoccurrence',
+    value: {},
+  }),
 }))
 
 const { materializeSeries } = await import('../src/jobs/materialize-series.js')
@@ -91,6 +127,9 @@ function fakePort(calls: Written[]): SchoolActorPort {
     },
     async putRecordAsSchool(i) {
       calls.push({ collection: i.collection, record: i.record as Record<string, unknown> })
+      if (i.collection === 'coop.lexicon.event.listing') {
+        listedEvents.add((i.record as { event: { uri: string } }).event.uri)
+      }
       return {
         uri: `at://did:plc:school/${i.collection}/${i.rkey}`,
         cid: `bafy-${calls.length}`,
@@ -126,6 +165,8 @@ beforeEach(async () => {
   await truncate('fs_series_occurrence', 'fs_app_meta', 'fs_event_extra', 'fs_feedback_window')
   config.tags = []
   config.visibility = 'listed'
+  config.indexed = true
+  listedEvents.clear()
 })
 
 afterEach(() => setSchoolActor(undefined))
@@ -173,6 +214,65 @@ describe('materialized occurrences obey the same tag gate as a directly created 
       expect(l.record.status).toBe('listed')
       expect((l.record.event as { uri: string; cid: string }).cid).toBeTruthy()
     }
+  })
+
+  /**
+   * REVIEW ROUND 1, blocking. An occurrence already in `fs_series_occurrence` is skipped
+   * early, so an occurrence materialized while the host's `coop.lexicon.event.config`
+   * had not yet reached our index (fresh series, backfill lag) used to lose its listing
+   * PERMANENTLY: the next tick skipped it before ever asking whether it routes. The
+   * listing has to be back-filled on a later tick, exactly once.
+   */
+  it('back-fills the listing on a later tick once the routing config is indexed, and never twice', async () => {
+    if (!available) return
+
+    // Tick 1: the config sidecar is not in the index yet. Occurrences are written; the
+    // series cannot be proven to route, so nothing is listed.
+    config.indexed = false
+    config.tags = ['skillshare']
+    const first: Written[] = []
+    const tick1 = await run(first)
+    expect(tick1.written).toBeGreaterThan(0)
+    expect(listings(first)).toEqual([])
+    const occurrenceUris = occurrences(first).map((_, i) => i)
+    expect(occurrenceUris.length).toBe(tick1.written)
+
+    // The config reaches the index.
+    config.indexed = true
+
+    // Tick 2: nothing new to materialize — and the listings appear anyway.
+    const second: Written[] = []
+    const tick2 = await run(second)
+    expect(tick2.written).toBe(0)
+    expect(tick2.skipped).toBeGreaterThan(0)
+    const backfilled = listings(second)
+    expect(backfilled.length).toBe(tick1.written)
+    for (const l of backfilled) {
+      expect(l.record.tags).toEqual(['skillshare'])
+      expect(l.record.status).toBe('listed')
+      const ref = l.record.event as { uri: string; cid: string }
+      expect(ref.uri).toContain('community.lexicon.calendar.event')
+      expect(ref.cid).toBe('bafyoccurrence')
+    }
+    // One listing per occurrence, never two for the same one.
+    expect(new Set(backfilled.map((l) => (l.record.event as { uri: string }).uri)).size).toBe(backfilled.length)
+
+    // Tick 3: idempotent — the occurrences are listed, so nothing more is written.
+    const third: Written[] = []
+    await run(third)
+    expect(listings(third)).toEqual([])
+  })
+
+  it('never back-fills a listing for a series that does not route', async () => {
+    if (!available) return
+    config.indexed = false
+    config.tags = ['knitting']
+    const first: Written[] = []
+    expect((await run(first)).written).toBeGreaterThan(0)
+    config.indexed = true
+    const second: Written[] = []
+    await run(second)
+    expect(listings(second)).toEqual([])
   })
 
   it('an unlisted series is never listed, even when its tags route', async () => {
