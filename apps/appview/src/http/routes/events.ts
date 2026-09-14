@@ -6,6 +6,7 @@
  *   GET    /events/:id              one event, projected for the viewer
  *   GET    /events/:id.ics          text/calendar, as an attachment
  *   POST   /events/:id/attendance   the host attests who took part (app-side)
+ *   POST   /events/:id/cancel       the host calls the class off (status, never a delete)
  *
  * `:id` is a URL-encoded AT-URI. An AppView-local opaque id would be prettier but would
  * also be a second namespace to keep in sync; the AT-URI is already the identity.
@@ -18,12 +19,16 @@ import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireViewer, requireRole } from '../session.js'
 import {
+  cancelEventAsHost,
   canViewRoster,
   createEventAsHost,
   EventNotFoundError,
   EventPermissionError,
+  isCancelledStatus,
+  NotRecurringError,
   OccurrenceNotEditableError,
-  resolveHostDid,
+  hostOfSeries,
+  seriesUriForOccurrence,
   SeriesEditNotSupportedError,
   updateEventAsHost,
 } from '../../lib/events.js'
@@ -159,6 +164,47 @@ events.put('/events/:id', requireViewer, async (c) => {
   }
 })
 
+/**
+ * `POST /api/events/:id/cancel` — the host calls a class off.
+ *
+ * Weather, illness, a venue that fell through: a free school cancels classes constantly,
+ * and before this the only thing a host could do with a class that was not happening was
+ * edit its description and hope. See `lib/events.ts#cancelEventAsHost` for what it writes
+ * (a `status`, never a delete) and what it deliberately does not (the reason, which is
+ * app-side).
+ *
+ * Host only. A steward acts through moderation (`remove-listing`), which takes the class
+ * off OUR calendar without declaring somebody else's class cancelled in their own repo.
+ */
+const cancelBody = z.object({
+  /** App-side only — see the route's doc comment. */
+  reason: z.string().trim().max(2000).optional(),
+  scope: z.enum(['this', 'following']).optional(),
+})
+
+events.post('/events/:id/cancel', requireViewer, async (c) => {
+  const uri = decodeURIComponent(c.req.param('id'))
+  const parsed = cancelBody.safeParse(await c.req.json().catch(() => ({})))
+  if (!parsed.success) {
+    return c.json({ error: 'InvalidRequest', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400)
+  }
+  try {
+    return c.json(await cancelEventAsHost(c.var.viewer!, uri, parsed.data))
+  } catch (err) {
+    if (err instanceof EventNotFoundError) return c.json({ error: 'NotFound' }, 404)
+    if (err instanceof EventPermissionError) {
+      return c.json({ error: 'PermissionDenied', message: 'only the host of a class may cancel it' }, 403)
+    }
+    if (err instanceof NotRecurringError) {
+      return c.json({ error: 'NotRecurring', message: err.message }, 400)
+    }
+    if (err instanceof NoActorCredentialError) {
+      return c.json({ error: 'ReauthRequired', message: 'sign in again before cancelling your class' }, 401)
+    }
+    throw err
+  }
+})
+
 events.get('/events/:id{.+\\.ics}', async (c) => {
   const raw = c.req.param('id')
   const uri = decodeURIComponent(raw.replace(/\.ics$/, ''))
@@ -231,6 +277,15 @@ events.get('/events/:id', async (c) => {
     skills: loaded.skillLevels,
     materials: loaded.extra.materials,
     ...(loaded.extra.suppliesNote ? { suppliesNote: loaded.extra.suppliesNote } : {}),
+    // App-side, and released to anyone who can already see the class: a cancellation
+    // nobody can read the reason for sends people to a locked door. `status` on the
+    // record says THAT it was cancelled; this says why. (`projectEvent` is not the place
+    // — that gates on the address predicate, and this is not attendee-only.)
+    ...(loaded.extra.cancelReason ? { cancelledReason: loaded.extra.cancelReason } : {}),
+    // Does "this one, or this and the ones after it?" even apply to this class? The
+    // client cannot tell a one-off from a recurring date otherwise, and offering that
+    // choice on a class with nothing following it is a question with no answer.
+    recurring: Boolean(loaded.series || loaded.occurrenceOf),
     // Counts only. Never the roster.
     rsvps: await rsvpCounts(uri),
     viewerRelation: relation,
@@ -347,6 +402,12 @@ events.post('/events/:id/attendance', requireViewer, async (c) => {
   if (loaded.hostDid !== viewer.did) {
     return c.json({ error: 'PermissionDenied', message: 'only the host of a class may attest attendance' }, 403)
   }
+  // A cancelled class did not happen, so nobody came to it: attesting attendance here
+  // would credit real attended-class counts (and, through `deriveRole`, real standing)
+  // for a class that was called off.
+  if (isCancelledStatus(loaded.event.status)) {
+    return c.json({ error: 'EventCancelled', message: 'this class was cancelled, so there is no attendance to record' }, 400)
+  }
   const parsed = attendanceBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
 
@@ -389,7 +450,10 @@ export interface LoadedEvent {
   inputs: { listings: EventListing[]; configs: EventConfig[] }
   listed: boolean
   skillLevels: Array<{ skill: string; level: number; prerequisites?: string }>
+  /** The series sidecar, when this event is the series' own FIRST event. */
   series?: { rrule?: string; exdates?: string[] }
+  /** The series this event is a materialized OCCURRENCE of, when it is one. */
+  occurrenceOf?: string
   extra: EventExtra
 }
 
@@ -397,11 +461,12 @@ export async function loadEvent(uri: string): Promise<LoadedEvent | null> {
   const indexer = await getIndexer()
   const row = await getRecordByUri(indexer, 'event', uri)
   if (!row) return null
-  const [listings, configs, skills, seriesRows, extra] = await Promise.all([
+  const [listings, configs, skills, seriesRows, occurrenceOf, extra] = await Promise.all([
     sidecarsForEvent<EventListing>(indexer, 'eventListing', uri),
     sidecarsForEvent<EventConfig>(indexer, 'eventConfig', uri),
     sidecarsForEvent<{ skill: string; level: number; prerequisites?: string }>(indexer, 'skillLevel', uri),
     sidecarsForEvent<{ rrule?: string; exdates?: string[] }>(indexer, 'series', uri, 'firstEvent.uri'),
+    seriesUriForOccurrence(uri),
     getEventExtra(uri),
   ])
   const inputs = { listings: listings.map((l) => l.value), configs: configs.map((x) => x.value) }
@@ -409,7 +474,7 @@ export async function loadEvent(uri: string): Promise<LoadedEvent | null> {
   // series author. Everything downstream of `LoadedEvent.hostDid` — the roster gate, the
   // attendance gate, `viewerRelation`, the raw-visibility field, the feedback notification
   // — therefore gets the right person for free.
-  const hostDid = await resolveHostDid(uri, row.did)
+  const hostDid = hostOfSeries(occurrenceOf, row.did)
   return {
     hostDid,
     event: toCalendarEvent(uri, hostDid, row.value),
@@ -417,6 +482,7 @@ export async function loadEvent(uri: string): Promise<LoadedEvent | null> {
     listed: isListed(inputs),
     skillLevels: skills.map((s) => s.value),
     ...(seriesRows[0] ? { series: seriesRows[0].value } : {}),
+    ...(occurrenceOf ? { occurrenceOf } : {}),
     extra,
   }
 }

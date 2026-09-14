@@ -13,6 +13,10 @@ import { getEventExtra, setEventExtra } from '../lib/event-extra.js'
  *     open-ended `FREQ=YEARLY` cannot write unbounded records (the CEILING);
  *   - `exdates` are removed from the expansion, not cancelled after the fact — a skipped
  *     week should never have existed;
+ *   - `until` ENDS the series: nothing at or after it is ever planned, however far the
+ *     window later moves. That is what "cancel this and all following dates"
+ *     (`lib/events.ts#cancelEventAsHost`) writes, and a series whose end date is only in
+ *     its `exdates` would quietly come back to life the next time the horizon widened;
  *   - the rkey is `hash(series rkey + originalStartsAt)` so a re-run, or two workers, or a
  *     widened window, all converge on the same records instead of duplicating them.
  *
@@ -80,7 +84,7 @@ export interface SeriesRecord {
  * DST boundary never shifts "7pm Thursday" to 6pm or 8pm.
  */
 export function plannedOccurrences(
-  series: Pick<SeriesRecord, 'rrule' | 'exdates' | 'materializeAhead' | 'timezone'>,
+  series: Pick<SeriesRecord, 'rrule' | 'exdates' | 'materializeAhead' | 'timezone' | 'until'>,
   dtstart: Date,
   now = new Date(),
 ): Date[] {
@@ -99,7 +103,16 @@ export function plannedOccurrences(
   const candidates = rule.all((_d, i) => i < 500).map((d) => fromFloatingLocal(d, zone))
 
   const excluded = new Set((series.exdates ?? []).map((d) => safeNormalize(d)).filter(Boolean))
-  const usable = candidates.filter((d) => d <= ceiling && !excluded.has(normalizeInstant(d.toISOString())))
+  // `until` is a real instant compared against real instants — deliberately NOT folded
+  // into the rrule string, whose own UNTIL would be matched against the FLOATING local
+  // dates this expansion works in and would therefore be wrong by the zone's offset.
+  const until = series.until ? Date.parse(series.until) : Number.NaN
+  const usable = candidates.filter(
+    (d) =>
+      d <= ceiling &&
+      !excluded.has(normalizeInstant(d.toISOString())) &&
+      (Number.isNaN(until) || d.getTime() < until),
+  )
 
   const withinHorizon = usable.filter((d) => d <= horizon)
   if (withinHorizon.length >= MIN_OCCURRENCES) return withinHorizon
@@ -335,7 +348,10 @@ export async function materializeSeries(
     })
 
     await savePresentation(event.uri, presentation)
-    await setEventExtra(event.uri, extra)
+    // Everything the template carries for its attendees, EXCEPT why the template itself
+    // was called off — a fresh date is not cancelled.
+    const { cancelReason: _templateCancelReason, ...occurrenceExtra } = extra
+    await setEventExtra(event.uri, occurrenceExtra)
 
     await schoolActor().putRecordAsSchool({
       schoolDid: schoolDid(),

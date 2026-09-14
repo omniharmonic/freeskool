@@ -62,6 +62,7 @@ vi.mock('../lib/api', () => {
     api: {
       events: {
         get: vi.fn(),
+        cancel: vi.fn(),
         icsHref: (id: string) => `/api/events/${encodeURIComponent(id)}.ics`,
       },
       auth: { me: vi.fn() },
@@ -130,6 +131,14 @@ describe('EventScreen', () => {
       .mockResolvedValue({ ok: true, status: 'going', alsoPublicRecord: false, counts: { going: 3, interested: 1 } });
     vi.mocked(api.rsvp.clear).mockReset().mockResolvedValue({ ok: true, counts: { going: 1, interested: 1 } });
     vi.mocked(api.members.get).mockReset().mockRejectedValue(new ApiError(404, 'NotFound', 'not in the directory'));
+    vi.mocked(api.events.cancel).mockReset().mockResolvedValue({
+      event: { uri: EVENT_URI, cid: 'bafycancelled' },
+      status: 'community.lexicon.calendar.event#cancelled',
+      scope: 'this',
+      alsoCancelled: [],
+      exdatesAdded: 0,
+      notified: 1,
+    });
   });
 
   it('names the host and links to their profile for a signed-in member', async () => {
@@ -453,6 +462,99 @@ describe('EventScreen', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not save your RSVP');
     expect(vi.mocked(useInstallFlow).mock.results[0]!.value.afterRsvp).not.toHaveBeenCalled();
     expect(screen.getByRole('button', { name: "I'll be there" })).toBeEnabled();
+  });
+
+  /**
+   * UX audit finding 5. The edit screen tells hosts "to reshape a series, cancel it
+   * and post a new one" and there was no cancel control anywhere — so a host whose
+   * class was snowed out could only edit it forever.
+   */
+  describe('cancelling a class', () => {
+    it('offers the host a cancel action, and nobody else', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host' });
+      renderScreen();
+      expect(await screen.findByRole('button', { name: 'Cancel this class' })).toBeInTheDocument();
+    });
+
+    it('shows no cancel action to an ordinary viewer', async () => {
+      renderScreen();
+      await screen.findByRole('heading', { name: 'Sourdough basics' });
+      expect(screen.queryByRole('button', { name: 'Cancel this class' })).not.toBeInTheDocument();
+    });
+
+    it('confirms first, then calls the API with the reason the host typed', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host' });
+      renderScreen();
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel this class' }));
+      expect(api.events.cancel).not.toHaveBeenCalled();
+
+      fireEvent.change(screen.getByLabelText(/why, in a sentence/i), { target: { value: 'Snowed out.' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel the class' }));
+
+      await waitFor(() =>
+        expect(api.events.cancel).toHaveBeenCalledWith(EVENT_URI, { reason: 'Snowed out.' }),
+      );
+    });
+
+    it('sends no reason when the host does not write one', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host' });
+      renderScreen();
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel this class' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel the class' }));
+      await waitFor(() => expect(api.events.cancel).toHaveBeenCalledWith(EVENT_URI, {}));
+    });
+
+    it('asks "this one, or this and the ones after it?" only for a recurring class', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host', recurring: true });
+      renderScreen();
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel this class' }));
+
+      fireEvent.click(screen.getByLabelText('This date and every one after it'));
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel the class' }));
+
+      await waitFor(() => expect(api.events.cancel).toHaveBeenCalledWith(EVENT_URI, { scope: 'following' }));
+    });
+
+    it('does not offer the scope choice for a one-off class', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host' });
+      renderScreen();
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel this class' }));
+      expect(screen.queryByLabelText('This date and every one after it')).not.toBeInTheDocument();
+    });
+
+    it('keeps the host on the page with a way back when the cancel fails', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({ ...baseEvent, viewerRelation: 'host' });
+      vi.mocked(api.events.cancel).mockRejectedValueOnce(new Error('offline'));
+      renderScreen();
+      fireEvent.click(await screen.findByRole('button', { name: 'Cancel this class' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel the class' }));
+      expect(await screen.findByRole('alert')).toHaveTextContent('Could not cancel this class');
+    });
+
+    it('shows the cancelled banner with the host\'s reason, and disables the RSVP buttons', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({
+        ...baseEvent,
+        status: 'community.lexicon.calendar.event#cancelled',
+        cancelledReason: 'The host has the flu.',
+      });
+      renderScreen();
+      expect(await screen.findByText(/this class has been cancelled/i)).toBeVisible();
+      expect(screen.getByText('From the host: The host has the flu.')).toBeVisible();
+      expect(await screen.findByRole('button', { name: "I'll be there" })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'Interested' })).toBeDisabled();
+    });
+
+    it('offers no cancel action on a class that is already cancelled', async () => {
+      vi.mocked(api.events.get).mockResolvedValue({
+        ...baseEvent,
+        viewerRelation: 'host',
+        status: 'community.lexicon.calendar.event#cancelled',
+      });
+      renderScreen();
+      await screen.findByText(/this class has been cancelled/i);
+      expect(screen.queryByRole('button', { name: 'Cancel this class' })).not.toBeInTheDocument();
+    });
   });
 
 });

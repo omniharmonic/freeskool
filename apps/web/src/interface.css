@@ -116,6 +116,8 @@ input[type='checkbox'][switch] { width: 51px; height: 31px; }
 .event-host-tools { margin-top: 30px; padding: 24px; background: var(--c-paper-2); border: 1px solid var(--c-rule); border-radius: 10px; }
 .event-host-tools h2 { margin-bottom: 16px; font-size: 21px; font-weight: 600; }
 .event-notice { padding: 16px 20px; border-left: 3px solid var(--c-blue); background: var(--c-notice); font-size: 15px; margin-bottom: 20px; }
+.cancel-class { color: var(--c-danger); }
+.cancel-class:hover:not(:disabled) { border-color: var(--c-danger); }
 /* Editorial forms: sections have room to breathe, and publish stays clearly separated. */
 .class-editor { display: grid; gap: 22px; }.class-editor > div:has(.section-heading), .editor-opening { padding: 28px; border: 1px solid var(--c-rule); border-radius: 10px; background: var(--c-paper-2); }
 .editor-opening textarea { min-height: 130px; }.editor-opening input { font-family: var(--font-display); font-size: 22px !important; }

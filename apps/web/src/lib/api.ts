@@ -36,6 +36,8 @@ import type {
   AuthMe,
   CalendarResponse,
   CreateEventInput,
+  CancelEventInput,
+  CancelEventResult,
   CreateEventResult,
   CreateRequestInput,
   EventDetail,
@@ -221,6 +223,14 @@ export const api = {
      * `SeriesEditNotSupported` (see `EventEditScreen.tsx`'s doc comment). */
     update: (id: string, body: Omit<Partial<CreateEventInput>, 'series'>) =>
       put<UpdateEventResult>(`/api/events/${encodeURIComponent(id)}`, body),
+    /**
+     * The host calls a class off. The class is never deleted — the record keeps
+     * `status: …#cancelled` so anyone who RSVP'd still finds it and learns why
+     * — and `reason` stays app-side on the AppView, never on a record.
+     * `scope: 'following'` also ends the series from this date on.
+     */
+    cancel: (id: string, body: CancelEventInput = {}) =>
+      post<CancelEventResult>(`/api/events/${encodeURIComponent(id)}/cancel`, body),
     icsHref: (id: string): string => `/api/events/${encodeURIComponent(id)}.ics`,
     /** Host-or-steward-only roster (`GET /api/events/:id/rsvps`) — 403s for
      * anyone else. The route returns the array directly, not wrapped. */

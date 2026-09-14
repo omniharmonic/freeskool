@@ -11,7 +11,15 @@ import { SessionGate } from '../components/SessionGate';
 import { useInstallFlow } from '../components/InstallNudge';
 import { api, ApiError } from '../lib/api';
 import { formatDayStamp, formatTime, formatTimeRange } from '../lib/dates';
-import { useEvent, useMe, useMemberProfile, useMyRsvp, useRsvpClearMutation, useRsvpMutation } from '../lib/queries';
+import {
+  useCancelEventMutation,
+  useEvent,
+  useMe,
+  useMemberProfile,
+  useMyRsvp,
+  useRsvpClearMutation,
+  useRsvpMutation,
+} from '../lib/queries';
 import type { EventDetail, EventLocation, SkillLevelRef } from '../lib/types';
 
 /** Verbatim from the plan's global constraints — do not paraphrase. */
@@ -99,7 +107,15 @@ export function EventScreen() {
   return (
     <Screen title={event.name} layout="detail" back>
       <div className="safe-x">
-        {cancelled ? <p className="event-notice" role="status">This class has been cancelled. Check the calendar for other ways to learn together.</p> : null}
+        {cancelled ? (
+          <div className="event-notice" role="status">
+            <p>This class has been cancelled. Check the calendar for other ways to learn together.</p>
+            {/* App-side on the AppView, never on the public record — the record says
+                only that the class was cancelled. A cancellation nobody can read the
+                reason for sends people looking for an explanation that isn't there. */}
+            {event.cancelledReason ? <p className="mt-3">From the host: {event.cancelledReason}</p> : null}
+          </div>
+        ) : null}
         <a href="#class-details" className="event-jump context-link">Time, place &amp; RSVP ↓</a>
         <ClassHero cover={event.cover} name={event.name} />
         <div className="event-layout">
@@ -129,7 +145,9 @@ export function EventScreen() {
               <Link to="/events/$id/edit" params={{id:event.uri}} className="fs-button fs-button-quiet">Edit this class</Link>
               <Link to="/events/$id/attendance" params={{id:event.uri}} className="fs-button fs-button-quiet">Check off attendance</Link>
               <Link to="/events/$id/feedback-summary" params={{id:event.uri}} className="fs-button fs-button-quiet col-span-2">See feedback summary</Link>
-            </div></section> : null}
+            </div>
+            {cancelled ? null : <CancelClassAction event={event} />}
+            </section> : null}
           </div>
           <aside id="class-details" className="event-rail" aria-label="Class details and RSVP">
             <p className="event-cost">Always free <span>·</span> {event.mode?.endsWith('#virtual') ? 'Online' : event.mode?.endsWith('#hybrid') ? 'In person + online' : 'In person'}</p>
@@ -179,6 +197,108 @@ function HostLine({ did }: { did: string }) {
         </Link>
       </p>
     </>
+  );
+}
+
+
+/**
+ * "Cancel this class" — the control UX audit finding 5 says is missing everywhere.
+ *
+ * A free school cancels classes constantly (weather, illness, a venue that fell
+ * through), the edit screen already tells hosts "to reshape a series, cancel it
+ * and post a new one", and until now there was no way to do it: a host who
+ * posted the wrong thing could only edit it forever.
+ *
+ * Cancelling never deletes the class. The AppView writes `status: #cancelled` on
+ * the host's own record and keeps everything else, so someone who RSVP'd still
+ * finds the page, sees the banner, and reads the reason instead of turning up to
+ * a locked door. The reason itself stays app-side — it is shown to people who
+ * can see the class and is never written to any record.
+ */
+function CancelClassAction({ event }: { event: EventDetail }) {
+  const cancelMutation = useCancelEventMutation();
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [scope, setScope] = useState<'this' | 'following'>('this');
+  const [error, setError] = useState<string | null>(null);
+
+  const onConfirm = () => {
+    setError(null);
+    cancelMutation.mutate(
+      {
+        id: event.uri,
+        body: {
+          ...(reason.trim() ? { reason: reason.trim() } : {}),
+          ...(event.recurring ? { scope } : {}),
+        },
+      },
+      {
+        onSuccess: () => setOpen(false),
+        onError: () => setError('Could not cancel this class. Check your connection and try again.'),
+      },
+    );
+  };
+
+  return (
+    <div className="mt-4">
+      <button type="button" className="fs-button fs-button-quiet cancel-class" onClick={() => setOpen(true)}>
+        Cancel this class
+      </button>
+      <Sheet open={open} onClose={() => setOpen(false)} title="Cancel this class?">
+        <p className="text-body">
+          The class stays on the calendar marked cancelled, so nobody turns up to a closed door. Everyone who
+          RSVP'd is told.
+        </p>
+        {event.recurring ? (
+          <fieldset className="mt-5">
+            <legend className="text-caption text-ink-soft">How much of the series?</legend>
+            <label className="mt-2 flex items-center gap-2 text-body">
+              <input
+                type="radio"
+                name="cancel-scope"
+                value="this"
+                checked={scope === 'this'}
+                onChange={() => setScope('this')}
+              />
+              Just this date
+            </label>
+            <label className="mt-2 flex items-center gap-2 text-body">
+              <input
+                type="radio"
+                name="cancel-scope"
+                value="following"
+                checked={scope === 'following'}
+                onChange={() => setScope('following')}
+              />
+              This date and every one after it
+            </label>
+          </fieldset>
+        ) : null}
+        <label className="mt-5 block text-caption text-ink-soft">
+          Why, in a sentence (optional)
+          <textarea
+            className="mt-2 w-full px-3 py-2"
+            rows={3}
+            maxLength={2000}
+            value={reason}
+            onChange={e => setReason(e.currentTarget.value)}
+            placeholder="Snowed out. We'll post a new date."
+          />
+        </label>
+        <p className="mt-2 text-caption text-ink-soft">
+          The people who can see this class will read this. It is never written to a public record.
+        </p>
+        {error ? <p role="alert" className="mt-3">{error}</p> : null}
+        <div className="mt-5 flex gap-3 pb-1">
+          <Button ink="pink" onClick={onConfirm} disabled={cancelMutation.isPending}>
+            {cancelMutation.isPending ? 'Cancelling…' : 'Cancel the class'}
+          </Button>
+          <Button ink="ink" variant="quiet" onClick={() => setOpen(false)}>
+            Keep it
+          </Button>
+        </div>
+      </Sheet>
+    </div>
   );
 }
 

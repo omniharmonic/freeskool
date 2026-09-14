@@ -12,6 +12,7 @@ import type {
   AdminPolicyInput,
   AttestationInput,
   AttendanceRow,
+  CancelEventInput,
   CreateEventInput,
   CreateRequestInput,
   FeedbackInput,
@@ -518,6 +519,24 @@ export function useUpdateEventMutation() {
   return useMutation({
     mutationFn: ({ id, body }: { id: string; body: Omit<Partial<CreateEventInput>, 'series'> }) =>
       api.events.update(id, body),
+    onSuccess: (_data, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ['event', variables.id] });
+      void queryClient.invalidateQueries({ queryKey: ['calendar'] });
+    },
+  });
+}
+
+/**
+ * The host calls a class off (`POST /api/events/:id/cancel`).
+ *
+ * Invalidates the class itself AND the calendar: a cancelled class stays on both
+ * — the record is never deleted — but it now reads as cancelled, and a stale
+ * cache would keep showing people a class that is not happening.
+ */
+export function useCancelEventMutation() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, body }: { id: string; body?: CancelEventInput }) => api.events.cancel(id, body),
     onSuccess: (_data, variables) => {
       void queryClient.invalidateQueries({ queryKey: ['event', variables.id] });
       void queryClient.invalidateQueries({ queryKey: ['calendar'] });

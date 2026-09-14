@@ -24,6 +24,12 @@ export interface EventExtra {
   attendeeNotes?: string
   /** Shown only to the host, a steward, or someone who has RSVP'd. */
   meetingLink?: string
+  /**
+   * Why the host called the class off. Shown to EVERYONE who can see the class — a
+   * cancellation nobody can read the reason for sends people to a locked door — but it
+   * never reaches a record: the public record says `status: #cancelled` and no more.
+   */
+  cancelReason?: string
 }
 
 export async function getEventExtra(eventUri: string): Promise<EventExtra> {
@@ -34,6 +40,7 @@ export async function getEventExtra(eventUri: string): Promise<EventExtra> {
     ...(row?.suppliesNote ? { suppliesNote: row.suppliesNote } : {}),
     ...(row?.attendeeNotes ? { attendeeNotes: row.attendeeNotes } : {}),
     ...(row?.meetingLink ? { meetingLink: row.meetingLink } : {}),
+    ...(row?.cancelReason ? { cancelReason: row.cancelReason } : {}),
   }
 }
 
@@ -45,6 +52,7 @@ export async function setEventExtra(eventUri: string, value: EventExtra): Promis
     suppliesNote: value.suppliesNote ?? null,
     attendeeNotes: value.attendeeNotes ?? null,
     meetingLink: value.meetingLink ?? null,
+    cancelReason: value.cancelReason ?? null,
   }
   await getDb()
     .insert(eventExtra)

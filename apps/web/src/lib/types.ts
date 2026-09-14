@@ -185,6 +185,15 @@ export interface EventDetail extends CalendarEvent {
    * public fact.
    */
   visibility?: 'listed' | 'unlisted' | 'private';
+  /**
+   * Why the host called the class off. App-side on the AppView
+   * (`fs_event_extra.cancel_reason`) and never on any public record — the record
+   * carries only `status: …#cancelled`. Present to anyone who can see the class.
+   */
+  cancelledReason?: string;
+  /** True when this class is part of a recurring series — so "this one, or this
+   * and the ones after it?" is a question worth asking when cancelling. */
+  recurring?: boolean;
 }
 
 export interface EventSeriesInput {
@@ -255,6 +264,26 @@ export interface UpdateEventResult {
   listing?: { uri: string; cid: string };
   skillLevels?: Array<{ uri: string; cid: string }>;
   unlisted?: boolean;
+}
+
+/** `POST /api/events/:id/cancel`. `reason` is app-side only; `scope: 'following'`
+ * is accepted only for a class that belongs to a recurring series. */
+export interface CancelEventInput {
+  reason?: string;
+  scope?: 'this' | 'following';
+}
+
+/** Mirrors `CancelledEvent` in `apps/appview/src/lib/events.ts`. `unlisted` is
+ * false when withdrawing the school's listing needs a steward, and absent when
+ * there was no listing of ours to withdraw. */
+export interface CancelEventResult {
+  event: { uri: string; cid: string };
+  status: string;
+  scope: 'this' | 'following';
+  unlisted?: boolean;
+  alsoCancelled: string[];
+  exdatesAdded: number;
+  notified: number;
 }
 
 // ── rsvp ─────────────────────────────────────────────────────────────────

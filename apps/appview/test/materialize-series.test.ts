@@ -76,3 +76,45 @@ describe('plannedOccurrences — BYDAY expands on wall-clock in the series timez
     }
   })
 })
+
+/**
+ * `until` is how "cancel this date and every one after it" ends a series
+ * (`lib/events.ts#cancelEventAsHost`). It has to be enforced HERE, in the expansion,
+ * not merely written onto the sidecar: the `exdates` that go with it only cover the
+ * dates already planned, so a series whose end was only in its exdates would quietly
+ * come back to life the next time the horizon widened.
+ *
+ * It is a real instant compared against real instants, deliberately NOT folded into the
+ * rrule string — whose own UNTIL would be matched against the FLOATING local dates this
+ * expansion works in, and would be wrong by the zone's offset.
+ */
+describe('plannedOccurrences — `until` ends the series', () => {
+  const dtstart = new Date('2026-09-18T00:00:00.000Z') // Thursday 2026-09-17 18:00 Denver
+  const now = new Date('2026-09-10T00:00:00.000Z')
+  const weekly = { rrule: 'FREQ=WEEKLY;BYDAY=TH', timezone: 'America/Denver', materializeAhead: 365 }
+
+  it('plans nothing at or after `until`', () => {
+    const until = '2026-10-09T00:00:00.000Z' // the fourth Thursday, to the minute
+    const occurrences = plannedOccurrences({ ...weekly, until }, dtstart, now)
+    expect(occurrences.length).toBe(3)
+    for (const d of occurrences) expect(d.getTime()).toBeLessThan(Date.parse(until))
+  })
+
+  it('the MIN_OCCURRENCES floor never resurrects a date past `until`', () => {
+    // The floor would otherwise take the first four occurrences regardless of the window.
+    const occurrences = plannedOccurrences({ ...weekly, until: '2026-09-25T00:00:00.000Z' }, dtstart, now)
+    expect(occurrences.length).toBe(1)
+    expect(occurrences[0]?.toISOString()).toBe(dtstart.toISOString())
+  })
+
+  it('an unparseable `until` is ignored rather than emptying the calendar', () => {
+    const occurrences = plannedOccurrences({ ...weekly, until: 'whenever' }, dtstart, now)
+    expect(occurrences.length).toBeGreaterThanOrEqual(MIN_OCCURRENCES)
+  })
+
+  it('a series with no `until` is unchanged', () => {
+    expect(plannedOccurrences(weekly, dtstart, now).length).toBe(
+      plannedOccurrences({ ...weekly, until: undefined }, dtstart, now).length,
+    )
+  })
+})

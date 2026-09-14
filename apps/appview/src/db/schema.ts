@@ -443,6 +443,12 @@ export const eventExtra = pgTable('fs_event_extra', {
   attendeeNotes: text('attendee_notes'),
   /** The Zoom/Meet/Jitsi link. Never on the public record. */
   meetingLink: text('meeting_link'),
+  /**
+   * Why the host called this class off. App-side ONLY: the public record carries the
+   * cancellation as `status` and nothing else, because "I am in hospital" is not a fact
+   * the host owes the whole network (R9) — but the people who RSVP'd do need to read it.
+   */
+  cancelReason: text('cancel_reason'),
   updatedAt: ts('updated_at').notNull().defaultNow(),
 })
 
