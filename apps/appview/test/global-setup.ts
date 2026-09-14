@@ -7,8 +7,14 @@
  */
 import pg from 'pg'
 
+const TEST_DATABASE_URL = 'postgres://freeschool:freeschool@localhost:5434/freeschool_test'
+
 export default async function setup(): Promise<void> {
-  const url = new URL(process.env.DATABASE_URL ?? 'postgres://freeschool:freeschool@localhost:5434/freeschool_test')
+  // `test.env` in vitest.config.ts reaches the test workers, not this setup process:
+  // pin the variable here too, BEFORE `config()` is first read by the migration import,
+  // or the migrations (and contrail's schema) land on the dev database instead.
+  process.env.DATABASE_URL ??= TEST_DATABASE_URL
+  const url = new URL(process.env.DATABASE_URL)
   const dbName = url.pathname.replace(/^\//, '')
   const admin = new URL(url.toString())
   admin.pathname = '/postgres'
