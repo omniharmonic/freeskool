@@ -66,6 +66,9 @@ const deprecatedRoot = {
 
 const records = [root, sibling, slugCollisionNode, deprecatedRoot]
 const notified: string[] = []
+/** Toggled by the "post-write follow-up fails" tests to simulate `indexer.notify`
+ * throwing AFTER the authority write already succeeded. */
+let notifyShouldFail = false
 const fakeDb = { prepare: () => ({ bind: () => ({ all: async () => ({ results: [] }) }) }) }
 
 vi.mock('../src/index/indexer.js', () => ({
@@ -73,6 +76,7 @@ vi.mock('../src/index/indexer.js', () => ({
     contrail: { query: async () => ({ records }) },
     db: fakeDb,
     notify: async (uris: string | string[]) => {
+      if (notifyShouldFail) throw new Error('notify boom')
       notified.push(...(Array.isArray(uris) ? uris : [uris]))
     },
   }),
@@ -91,6 +95,7 @@ beforeEach(async () => {
   if (!available) return
   await truncate('fs_skill_proposal', 'fs_skill_tier', 'fs_session', 'fs_custodial_account', 'fs_steward')
   notified.length = 0
+  notifyShouldFail = false
   process.env.AUTHORITY_DID = AUTHORITY
   process.env.AUTHORITY_HANDLE = 'authority.test'
   process.env.AUTHORITY_PASSWORD = 'authority-app-password'
@@ -129,7 +134,15 @@ async function makeSteward(did: string): Promise<void> {
     .values({ did, handle: `${did.split(':').pop()}.test`, email: `${did.split(':').pop()}@example.org`, keyVersion: 'v1' })
 }
 
-function fakeAuthority(): AuthorityClient & { puts: unknown[]; deprecated: unknown[]; moved: unknown[] } {
+interface FakeAuthorityOptions {
+  putShouldFail?: boolean
+  deprecateShouldFail?: boolean
+  moveShouldFail?: boolean
+}
+
+function fakeAuthority(
+  opts: FakeAuthorityOptions = {},
+): AuthorityClient & { puts: unknown[]; deprecated: unknown[]; moved: unknown[] } {
   const puts: unknown[] = []
   const deprecated: unknown[] = []
   const moved: unknown[] = []
@@ -139,14 +152,17 @@ function fakeAuthority(): AuthorityClient & { puts: unknown[]; deprecated: unkno
     moved,
     async putSkillRecord(record) {
       puts.push(record)
+      if (opts.putShouldFail) throw new Error('authority put boom')
       return { uri: `at://${AUTHORITY}/freeschool.draft.skill/${record.id}`, cid: 'bafyxyz' }
     },
     async deprecateSkill(uri, replacedBy) {
       deprecated.push({ uri, replacedBy })
+      if (opts.deprecateShouldFail) throw new Error('authority deprecate boom')
       return { uri, cid: 'bafydep' }
     },
     async moveSkill(uri, parentUri) {
       moved.push({ uri, parentUri })
+      if (opts.moveShouldFail) throw new Error('authority move boom')
       return { uri, cid: 'bafymove' }
     },
   }
@@ -274,6 +290,60 @@ describe('POST /api/skills', () => {
     expect(res.status).toBe(503)
     expect((await res.json()) as Record<string, unknown>).toMatchObject({ error: 'AuthorityUnavailable' })
   })
+
+  it('400s InvalidLabel when the label slugifies to an empty rkey', async () => {
+    if (!available) return
+    setAuthorityClientForTests(fakeAuthority())
+    const cookie = await cookieFor(MEMBER)
+    // Entirely punctuation — `slugify` strips it all and trims the result to ''.
+    const res = await post('/api/skills', { label: '??', parentUri: root.uri }, cookie)
+    expect(res.status).toBe(400)
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ error: 'InvalidLabel' })
+  })
+
+  it(
+    '502s and marks the fs_skill_proposal row failed when the authority write itself fails ' +
+      '(review round 1, blocking #2)',
+    async () => {
+      if (!available) return
+      const authority = fakeAuthority({ putShouldFail: true })
+      setAuthorityClientForTests(authority)
+      const cookie = await cookieFor(MEMBER)
+      const res = await post('/api/skills', { label: 'Kayak Repair', parentUri: root.uri }, cookie)
+      expect(res.status).toBe(502)
+      expect((await res.json()) as Record<string, unknown>).toMatchObject({ error: 'AuthorityError' })
+      expect(authority.puts).toHaveLength(1)
+
+      // The row was written BEFORE the authority call (that is the point of the
+      // ordering fix) and is now marked 'failed' rather than left 'pending' forever.
+      const uri = `at://${AUTHORITY}/freeschool.draft.skill/kayak-repair`
+      const rows = await testDb().select().from(skillProposal).where(eq(skillProposal.skillUri, uri))
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toMatchObject({ proposerDid: MEMBER, status: 'failed' })
+    },
+  )
+
+  it(
+    'still 201s when the post-write follow-up fails, leaving a reconcilable pending row ' +
+      '(review round 1, blocking #2)',
+    async () => {
+      if (!available) return
+      const authority = fakeAuthority()
+      setAuthorityClientForTests(authority)
+      notifyShouldFail = true
+      const cookie = await cookieFor(MEMBER)
+      const res = await post('/api/skills', { label: 'Canoe Repair', parentUri: root.uri }, cookie)
+      expect(res.status).toBe(201)
+      const body = (await res.json()) as Record<string, unknown>
+      expect(body).toMatchObject({ id: 'canoe-repair', label: 'Canoe Repair', status: 'proposed', tier: 'A' })
+      // The record really was written at the authority — this is the whole point.
+      expect(authority.puts).toHaveLength(1)
+
+      const rows = await testDb().select().from(skillProposal).where(eq(skillProposal.skillUri, body.uri as string))
+      expect(rows).toHaveLength(1)
+      expect(rows[0]?.status).toBe('pending')
+    },
+  )
 })
 
 describe('GET /api/admin/skills/proposals', () => {
@@ -308,6 +378,25 @@ describe('GET /api/admin/skills/proposals', () => {
       proposerHandle: 'member-a.test',
     })
   })
+
+  it('ignores failed rows (review round 1, blocking #2)', async () => {
+    if (!available) return
+    await testDb().insert(skillProposal).values([
+      { id: 'prop-ok', skillUri: sibling.uri, proposerDid: MEMBER, status: 'published' },
+      {
+        id: 'prop-failed',
+        skillUri: `at://${AUTHORITY}/freeschool.draft.skill/never-happened`,
+        proposerDid: MEMBER,
+        status: 'failed',
+      },
+    ])
+    await makeSteward(STEWARD)
+    const cookie = await cookieFor(STEWARD)
+    const res = await createApp().request('/api/admin/skills/proposals', { headers: { cookie } })
+    expect(res.status).toBe(200)
+    const body = (await res.json()) as { proposals: Array<Record<string, unknown>> }
+    expect(body.proposals.map((p) => p.skillUri)).toEqual([sibling.uri])
+  })
 })
 
 describe('POST /api/admin/skills/:id/deprecate', () => {
@@ -333,6 +422,36 @@ describe('POST /api/admin/skills/:id/deprecate', () => {
     const rows = await testDb().select().from(skillProposal).where(eq(skillProposal.id, 'prop-1'))
     expect(rows[0]?.status).toBe('deprecated')
   })
+
+  it('502s AuthorityError when the authority call itself fails (should-fix #4)', async () => {
+    if (!available) return
+    const authority = fakeAuthority({ deprecateShouldFail: true })
+    setAuthorityClientForTests(authority)
+    await makeSteward(STEWARD)
+    const cookie = await cookieFor(STEWARD)
+    const res = await post('/api/admin/skills/existing-sibling/deprecate', {}, cookie)
+    expect(res.status).toBe(502)
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ error: 'AuthorityError' })
+  })
+
+  it(
+    'still 200s when the follow-up (DB row / notify) fails after a successful authority ' +
+      'deprecate (should-fix #4)',
+    async () => {
+      if (!available) return
+      const authority = fakeAuthority()
+      setAuthorityClientForTests(authority)
+      notifyShouldFail = true
+      await makeSteward(STEWARD)
+      const cookie = await cookieFor(STEWARD)
+      const res = await post('/api/admin/skills/existing-sibling/deprecate', {}, cookie)
+      expect(res.status).toBe(200)
+      expect((await res.json()) as Record<string, unknown>).toMatchObject({ uri: sibling.uri, status: 'deprecated' })
+      // The authority call DID happen — the follow-up failing must not be mistaken for
+      // an authority failure.
+      expect(authority.deprecated).toEqual([{ uri: sibling.uri, replacedBy: undefined }])
+    },
+  )
 })
 
 describe('POST /api/admin/skills/:id/move', () => {
@@ -347,5 +466,30 @@ describe('POST /api/admin/skills/:id/move', () => {
     expect(res.status).toBe(200)
     expect(authority.moved).toEqual([{ uri: sibling.uri, parentUri: newParent }])
     expect(notified).toContain(sibling.uri)
+  })
+
+  it('502s AuthorityError when the authority call itself fails (should-fix #4)', async () => {
+    if (!available) return
+    const authority = fakeAuthority({ moveShouldFail: true })
+    setAuthorityClientForTests(authority)
+    await makeSteward(STEWARD)
+    const cookie = await cookieFor(STEWARD)
+    const res = await post('/api/admin/skills/existing-sibling/move', { parentUri: root.uri }, cookie)
+    expect(res.status).toBe(502)
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ error: 'AuthorityError' })
+  })
+
+  it('still 200s when the notify follow-up fails after a successful authority move (should-fix #4)', async () => {
+    if (!available) return
+    const authority = fakeAuthority()
+    setAuthorityClientForTests(authority)
+    notifyShouldFail = true
+    await makeSteward(STEWARD)
+    const cookie = await cookieFor(STEWARD)
+    const newParent = `at://${AUTHORITY}/freeschool.draft.skill/new-parent`
+    const res = await post('/api/admin/skills/existing-sibling/move', { parentUri: newParent }, cookie)
+    expect(res.status).toBe(200)
+    expect((await res.json()) as Record<string, unknown>).toMatchObject({ uri: sibling.uri, broader: [newParent] })
+    expect(authority.moved).toEqual([{ uri: sibling.uri, parentUri: newParent }])
   })
 })

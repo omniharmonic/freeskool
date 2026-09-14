@@ -27,6 +27,8 @@ import { tiersFor, isSensitiveLabel, setTier, type SkillTierValue } from '../../
 import { peopleForSkill } from '../../lib/members.js'
 import { authorityClient } from '../../lib/authority.js'
 import { normalizeLabel, slugify } from '../../lib/slug.js'
+import { NSID } from '../../lexicons/nsids.js'
+import { describeError, log } from '../../lib/logging.js'
 
 export const skills = new Hono<AppEnv>()
 
@@ -248,6 +250,11 @@ skills.post('/skills', requireViewer, async (c) => {
   const { label, description, parentUri } = parsed.data
   const viewer = c.var.viewer!
 
+  // A label that is ALL punctuation/diacritics ("??", "—") slugifies to '' — refuse
+  // before it can become an empty rkey (`putRecord` would otherwise happily write one).
+  const id = slugify(label)
+  if (!id) return c.json({ error: 'InvalidLabel' }, 400)
+
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000)
   const recent = await getDb()
     .select({ id: skillProposal.id })
@@ -262,9 +269,11 @@ skills.post('/skills', requireViewer, async (c) => {
   const byUri = new Map(records.map((r) => [r.uri, r]))
   const parent = byUri.get(parentUri)
   if (!parent) return c.json({ error: 'ParentNotFound' }, 404)
+  // Any OTHER status (canonical, or already `proposed`) is a fine parent — nesting a
+  // proposal under another member's still-pending proposal is allowed; only a
+  // deprecated branch is refused.
   if (parent.value.status === 'deprecated') return c.json({ error: 'ParentDeprecated' }, 400)
 
-  const id = slugify(label)
   const normalized = normalizeLabel(label)
   const collision =
     records.find((r) => r.value.id === id) ??
@@ -274,28 +283,47 @@ skills.post('/skills', requireViewer, async (c) => {
     return c.json({ error: 'SkillExists', existing: toSkillNode(collision, tiers[collision.value.id] ?? 'A') }, 409)
   }
 
-  const createdAt = new Date().toISOString()
-  const { uri } = await authorityClient().putSkillRecord({
-    id,
-    label,
-    description,
-    broader: [parentUri],
-    status: 'proposed',
-    createdAt,
+  /**
+   * Ordering (review round 1, blocking #2): the `fs_skill_proposal` row is written
+   * BEFORE the authority write, as `status: 'pending'`, at the `skillUri` the write will
+   * land at — deterministic, since `putSkillRecord` always writes `rkey = id` under
+   * `AUTHORITY_DID`. A crash between the two writes can then never lose attribution or
+   * let the rate limit undercount: the row exists either way.
+   *
+   *   - `putRecord` throws — the record was never created. Mark the row `'failed'`
+   *     (kept as an audit trail rather than deleted; `GET /admin/skills/proposals`
+   *     ignores `'failed'` rows) and answer 502 `AuthorityError`.
+   *   - `putRecord` succeeds but the follow-up (tiering, notify, marking the row
+   *     `'published'`) throws — the record is LIVE either way, so this still answers
+   *     201. The row stays `'pending'` with its `skillUri` set, which is enough to
+   *     reconcile later; it is not reported as a failure to the member who just wrote it.
+   */
+  const proposalId = rowId()
+  const uri = `at://${cfg.AUTHORITY_DID}/${NSID.skill}/${id}`
+  await getDb().transaction(async (tx) => {
+    await tx.insert(skillProposal).values({ id: proposalId, skillUri: uri, proposerDid: viewer.did, status: 'pending' })
   })
 
-  await getDb()
-    .insert(skillProposal)
-    .values({ id: rowId(), skillUri: uri, proposerDid: viewer.did, status: 'published' })
-
-  let tier: SkillTierValue = 'A'
-  if (isSensitiveLabel(label)) {
-    await setTier(id, 'B')
-    tier = 'B'
+  const createdAt = new Date().toISOString()
+  try {
+    await authorityClient().putSkillRecord({ id, label, description, broader: [parentUri], status: 'proposed', createdAt })
+  } catch (err) {
+    await getDb().update(skillProposal).set({ status: 'failed' }).where(eq(skillProposal.id, proposalId))
+    log.warn('skill proposal: authority write failed', { code: describeError(err) })
+    return c.json({ error: 'AuthorityError' }, 502)
   }
 
-  // Read-your-writes: the tree the member sees next must already include this node.
-  await indexer.notify(uri)
+  const tier: SkillTierValue = isSensitiveLabel(label) ? 'B' : 'A'
+  try {
+    if (tier === 'B') await setTier(id, 'B')
+    // Read-your-writes: the tree the member sees next must already include this node.
+    await indexer.notify(uri)
+    await getDb().update(skillProposal).set({ status: 'published' }).where(eq(skillProposal.id, proposalId))
+  } catch (err) {
+    // The record already exists at the authority regardless of what happens here —
+    // this is bookkeeping, not the thing that decides success for the member.
+    log.warn('skill proposal: post-write follow-up failed', { code: describeError(err) })
+  }
 
   return c.json({ uri, id, label, status: 'proposed', tier }, 201)
 })

@@ -66,18 +66,14 @@ class PdsAuthorityClient implements AuthorityClient {
     return agent
   }
 
-  private async put(repo: string, rkey: string, record: unknown): Promise<{ uri: string; cid: string }> {
-    const run = async () => {
-      const agent = await this.session()
-      const res = await agent.com.atproto.repo.putRecord({
-        repo,
-        collection: SKILL_COLLECTION,
-        rkey,
-        record: record as Record<string, unknown>,
-        validate: false,
-      })
-      return { uri: res.data.uri, cid: res.data.cid }
-    }
+  /**
+   * Every PDS call this client makes goes through here (review round 1, should-fix #3:
+   * `put` and `getExisting` used to each carry their own copy of this). Get — or
+   * establish — the session, run `fn`, and on a 401 / `ExpiredToken` — app-password
+   * sessions expire — drop the cached session and retry exactly once with a fresh one.
+   */
+  private async withRetry<T>(fn: (agent: AtpAgent) => Promise<T>): Promise<T> {
+    const run = async () => fn(await this.session())
     try {
       return await run()
     } catch (err) {
@@ -87,6 +83,19 @@ class PdsAuthorityClient implements AuthorityClient {
       }
       throw err
     }
+  }
+
+  private async put(repo: string, rkey: string, record: unknown): Promise<{ uri: string; cid: string }> {
+    return this.withRetry(async (agent) => {
+      const res = await agent.com.atproto.repo.putRecord({
+        repo,
+        collection: SKILL_COLLECTION,
+        rkey,
+        record: record as Record<string, unknown>,
+        validate: false,
+      })
+      return { uri: res.data.uri, cid: res.data.cid }
+    })
   }
 
   async putSkillRecord(record: SkillRecordInput): Promise<{ uri: string; cid: string }> {
@@ -104,9 +113,10 @@ class PdsAuthorityClient implements AuthorityClient {
 
   private async getExisting(uri: string): Promise<{ did: string; rkey: string; value: Record<string, unknown> }> {
     const { did, collection, rkey } = parseAtUri(uri)
-    const agent = await this.session()
-    const res = await agent.com.atproto.repo.getRecord({ repo: did, collection, rkey })
-    return { did, rkey, value: res.data.value as Record<string, unknown> }
+    return this.withRetry(async (agent) => {
+      const res = await agent.com.atproto.repo.getRecord({ repo: did, collection, rkey })
+      return { did, rkey, value: res.data.value as Record<string, unknown> }
+    })
   }
 
   async deprecateSkill(uri: string, replacedBy?: string): Promise<{ uri: string; cid: string }> {

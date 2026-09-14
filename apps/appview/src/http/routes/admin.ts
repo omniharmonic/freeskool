@@ -16,7 +16,7 @@
  */
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, desc, eq, isNull } from 'drizzle-orm'
+import { and, desc, eq, isNull, ne } from 'drizzle-orm'
 import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireRole, requireViewer } from '../session.js'
@@ -39,6 +39,7 @@ import { skillRecords } from './skills.js'
 // index's `identities` table); `lib/members.ts` imports it from there rather than
 // duplicating it, and so do we.
 import { handlesForDids } from './me.js'
+import { describeError, log } from '../../lib/logging.js'
 
 export const admin = new Hono<AppEnv>()
 
@@ -430,9 +431,19 @@ function pathFor(byUri: Map<string, { uri: string; value: { label: string; broad
  * fact, and the record — not the row written at proposal time — is the truth for that).
  * The proposer is shown as a HANDLE, never a bare DID (R9's spirit: this is a steward
  * surface, not a public one, but there is no reason to show more than a handle here).
+ *
+ * `'failed'` rows are excluded (review round 1, blocking #2): those are proposals whose
+ * authority write never actually happened — nothing for a steward to act on. A
+ * `'pending'` row (the authority write succeeded but the follow-up bookkeeping didn't)
+ * DOES still show, since its skill record is genuinely live.
  */
 admin.get('/skills/proposals', async (c) => {
-  const rows = await getDb().select().from(skillProposal).orderBy(desc(skillProposal.createdAt)).limit(200)
+  const rows = await getDb()
+    .select()
+    .from(skillProposal)
+    .where(ne(skillProposal.status, 'failed'))
+    .orderBy(desc(skillProposal.createdAt))
+    .limit(200)
   const indexer = await getIndexer()
   const records = await skillRecords(indexer)
   const byUri = new Map(records.map((r) => [r.uri, r]))
@@ -466,15 +477,28 @@ admin.post('/skills/:id/deprecate', async (c) => {
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
 
   const uri = `at://${config().AUTHORITY_DID}/${NSID.skill}/${c.req.param('id')}`
+
+  // review round 1, should-fix #4: the authority call and its follow-up (the DB row and
+  // the indexer notify) are separate failure domains and must not be reported the same
+  // way — once `deprecateSkill` returns, the record IS deprecated, so a follow-up
+  // failure is bookkeeping, never an `AuthorityError`.
+  let result: { uri: string; cid: string }
   try {
-    const result = await authorityClient().deprecateSkill(uri, parsed.data.replacedBy)
+    result = await authorityClient().deprecateSkill(uri, parsed.data.replacedBy)
+  } catch (err) {
+    log.warn('admin: skill deprecate failed at the authority', { code: describeError(err) })
+    return c.json({ error: 'AuthorityError' }, 502)
+  }
+
+  try {
     await getDb().update(skillProposal).set({ status: 'deprecated' }).where(eq(skillProposal.skillUri, result.uri))
     const indexer = await getIndexer()
     await indexer.notify(result.uri)
-    return c.json({ uri: result.uri, status: 'deprecated' })
   } catch (err) {
-    return c.json({ error: 'AuthorityError', message: err instanceof Error ? err.message : 'unknown' }, 502)
+    log.warn('admin: skill deprecate follow-up failed', { code: describeError(err) })
   }
+
+  return c.json({ uri: result.uri, status: 'deprecated' })
 })
 
 const moveBody = z.object({ parentUri: z.string().startsWith('at://') })
@@ -485,14 +509,24 @@ admin.post('/skills/:id/move', async (c) => {
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
 
   const uri = `at://${config().AUTHORITY_DID}/${NSID.skill}/${c.req.param('id')}`
+
+  // Same separation as `/deprecate` above: the move itself vs. the notify follow-up.
+  let result: { uri: string; cid: string }
   try {
-    const result = await authorityClient().moveSkill(uri, parsed.data.parentUri)
+    result = await authorityClient().moveSkill(uri, parsed.data.parentUri)
+  } catch (err) {
+    log.warn('admin: skill move failed at the authority', { code: describeError(err) })
+    return c.json({ error: 'AuthorityError' }, 502)
+  }
+
+  try {
     const indexer = await getIndexer()
     await indexer.notify(result.uri)
-    return c.json({ uri: result.uri, broader: [parsed.data.parentUri] })
   } catch (err) {
-    return c.json({ error: 'AuthorityError', message: err instanceof Error ? err.message : 'unknown' }, 502)
+    log.warn('admin: skill move follow-up failed', { code: describeError(err) })
   }
+
+  return c.json({ uri: result.uri, broader: [parsed.data.parentUri] })
 })
 
 /**
