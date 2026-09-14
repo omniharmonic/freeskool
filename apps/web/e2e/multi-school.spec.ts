@@ -9,10 +9,13 @@
  *
  *   - the AppView on :4000 with `MULTI_SCHOOL=1` — the flag that makes `withSchool` read
  *     the request host at all;
- *   - `SESSION_COOKIE_DOMAIN=.localhost` — every city is its own ORIGIN, so a host-only
- *     cookie cannot follow a member from `boulder.localhost` to `denver.localhost` and
- *     the switcher would land them signed out. Production sets `.freeskool.xyz` for
- *     exactly this reason (`infra/production/.env.example`); `.localhost` is its dev twin;
+ *   - `SESSION_COOKIE_DOMAIN=` (EMPTY) — Chromium refuses a `Domain=.localhost` cookie
+ *     outright, so no dev configuration can make one session span `boulder.localhost` and
+ *     `denver.localhost`. This stack therefore exercises the host-only branch of the
+ *     switch: the session row moves, the cookie does not, and the PWA says so and sends
+ *     the member to the new city's own door. Production sets `.freeskool.xyz` and takes
+ *     the other branch (`infra/production/.env.example`,
+ *     `docs/runbooks/multi-school-rollout.md`);
  *   - the PWA on :5173, whose dev proxy is `changeOrigin: false`, so the AppView receives
  *     the ORIGINAL `Host` and resolves Boulder or Denver from it. Nothing else is needed:
  *     `*.localhost` is reserved by RFC 6761 and resolves to loopback in the browser with
@@ -138,27 +141,49 @@ test.describe.serial('two schools on one AppView', () => {
     expect(switched.status()).toBe(200);
     expect(((await switched.json()) as { host: string }).host).toBe(new URL(DENVER).hostname);
 
-    // The browser half: clicking the option is a full navigation to the other ORIGIN.
-    await page.getByRole('option', { name: 'Denver Free School' }).click();
-    await page.waitForURL(new RegExp(`^${DENVER}/`), { timeout: 30_000 });
-    await expect(page.getByRole('link', { name: 'Denver Free School' })).toBeVisible();
-
     /**
-     * AND HERE THE DEV STACK DIVERGES FROM PRODUCTION, ON PURPOSE.
+     * THE BROWSER HALF — and here the dev stack diverges from production, ON PURPOSE.
      *
      * In production every city is a subdomain of one registrable domain and
      * `SESSION_COOKIE_DOMAIN=.freeskool.xyz` makes the session cookie follow the member
-     * across the hop above, so they arrive signed in. Locally the cities are
-     * `*.localhost`, and **Chromium refuses a cookie with `Domain=localhost` or
-     * `Domain=.localhost` outright** — it stores nothing at all, so the AppView cannot
-     * issue a cookie that crosses `boulder.localhost` to `denver.localhost` however it is
-     * configured. (Verified against this stack: with `SESSION_COOKIE_DOMAIN` set either
-     * way, `context.cookies()` comes back empty and every signed-in screen is a sign-in
-     * prompt.) So the dev AppView runs with `SESSION_COOKIE_DOMAIN=` — host-only cookies,
-     * one per city — and this journey walks in through Denver's own door to carry on.
-     * The hop itself, which is the part the product owns, is asserted above.
+     * across this hop, so they arrive signed in and land on the new city's home screen.
+     * Locally the cities are `*.localhost`, and **Chromium refuses a cookie with
+     * `Domain=localhost` or `Domain=.localhost` outright** — it stores nothing at all, so
+     * no configuration of the dev AppView can make one session span `boulder.localhost`
+     * and `denver.localhost`. (Verified against this stack: with `SESSION_COOKIE_DOMAIN`
+     * set either way, `context.cookies()` comes back empty and every signed-in screen is
+     * a sign-in prompt.) The dev AppView therefore runs with `SESSION_COOKIE_DOMAIN=`.
+     *
+     * So this run exercises the OTHER branch, and it is a branch the product owns rather
+     * than a dev-only shrug: `POST /api/auth/switch-school` reports `sessionSpansHosts`,
+     * and when it is false the switcher sends the member to the new city's own door with
+     * `?switched=1` instead of dropping them on its home screen signed out with nothing
+     * said. Production before the cookie-domain cutover takes exactly this path.
      */
+    await page.getByRole('option', { name: 'Denver Free School' }).click();
+    await page.waitForURL(
+      (url) =>
+        url.origin === DENVER && url.pathname === '/signin' && url.searchParams.get('switched') === '1',
+      { timeout: 30_000 },
+    );
+    expect(new URL(page.url()).searchParams.get('returnTo')).toBe('/');
+    // The name comes from THIS host's own public page, so a signed-out visitor can still
+    // be told whose school they are standing in; the fallback covers a slow first paint.
+    await expect(
+      page.getByText(/You switched to Denver Free School\.|You switched schools\./),
+    ).toBeVisible();
+
+    // Denver's own door, and the session it opens is Denver's.
     await signInAsOn(page, 'maya', 'denver');
+    const authMe = await page.request.get(`${DENVER}/api/auth/me`);
+    expect(authMe.ok(), `GET ${DENVER}/api/auth/me -> ${authMe.status()}`).toBe(true);
+    const viewer = (await authMe.json()) as { school?: { did: string; name: string } };
+    expect(viewer.school?.did, 'the session on Denver’s host must be Denver’s').toBe(denver.did);
+    expect(viewer.school?.name).toBe('Denver Free School');
+
+    await page.goto(`${DENVER}/`);
+    await expect(page.getByRole('link', { name: 'Denver Free School' })).toBeVisible();
+
     const me = await meOn(page, DENVER);
     expect(me.role, 'Maya should be a Member in Denver, not a Host').toBe(10);
 
