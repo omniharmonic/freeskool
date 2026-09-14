@@ -25,7 +25,9 @@
     "smoke": "tsx scripts/smoke.ts",
     "seed:demo": "tsx scripts/seed-demo.ts",
     "reindex-skills": "tsx scripts/reindex-skills.ts",
-    "migrate-event-notes": "tsx scripts/migrate-event-notes.ts"
+    "migrate-event-notes": "tsx scripts/migrate-event-notes.ts",
+    "migrate-pds-hostname": "tsx scripts/migrate-pds-hostname.ts",
+    "verify-relay": "tsx scripts/verify-relay.ts"
   },
   "dependencies": {
     "@atmo-dev/contrail": "0.23.0",
