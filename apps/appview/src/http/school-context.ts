@@ -179,3 +179,16 @@ export function currentSchoolDid(c: Context<AppEnv>): string {
 export function optionalSchool(c: Context<AppEnv>): School | undefined {
   return c.var.school
 }
+
+/**
+ * The request's school, falling back to the legacy one rather than 404ing.
+ *
+ * For the DOORS — sign-up and sign-in — and nothing else. A person must never be unable
+ * to create an account because the tenancy middleware was not in the chain (a sub-router
+ * mounted on its own in a test, a future embedding of `auth` elsewhere); the membership
+ * that actually binds them to a school is written on their first session, where the
+ * middleware always has run. Every per-school READ uses `currentSchool` and its 404.
+ */
+export function schoolDidOrLegacy(c: Context<AppEnv>): string {
+  return c.var.school?.did ?? legacySchoolDid()
+}

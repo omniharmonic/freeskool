@@ -27,6 +27,9 @@ import { feedback, feedbackBallot, feedbackWindow } from '../db/schema.js'
 import { ballotToken, newBallotKey } from './crypto.js'
 import { rowId } from './ids.js'
 import { getThresholds } from './policy.js'
+import { legacySchoolDid } from './schools.js'
+import { schoolScope } from './school-scope.js'
+import { schoolOfEvent } from './event-school.js'
 import type { Did, SpaceStore } from '@freeschool/spaces-shim'
 import { FEEDBACK_SPACE_POLICY, FEEDBACK_SPACE_TYPE } from '../spaces/postgres-store.js'
 
@@ -68,6 +71,8 @@ export interface SubmitFeedbackInput {
   aspects?: Partial<Record<Aspect, number>>
   text?: string
   now?: Date
+  /** k-anonymity is computed WITHIN one school (MS §4) — never across the network. */
+  schoolDid?: string
 }
 
 /**
@@ -100,6 +105,7 @@ export async function submitFeedback(input: SubmitFeedbackInput): Promise<{ acce
       id: rowId(),
       eventUri: input.eventUri,
       hostDid: input.hostDid,
+      schoolDid: input.schoolDid ?? legacySchoolDid(),
       direction: input.direction,
       aspects: input.aspects ?? null,
       text: input.text?.trim() ? input.text.trim() : null,
@@ -127,25 +133,30 @@ export const TEXT_K = 5
  * enforce a separate, higher k for free text, because one sentence can identify its
  * author in a way that a mean of three numbers cannot.
  */
-export async function feedbackSummary(eventUri: string): Promise<FeedbackSummary> {
-  const thresholds = await getThresholds()
+export async function feedbackSummary(eventUri: string, schoolDid = legacySchoolDid()): Promise<FeedbackSummary> {
+  // The k the summary is held to is THIS school's policy: a small school's k must not be
+  // helped over the line by a large one's (MS §10).
+  const thresholds = await getThresholds(schoolDid)
   const k = thresholds.feedbackK
   const win = await getWindow(eventUri)
   if (win?.publishedAt && win.summary) {
     const published = win.summary as FeedbackSummary
     return { ...published, windowClosesAt: win.closesAt.toISOString(), publishedAt: win.publishedAt.toISOString() }
   }
-  const summary = await computeSummary(eventUri, k)
+  const summary = await computeSummary(eventUri, k, schoolDid)
   return {
     ...summary,
     windowClosesAt: win?.closesAt.toISOString(),
   }
 }
 
-async function computeSummary(eventUri: string, k: number): Promise<FeedbackSummary> {
+async function computeSummary(eventUri: string, k: number, schoolDid = legacySchoolDid()): Promise<FeedbackSummary> {
   const db = getDb()
   const [rows, ballots] = await Promise.all([
-    db.select().from(feedback).where(eq(feedback.eventUri, eventUri)),
+    db
+      .select()
+      .from(feedback)
+      .where(and(eq(feedback.eventUri, eventUri), schoolScope(feedback.schoolDid, schoolDid))),
     db
       .select({ n: sql<number>`count(*)::int` })
       .from(feedbackBallot)
@@ -213,23 +224,32 @@ export async function publishAggregateToSpace(
  */
 export async function closeDueWindows(
   now = new Date(),
-  space?: { store: SpaceStore; authority: Did },
+  /**
+   * `authority` is optional: omit it and each window publishes under the school its own
+   * class belongs to (MS §4), which is what the retention job wants now that one process
+   * may serve several schools.
+   */
+  space?: { store: SpaceStore; authority?: Did },
 ): Promise<{ closed: number }> {
   const db = getDb()
   const due = await db
     .select({ eventUri: feedbackWindow.eventUri })
     .from(feedbackWindow)
     .where(and(lte(feedbackWindow.closesAt, now), isNotNull(feedbackWindow.ballotKey)))
-  const thresholds = await getThresholds()
   let closed = 0
   for (const row of due) {
-    const summary = await computeSummary(row.eventUri, thresholds.feedbackK)
+    // Per school, because the k that gates a summary is the school's own policy. The
+    // window is keyed by event, so the event's school is the one that decides.
+    const eventSchoolDid = await schoolOfEvent(row.eventUri)
+    const thresholds = await getThresholds(eventSchoolDid)
+    const summary = await computeSummary(row.eventUri, thresholds.feedbackK, eventSchoolDid)
     await db
       .update(feedbackWindow)
       .set({ ballotKey: null, keyDestroyedAt: now, publishedAt: now, summary })
       .where(eq(feedbackWindow.eventUri, row.eventUri))
-    if (space) {
-      await publishAggregateToSpace(space.store, space.authority, row.eventUri, summary)
+    const authority = space?.authority ?? (eventSchoolDid.startsWith('did:') ? (eventSchoolDid as Did) : undefined)
+    if (space && authority) {
+      await publishAggregateToSpace(space.store, authority, row.eventUri, summary)
     }
     closed++
   }

@@ -22,6 +22,7 @@ import { sendMail } from './mail.js'
 import { registerEmailTarget } from '../notifications/dispatch.js'
 import { subscribe } from './newsletter-subscriptions.js'
 import { log } from './logging.js'
+import { legacySchoolDid } from './schools.js'
 
 export const VERIFY_TTL_MS = 24 * 3_600_000
 
@@ -51,7 +52,13 @@ type SignupOutcome =
   | { kind: 'resend'; did: string; handle: string }
   | { kind: 'created' | 'adopted'; did: string; handle: string }
 
-export async function signup(input: { email: string; inviterDid?: string; newsletter?: boolean }): Promise<SignupResult> {
+export async function signup(input: {
+  email: string
+  inviterDid?: string
+  newsletter?: boolean
+  /** The school being joined: the invite evidence and the digest are both per school. */
+  schoolDid?: string
+}): Promise<SignupResult> {
   const c = config()
   const email = input.email.trim().toLowerCase()
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -151,6 +158,7 @@ export async function signup(input: { email: string; inviterDid?: string; newsle
     if (!adopted) {
       await tx.insert(invite).values({
         code,
+        schoolDid: input.schoolDid ?? legacySchoolDid(),
         inviterDid: input.inviterDid ?? null,
         usedByDid: account.did,
         usedAt: new Date(),
@@ -166,7 +174,7 @@ export async function signup(input: { email: string; inviterDid?: string; newsle
 
   await registerEmailTarget(outcome.did, email)
   // Default false: only the signup form's own checkbox, ticked, subscribes.
-  if (input.newsletter === true) await subscribe(outcome.did, email)
+  if (input.newsletter === true) await subscribe(outcome.did, email, input.schoolDid ?? legacySchoolDid())
 
   const { url } = await sendVerificationEmail(outcome.did, email)
   if (outcome.kind === 'adopted') {

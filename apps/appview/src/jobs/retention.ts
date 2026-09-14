@@ -97,12 +97,13 @@ export async function runRetention(now = new Date()): Promise<RetentionResult> {
   const stale = await db
     .select({
       eventUri: attendance.eventUri,
+      schoolDid: attendance.schoolDid,
       total: sql<number>`count(*)::int`,
       participated: sql<number>`count(*) filter (where participated)::int`,
     })
     .from(attendance)
     .where(and(isNull(attendance.voidedAt), lt(attendance.eventStartsAt, cutoff)))
-    .groupBy(attendance.eventUri)
+    .groupBy(attendance.eventUri, attendance.schoolDid)
 
   let collapsedRows = 0
   for (const group of stale) {
@@ -110,6 +111,8 @@ export async function runRetention(now = new Date()): Promise<RetentionResult> {
       .insert(attendanceRollup)
       .values({
         eventUri: group.eventUri,
+        // The rollup is what survives the collapse; retention runs per school (MS §4).
+        schoolDid: group.schoolDid,
         participatedCount: group.participated,
         totalCount: group.total,
         collapsedAt: now,
@@ -129,14 +132,15 @@ export async function runRetention(now = new Date()): Promise<RetentionResult> {
     collapsedRows += deleted.length
   }
 
-  /* 3. feedback windows + key destruction */
-  const authority = config().SCHOOL_DID
-  const { closed } = await closeDueWindows(
-    now,
-    authority.startsWith('did:')
-      ? { store: new PostgresSpaceStore(db), authority: authority as Did }
-      : undefined,
-  )
+  /**
+   * 3. feedback windows + key destruction.
+   *
+   * NO `authority` here on purpose: `closeDueWindows` resolves each window's school from
+   * its own class (`fs_event_school`), so a process serving several schools publishes
+   * each aggregate under the school whose class it was — rather than all of them under
+   * whichever DID happened to be in the environment.
+   */
+  const { closed } = await closeDueWindows(now, { store: new PostgresSpaceStore(db) })
 
   /* 4. sessions */
   const sessions = await db.delete(session).where(lt(session.expiresAt, now)).returning({ id: session.id })

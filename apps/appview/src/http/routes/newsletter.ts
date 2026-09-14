@@ -14,6 +14,7 @@ import { requireViewer } from '../session.js'
 import { getDb } from '../../db/index.js'
 import { custodialAccount } from '../../db/schema.js'
 import { isSubscribed, subscribe, unsubscribeByToken, unsubscribeDid } from '../../lib/newsletter-subscriptions.js'
+import { currentSchool } from '../school-context.js'
 
 export const newsletterRoutes = new Hono<AppEnv>()
 
@@ -25,7 +26,7 @@ newsletterRoutes.put('/me/newsletter', requireViewer, async (c) => {
   const viewer = c.var.viewer!
 
   if (!parsed.data.subscribed) {
-    await unsubscribeDid(viewer.did)
+    await unsubscribeDid(viewer.did, currentSchool(c).did)
     return c.json({ subscribed: false })
   }
 
@@ -34,12 +35,12 @@ newsletterRoutes.put('/me/newsletter', requireViewer, async (c) => {
   if (!email) {
     return c.json({ error: 'NoEmailOnFile', message: 'this session has no email address to send a newsletter to' }, 409)
   }
-  await subscribe(viewer.did, email)
+  await subscribe(viewer.did, email, currentSchool(c).did)
   return c.json({ subscribed: true })
 })
 
 newsletterRoutes.get('/me/newsletter', requireViewer, async (c) => {
-  return c.json({ subscribed: await isSubscribed(c.var.viewer!.did) })
+  return c.json({ subscribed: await isSubscribed(c.var.viewer!.did, currentSchool(c).did) })
 })
 
 /** Public: the link in the email. No session, no CORS credential, nothing to confirm. */

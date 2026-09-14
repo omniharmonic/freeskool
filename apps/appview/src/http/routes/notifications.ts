@@ -14,6 +14,7 @@ import { CATEGORIES, listNotifications, markRead, registerPushTarget, setPref } 
 import { vapidPublicKey } from '../../lib/push.js'
 import { getDb } from '../../db/index.js'
 import { notificationPref, notificationTarget } from '../../db/schema.js'
+import { currentSchool } from '../school-context.js'
 
 export const notifications = new Hono<AppEnv>()
 
@@ -42,7 +43,7 @@ notifications.delete('/push/subscribe', requireViewer, async (c) => {
 })
 
 notifications.get('/notifications', requireViewer, async (c) => {
-  const rows = await listNotifications(c.var.viewer!.did, Number(c.req.query('limit') ?? 50))
+  const rows = await listNotifications(c.var.viewer!.did, Number(c.req.query('limit') ?? 50), currentSchool(c).did)
   return c.json({
     notifications: rows.map((r) => ({
       id: r.id,
@@ -59,7 +60,7 @@ notifications.get('/notifications', requireViewer, async (c) => {
 notifications.post('/notifications/read', requireViewer, async (c) => {
   const parsed = z.object({ ids: z.array(z.string()).max(500) }).safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
-  await markRead(c.var.viewer!.did, parsed.data.ids)
+  await markRead(c.var.viewer!.did, parsed.data.ids, currentSchool(c).did)
   return c.json({ ok: true })
 })
 

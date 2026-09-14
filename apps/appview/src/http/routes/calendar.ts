@@ -20,6 +20,9 @@ import { config } from '../../config.js'
 import { getIndexer } from '../../index/indexer.js'
 import { eventsInWindow, sidecarsForEvent } from '../../index/queries.js'
 import { isOwnMemberSet } from '../../lib/roles.js'
+import { schoolsOfEvents } from '../../lib/event-school.js'
+import { legacySchoolDid } from '../../lib/schools.js'
+import { currentSchool } from '../school-context.js'
 import { resolveHostDids } from '../../lib/events.js'
 import { buildIcs, icsStatus } from '../../lib/ics.js'
 import type { EventConfig, EventListing } from '../../lexicons/coop.js'
@@ -61,17 +64,21 @@ async function visibleEvents(
   from: string,
   to: string,
   limit: number,
-  school?: string,
+  school: string | undefined,
+  /** Whose calendar this is. Events created in another school are not on it (MS §4). */
+  currentSchoolDid: string = legacySchoolDid(),
 ): Promise<{ events: VisibleEvent[]; truncated: boolean }> {
   const indexer = await getIndexer()
   const rows = await eventsInWindow(indexer, from, to, limit)
+  // One query for the page: which school each class was created in (absent row = legacy).
+  const eventSchools = await schoolsOfEvents(rows.map((e) => e.uri))
 
   // A8: the HOST of each event. A materialized occurrence's record author is the SCHOOL;
   // its host is the series author. One query for the whole page, not one per event.
   const hostDids = await resolveHostDids(rows)
   // One batched membership lookup for the whole page, not one per event (N+1). Both the
   // authors AND the resolved hosts, so an occurrence can be recognized as ours.
-  const ownDids = await isOwnMemberSet([...rows.map((e) => e.did), ...hostDids.values()])
+  const ownDids = await isOwnMemberSet([...rows.map((e) => e.did), ...hostDids.values()], currentSchoolDid)
 
   const out: VisibleEvent[] = []
   for (const e of rows) {
@@ -92,7 +99,13 @@ async function visibleEvents(
     // Inclusion still asks about the event's AUTHOR for an ordinary class; for an
     // occurrence the school authored it, so ask about the host instead — an occurrence of
     // one of our own members' series is ours.
-    const { show, origin } = calendarInclusion(ownDids.has(e.did) || ownDids.has(hostDid), inputs)
+    /**
+     * "Ours" is now TWO facts, not one: the class was created in this school
+     * (`fs_event_school`) AND its author or host belongs to it. A host who teaches in both
+     * Boulder and Denver has classes on each calendar, not both on both.
+     */
+    const ourEvent = (eventSchools.get(e.uri) ?? legacySchoolDid()) === currentSchoolDid
+    const { show, origin } = calendarInclusion(ourEvent && (ownDids.has(e.did) || ownDids.has(hostDid)), inputs)
     if (!show) continue
     out.push({ uri: e.uri, hostDid, event: toCalendarEvent(e.uri, hostDid, e.value), inputs, origin })
   }
@@ -107,7 +120,7 @@ calendar.get('/calendar', async (c) => {
   const fromIso = from ?? new Date().toISOString()
   const toIso = to ?? new Date(Date.now() + ICS_WINDOW_DAYS * 86_400_000).toISOString()
 
-  const { events, truncated } = await visibleEvents(fromIso, toIso, limit, school)
+  const { events, truncated } = await visibleEvents(fromIso, toIso, limit, school, currentSchool(c).did)
   const presentations = await getPresentations(events.map((e) => e.uri))
 
   // Offline calendar is always public. Precise addresses belong only in the uncached detail API.
@@ -134,7 +147,7 @@ calendar.get('/calendar.ics', async (c) => {
   const fromIso = from ?? new Date().toISOString()
   const toIso = to ?? new Date(Date.now() + ICS_WINDOW_DAYS * 86_400_000).toISOString()
 
-  const { events } = await visibleEvents(fromIso, toIso, limit, school)
+  const { events } = await visibleEvents(fromIso, toIso, limit, school, currentSchool(c).did)
   const relation: ViewerRelation = 'public'
 
   const body = buildIcs(

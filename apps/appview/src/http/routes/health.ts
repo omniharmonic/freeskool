@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm'
 import { getDb } from '../../db/index.js'
 import type { AppEnv } from '../session.js'
 import { config } from '../../config.js'
+import { optionalSchool } from '../school-context.js'
 
 export const health = new Hono<AppEnv>()
 
@@ -27,7 +28,9 @@ health.get('/api/health', async (c) => {
     {
       status: ok ? 'ok' : 'degraded',
       checks,
-      school: Boolean(config().SCHOOL_DID),
+      // "Is a school configured at all" — the health check is not per-tenant, and
+      // `withSchool` deliberately does not 404 it on an unknown host.
+      school: Boolean(optionalSchool(c)?.did || config().SCHOOL_DID),
       version: '0.0.1',
     },
     ok ? 200 : 503,

@@ -15,6 +15,8 @@ import { Role } from '@freeschool/shared'
 import { getDb } from '../db/index.js'
 import { attendance, rsvp } from '../db/schema.js'
 import { roleOf } from '../lib/roles.js'
+import { legacySchoolDid } from '../lib/schools.js'
+import { schoolScope } from '../lib/school-scope.js'
 import type { Viewer } from './session.js'
 import type { ViewerRelation } from './visibility.js'
 
@@ -23,6 +25,8 @@ export async function viewerRelation(
   eventUri: string,
   /** The human host — see the module doc. Never an occurrence's record author. */
   hostDid: string,
+  /** Steward-ness is per school (MS §2); so is the attendance that makes an attendee. */
+  schoolDid: string = legacySchoolDid(),
 ): Promise<ViewerRelation> {
   if (viewer.did === hostDid) return 'host'
   const db = getDb()
@@ -34,6 +38,7 @@ export async function viewerRelation(
         and(
           eq(attendance.eventUri, eventUri),
           eq(attendance.attendeeDid, viewer.did),
+          schoolScope(attendance.schoolDid, schoolDid),
           eq(attendance.participated, true),
           isNull(attendance.voidedAt),
         ),
@@ -44,7 +49,7 @@ export async function viewerRelation(
       .from(rsvp)
       .where(and(eq(rsvp.eventUri, eventUri), eq(rsvp.did, viewer.did)))
       .limit(1),
-    roleOf(viewer.did),
+    roleOf(viewer.did, schoolDid),
   ])
   if (att.length > 0) return 'attendee'
   if (rs[0] && rs[0].status !== 'notgoing') return 'rsvp'

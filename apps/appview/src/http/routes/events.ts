@@ -49,6 +49,10 @@ import { recordAttendance } from '../../lib/attendance.js'
 import { getEventExtra, type EventExtra } from '../../lib/event-extra.js'
 import { config } from '../../config.js'
 import { displayNamesForDids, handlesForDids } from './me.js'
+import { currentSchool } from '../school-context.js'
+import { schoolOfEvent } from '../../lib/event-school.js'
+import { legacySchoolDid } from '../../lib/schools.js'
+import { schoolScope } from '../../lib/school-scope.js'
 
 export const events = new Hono<AppEnv>()
 
@@ -120,7 +124,7 @@ events.post('/events', requireViewer, requireRole(Role.Host), async (c) => {
     if (parsed.data.endsAt && Date.parse(parsed.data.endsAt) <= Date.parse(parsed.data.startsAt)) {
       return c.json({ error: 'InvalidDates', message: 'The end time must be after the start time.' }, 400)
     }
-    const created = await createEventAsHost(c.var.viewer!, parsed.data)
+    const created = await createEventAsHost(c.var.viewer!, parsed.data, currentSchool(c).did)
     return c.json(created, 201)
   } catch (err) {
     if (err instanceof NoActorCredentialError) {
@@ -146,7 +150,7 @@ events.put('/events/:id', requireViewer, async (c) => {
     return c.json({ error: 'InvalidRequest', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400)
   }
   try {
-    const updated = await updateEventAsHost(c.var.viewer!, uri, parsed.data)
+    const updated = await updateEventAsHost(c.var.viewer!, uri, parsed.data, currentSchool(c).did)
     return c.json(updated)
   } catch (err) {
     if (err instanceof EventNotFoundError) return c.json({ error: 'NotFound' }, 404)
@@ -189,7 +193,7 @@ events.post('/events/:id/cancel', requireViewer, async (c) => {
     return c.json({ error: 'InvalidRequest', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400)
   }
   try {
-    return c.json(await cancelEventAsHost(c.var.viewer!, uri, parsed.data))
+    return c.json(await cancelEventAsHost(c.var.viewer!, uri, parsed.data, currentSchool(c).did))
   } catch (err) {
     if (err instanceof EventNotFoundError) return c.json({ error: 'NotFound' }, 404)
     if (err instanceof EventPermissionError) {
@@ -208,10 +212,10 @@ events.post('/events/:id/cancel', requireViewer, async (c) => {
 events.get('/events/:id{.+\\.ics}', async (c) => {
   const raw = c.req.param('id')
   const uri = decodeURIComponent(raw.replace(/\.ics$/, ''))
-  const loaded = await loadEvent(uri)
+  const loaded = await loadEvent(uri, currentSchool(c).did)
   if (!loaded) return c.json({ error: 'NotFound' }, 404)
   const viewer = c.var.viewer
-  const relation = viewer ? await viewerRelation(viewer, uri, loaded.hostDid) : 'public'
+  const relation = viewer ? await viewerRelation(viewer, uri, loaded.hostDid, currentSchool(c).did) : 'public'
   if (!loaded.listed && relation === 'public') return c.json({ error: 'NotFound' }, 404)
 
   const series = loaded.series
@@ -244,9 +248,9 @@ events.get('/events/:id{.+\\.ics}', async (c) => {
 
 events.get('/events/:id/image', async (c) => {
   const uri = decodeURIComponent(c.req.param('id'))
-  const loaded = await loadEvent(uri)
+  const loaded = await loadEvent(uri, currentSchool(c).did)
   if (!loaded) return c.json({ error: 'NotFound' }, 404)
-  const relation = c.var.viewer ? await viewerRelation(c.var.viewer, uri, loaded.hostDid) : 'public'
+  const relation = c.var.viewer ? await viewerRelation(c.var.viewer, uri, loaded.hostDid, currentSchool(c).did) : 'public'
   if (!loaded.listed && relation === 'public') return c.json({ error: 'NotFound' }, 404)
   const image = (await getPresentation(uri)).cover
   if (!image) return c.json({ error: 'NotFound' }, 404)
@@ -257,17 +261,17 @@ events.get('/events/:id/image', async (c) => {
 
 events.get('/events/:id', async (c) => {
   const uri = decodeURIComponent(c.req.param('id'))
-  const loaded = await loadEvent(uri)
+  const loaded = await loadEvent(uri, currentSchool(c).did)
   if (!loaded) return c.json({ error: 'NotFound' }, 404)
   const viewer = c.var.viewer
-  const relation = viewer ? await viewerRelation(viewer, uri, loaded.hostDid) : 'public'
+  const relation = viewer ? await viewerRelation(viewer, uri, loaded.hostDid, currentSchool(c).did) : 'public'
   if (!loaded.listed && relation === 'public') return c.json({ error: 'NotFound' }, 404)
   // The raw visibility enum (listed|unlisted|private) is a moderation/host-facing fact,
   // never shown to an ordinary viewer. FIX (review round 1, M2): this used to gate on
   // `relation === 'steward'`, but `viewerRelation` checks attendee/rsvp BEFORE steward,
   // so a steward who had also RSVP'd would resolve to 'rsvp' and lose raw visibility.
   // Use the same `roleOf`-based host-or-steward check the roster route uses instead.
-  const canSeeRawVisibility = viewer ? canViewRoster(loaded.hostDid, viewer.did, await roleOf(viewer.did)) : false
+  const canSeeRawVisibility = viewer ? canViewRoster(loaded.hostDid, viewer.did, await roleOf(viewer.did, currentSchool(c).did)) : false
   return c.json({
     // `loaded.extra` carries the attendee notes and the meeting link; `projectEvent`
     // releases them only to a viewer who also gets the street address (task 19c).
@@ -302,10 +306,10 @@ events.get('/events/:id', async (c) => {
  */
 events.get('/events/:id/rsvps', requireViewer, async (c) => {
   const uri = decodeURIComponent(c.req.param('id'))
-  const loaded = await loadEvent(uri)
+  const loaded = await loadEvent(uri, currentSchool(c).did)
   if (!loaded) return c.json({ error: 'NotFound' }, 404)
   const viewer = c.var.viewer!
-  const role = await roleOf(viewer.did)
+  const role = await roleOf(viewer.did, currentSchool(c).did)
   if (!canViewRoster(loaded.hostDid, viewer.did, role)) {
     return c.json({ error: 'PermissionDenied', message: 'only the host of this class or a steward may see who is coming' }, 403)
   }
@@ -344,7 +348,7 @@ const attendanceBody = z.object({
 events.post('/events/:id/attendance', requireViewer, async (c) => {
   const uri = decodeURIComponent(c.req.param('id'))
   const viewer = c.var.viewer!
-  const loaded = await loadEvent(uri)
+  const loaded = await loadEvent(uri, currentSchool(c).did)
   if (!loaded) return c.json({ error: 'NotFound' }, 404)
   if (loaded.hostDid !== viewer.did) {
     return c.json({ error: 'PermissionDenied', message: 'only the host of a class may attest attendance' }, 403)
@@ -363,6 +367,9 @@ events.post('/events/:id/attendance', requireViewer, async (c) => {
     hostDid: viewer.did,
     attendees: parsed.data.attendees,
     eventStartsAt: loaded.event.startsAt ? new Date(loaded.event.startsAt) : null,
+    // Evidence for a role is evidence in ONE school (MS §4): this attendance moves the
+    // attendee's Boulder tally and no other.
+    schoolDid: currentSchool(c).did,
   })
   return c.json({ ok: true, recorded, tallyChanged })
 })
@@ -370,7 +377,7 @@ events.post('/events/:id/attendance', requireViewer, async (c) => {
 /** Counts, for the host's own view. Never a list of DIDs. */
 events.get('/events/:id/attendance', requireViewer, async (c) => {
   const uri = decodeURIComponent(c.req.param('id'))
-  const loaded = await loadEvent(uri)
+  const loaded = await loadEvent(uri, currentSchool(c).did)
   if (!loaded) return c.json({ error: 'NotFound' }, 404)
   const viewer = c.var.viewer!
   if (loaded.hostDid !== viewer.did) return c.json({ error: 'PermissionDenied' }, 403)
@@ -379,7 +386,13 @@ events.get('/events/:id/attendance', requireViewer, async (c) => {
     db
       .select({ n: sql<number>`count(*)::int`, p: sql<number>`count(*) filter (where participated)::int` })
       .from(attendance)
-      .where(and(eq(attendance.eventUri, uri), isNull(attendance.voidedAt))),
+      .where(
+        and(
+          eq(attendance.eventUri, uri),
+          schoolScope(attendance.schoolDid, currentSchool(c).did),
+          isNull(attendance.voidedAt),
+        ),
+      ),
     db.select().from(attendanceRollup).where(eq(attendanceRollup.eventUri, uri)).limit(1),
   ])
   return c.json({
@@ -404,10 +417,19 @@ export interface LoadedEvent {
   extra: EventExtra
 }
 
-export async function loadEvent(uri: string): Promise<LoadedEvent | null> {
+/**
+ * One event, with every sidecar the projection needs.
+ *
+ * `schoolDid` GATES it: a class on Boulder's calendar is `null` — not 403 — to a request
+ * resolved to Denver, which is what makes every event-keyed route below (the detail page,
+ * the roster, attendance, feedback, RSVP) tenant-safe without each one repeating the
+ * check. Pass `undefined` only from a genuinely school-less caller.
+ */
+export async function loadEvent(uri: string, schoolDid?: string): Promise<LoadedEvent | null> {
   const indexer = await getIndexer()
   const row = await getRecordByUri(indexer, 'event', uri)
   if (!row) return null
+  if (schoolDid !== undefined && (await schoolOfEvent(uri)) !== schoolDid) return null
   const [listings, configs, skills, seriesRows, occurrenceOf, extra] = await Promise.all([
     sidecarsForEvent<EventListing>(indexer, 'eventListing', uri),
     sidecarsForEvent<EventConfig>(indexer, 'eventConfig', uri),

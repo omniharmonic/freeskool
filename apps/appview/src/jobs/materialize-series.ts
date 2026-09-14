@@ -42,7 +42,8 @@ import type { EventConfig, EventListing } from '../lexicons/coop.js'
 import { routeListing, routesOnTags, schoolRoutingTags } from '../lib/events.js'
 import { NSID } from '../lexicons/nsids.js'
 import { normalizeInstant, occurrenceRkey } from '../lib/crypto.js'
-import { schoolActor, schoolDid } from '../lib/school-actor.js'
+import { actorFor, asDid } from '../lib/school-actors.js'
+import { schoolOfEvent, stampEventSchool } from '../lib/event-school.js'
 import { getRecord } from '../lib/pds.js'
 import { resolvePdsEndpoint } from '../lib/identity.js'
 import { describeError, log } from '../lib/logging.js'
@@ -209,9 +210,17 @@ export async function materializeSeries(
   seriesAuthorDid: string,
   series: SeriesRecord,
   now = new Date(),
+  /**
+   * WHOSE SCHEDULING ARTIFACT this is. MS §4: "the materializer resolves the school from
+   * `fs_event_school` of the template" — which is both cheaper and more correct than
+   * looping every school over every series, since a series belongs to exactly one
+   * calendar and an absent row means the legacy school.
+   */
+  school?: string,
 ): Promise<{ written: number; skipped: number }> {
   const parts = parseAtUri(seriesUri)
   if (!parts) return { written: 0, skipped: 0 }
+  const schoolDid = school ?? (await schoolOfEvent(series.firstEvent.uri))
 
   const template = await loadTemplate(series.firstEvent.uri)
   if (!template) return { written: 0, skipped: 0 }
@@ -231,7 +240,7 @@ export async function materializeSeries(
   // Fetched at most once per series, and only if something might actually be listed:
   // `schoolRoutingTags()` is a live read of the school's own record.
   let schoolTags: string[] | undefined
-  const routingTags = async () => (schoolTags ??= await schoolRoutingTags())
+  const routingTags = async () => (schoolTags ??= await schoolRoutingTags(schoolDid))
   // "Does this series route at all?", answered at most once per series. Cheap enough to
   // ask before touching the index for every already-materialized occurrence.
   let routes: boolean | undefined
@@ -275,6 +284,7 @@ export async function materializeSeries(
         schoolTags: await routingTags(),
         action: 'materialize-occurrence',
         auditReason: `list occurrence ${sequence} (config indexed after it was materialized)`,
+        schoolDid,
       })
     } catch (err) {
       // Best effort, like the first-pass listing: the occurrence exists either way and
@@ -318,8 +328,9 @@ export async function materializeSeries(
     }
 
     const endsAt = durationMs ? new Date(instant.getTime() + durationMs).toISOString() : undefined
-    const event = await schoolActor().putRecordAsSchool({
-      schoolDid: schoolDid(),
+    const actor = await actorFor(schoolDid)
+    const event = await actor.putRecordAsSchool({
+      schoolDid: asDid(schoolDid),
       callerDid: seriesAuthorDid as `did:${string}`,
       scope: NSID.event,
       action: 'materialize-occurrence',
@@ -347,14 +358,16 @@ export async function materializeSeries(
       audit: { reason: `materialize occurrence ${i + 1} of series ${parts.rkey}` },
     })
 
+    // The occurrence is on the SAME calendar as its template (MS §4).
+    await stampEventSchool(event.uri, schoolDid)
     await savePresentation(event.uri, presentation)
     // Everything the template carries for its attendees, EXCEPT why the template itself
     // was called off — a fresh date is not cancelled.
     const { cancelReason: _templateCancelReason, ...occurrenceExtra } = extra
     await setEventExtra(event.uri, occurrenceExtra)
 
-    await schoolActor().putRecordAsSchool({
-      schoolDid: schoolDid(),
+    await actor.putRecordAsSchool({
+      schoolDid: asDid(schoolDid),
       callerDid: seriesAuthorDid as `did:${string}`,
       scope: NSID.occurrence,
       action: 'materialize-occurrence',
@@ -384,6 +397,7 @@ export async function materializeSeries(
         schoolTags: await routingTags(),
         action: 'materialize-occurrence',
         auditReason: `list occurrence ${i + 1}`,
+        schoolDid,
       }).catch(() => {
         /* the occurrence exists; listing can be retried */
       })

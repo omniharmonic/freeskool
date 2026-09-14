@@ -14,6 +14,9 @@ import { eventsInWindow, sidecarsForEvent } from '../../index/queries.js'
 import { config } from '../../config.js'
 import { getRecord } from '../../lib/pds.js'
 import { isOwnMemberSet } from '../../lib/roles.js'
+import { schoolsOfEvents } from '../../lib/event-school.js'
+import { legacySchoolDid } from '../../lib/schools.js'
+import { currentSchool } from '../school-context.js'
 import { NSID } from '../../lexicons/nsids.js'
 import type { EventConfig, EventListing } from '../../lexicons/coop.js'
 import { calendarInclusion, projectEvent, type PublicCalendarEntry } from '../visibility.js'
@@ -59,8 +62,7 @@ const HOW_TO_POST =
   '"free-school") and set it to "listed" before the month starts. A class with no venue yet still ' +
   'makes the zine — it is marked "venue needed" so a reader can offer one.'
 
-async function schoolInfo(): Promise<{ name: string; region?: string }> {
-  const did = config().SCHOOL_DID
+async function schoolInfo(did: string): Promise<{ name: string; region?: string }> {
   if (!did) return { name: 'Free School' }
   try {
     const rec = await getRecord(did, NSID.school, 'self')
@@ -76,13 +78,15 @@ zine.get('/zine/:yyyyMm', async (c) => {
   const range = monthRange(c.req.param('yyyyMm'))
   if (!range) return c.json({ error: 'InvalidRequest', message: 'expected a month as yyyy-mm' }, 400)
 
+  const schoolDid = currentSchool(c).did
   const indexer = await getIndexer()
   const events = await eventsInWindow(indexer, range.fromIso, range.toIso, 500)
+  const eventSchools = await schoolsOfEvents(events.map((e) => e.uri))
 
   // One batched membership lookup for the whole month, not one per event (N+1).
   const hosts = await resolveHostDids(events)
   const presentations = await getPresentations(events.map(e => e.uri))
-  const ownDids = await isOwnMemberSet([...events.map((e) => e.did), ...hosts.values()])
+  const ownDids = await isOwnMemberSet([...events.map((e) => e.did), ...hosts.values()], schoolDid)
 
   const projected: PublicCalendarEntry[] = []
   for (const e of events) {
@@ -92,7 +96,9 @@ zine.get('/zine/:yyyyMm', async (c) => {
     ])
     const inputs = { listings: listings.map((l) => l.value), configs: configs.map((x) => x.value) }
     // Same authorship-based inclusion as the calendar (see http/visibility.ts).
-    const { show } = calendarInclusion(ownDids.has(e.did) || ownDids.has(hosts.get(e.uri) ?? e.did), inputs)
+    // Same two-fact rule as the calendar: created in THIS school, and ours by authorship.
+    const ourEvent = (eventSchools.get(e.uri) ?? legacySchoolDid()) === schoolDid
+    const { show } = calendarInclusion(ourEvent && (ownDids.has(e.did) || ownDids.has(hosts.get(e.uri) ?? e.did)), inputs)
     if (!show) continue
     // 'public': this endpoint has no session at all, by design (R9 — no public endpoint
     // enumerates members, and the zine is for anyone to print).
@@ -102,7 +108,7 @@ zine.get('/zine/:yyyyMm', async (c) => {
   return c.json({
     truncated: events.length === 500,
     month: c.req.param('yyyyMm'),
-    school: await schoolInfo(),
+    school: await schoolInfo(schoolDid),
     days: groupByDay(projected),
     howToPost: HOW_TO_POST,
   })

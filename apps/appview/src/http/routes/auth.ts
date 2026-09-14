@@ -16,6 +16,7 @@ import { z } from 'zod'
 import { eq } from 'drizzle-orm'
 import type { AppEnv } from '../session.js'
 import { createSession, destroySession, requireViewer } from '../session.js'
+import { currentSchool, schoolDidOrLegacy } from '../school-context.js'
 import {
   signup,
   verifyEmailToken,
@@ -51,7 +52,9 @@ async function signupHandler(c: Context<AppEnv>) {
   const parsed = signupBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest', message: 'email is required' }, 400)
   try {
-    const result = await signup(parsed.data)
+    // Signing up on a school's host joins THAT school (`lib/membership.ts#joinSchool`
+    // does the rest, on the first session).
+    const result = await signup({ ...parsed.data, schoolDid: schoolDidOrLegacy(c) })
     // The DID and handle go back to the caller (they are about to be public anyway);
     // the email, the password and the invite code never do.
     //
@@ -127,7 +130,7 @@ auth.post('/logout', async (c) => {
 auth.get('/me', requireViewer, async (c) => {
   const viewer = c.var.viewer!
   const [role, custodial, prefsRows] = await Promise.all([
-    roleOf(viewer.did),
+    roleOf(viewer.did, schoolDidOrLegacy(c)),
     getCustodialAccount(viewer.did),
     getDb().select({ onboardedAt: memberPrefs.onboardedAt }).from(memberPrefs).where(eq(memberPrefs.did, viewer.did)).limit(1),
   ])

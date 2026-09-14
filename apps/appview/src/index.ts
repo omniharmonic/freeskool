@@ -13,7 +13,7 @@ import { startJobs } from './jobs/index.js'
 import { getIndexer } from './index/indexer.js'
 import { startPeerLiveSync } from './index/live-sync.js'
 import { refreshPolicyCache } from './lib/policy.js'
-import { ensureLegacySchoolRow } from './lib/schools.js'
+import { ensureLegacySchoolRow, listSchools } from './lib/schools.js'
 import { seedSkillTiers } from './lib/skill-tiers.js'
 import { resetDevMailSink } from './lib/mail.js'
 import { closeDb } from './db/index.js'
@@ -38,6 +38,11 @@ export async function main(): Promise<{ close: () => Promise<void> }> {
   await seedSkillTiers().catch((err) => log.warn('skill-tier boot-seed failed', { detail: describeError(err) }))
   const indexer = await getIndexer()
   await indexer.init()
+  // Warm the policy cache for EVERY school this AppView hosts (MS Appendix A), falling
+  // back to the env-configured one for a deployment whose registry row is not there yet.
+  for (const s of await listSchools().catch(() => [])) {
+    await refreshPolicyCache(s.did).catch(() => {})
+  }
   if (c.SCHOOL_DID) await refreshPolicyCache(c.SCHOOL_DID).catch(() => {})
 
   const app = createApp()

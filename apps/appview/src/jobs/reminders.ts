@@ -23,6 +23,7 @@ import { rsvp } from '../db/schema.js'
 import { getIndexer } from '../index/indexer.js'
 import { eventsInWindow } from '../index/queries.js'
 import { enqueueNotification } from '../notifications/dispatch.js'
+import { schoolOfEvent } from '../lib/event-school.js'
 
 export const CATCH_UP_MS = 30 * 60_000
 export type ReminderKind = '24h' | '1h' | 'day-of'
@@ -78,6 +79,7 @@ export async function runReminders(now = new Date()): Promise<ReminderResult> {
   let queued = 0
   const digestDue = isDigestDue(now)
   const digestByDid = new Map<string, string[]>()
+  const digestSchool = new Map<string, string>()
 
   for (const e of events) {
     const startsAtRaw = e.value.startsAt
@@ -88,6 +90,7 @@ export async function runReminders(now = new Date()): Promise<ReminderResult> {
 
     const dids = await goingDids(e.uri)
     if (dids.length === 0) continue
+    const schoolDid = await schoolOfEvent(e.uri)
 
     for (const kind of ['24h', '1h'] as const) {
       if (!isReminderDue(startsAt, kind, now)) continue
@@ -98,13 +101,19 @@ export async function runReminders(now = new Date()): Promise<ReminderResult> {
           dedupKey: `event.reminder:${kind}:${e.uri}:${did}`,
           title: kind === '1h' ? `"${name}" starts in an hour` : `"${name}" is tomorrow`,
           navigate: `/events/${encodeURIComponent(e.uri)}`,
+          schoolDid,
         })
         if (res.claimed) queued++
       }
     }
 
     if (digestDue && sameUtcDay(startsAt, now)) {
-      for (const did of dids) digestByDid.set(did, [...(digestByDid.get(did) ?? []), name])
+      for (const did of dids) {
+        digestByDid.set(did, [...(digestByDid.get(did) ?? []), name])
+        // A member of two schools gets one digest per school, not one merged across both
+        // (MS §10.1: no cross-school aggregate is ever rendered).
+        digestSchool.set(did, schoolDid)
+      }
     }
   }
 
@@ -118,6 +127,7 @@ export async function runReminders(now = new Date()): Promise<ReminderResult> {
         title: names.length === 1 ? `Today: ${names[0]}` : `Today: ${names.length} classes`,
         body: names.join(', '),
         navigate: '/calendar',
+        ...(digestSchool.get(did) ? { schoolDid: digestSchool.get(did)! } : {}),
       })
       if (res.claimed) queued++
     }

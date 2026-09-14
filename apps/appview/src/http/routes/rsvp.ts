@@ -35,6 +35,7 @@ import { getRecordByUri, parseAtUri } from '../../index/queries.js'
 import { getRecord } from '../../lib/pds.js'
 import { resolvePdsEndpoint } from '../../lib/identity.js'
 import { log } from '../../lib/logging.js'
+import { currentSchool } from '../school-context.js'
 
 export const rsvps = new Hono<AppEnv>()
 
@@ -50,7 +51,8 @@ rsvps.post('/rsvp', requireViewer, async (c) => {
   const viewer = c.var.viewer!
   const { eventUri, status, alsoPublicRecord } = parsed.data
 
-  const loaded = await loadEvent(eventUri)
+  const schoolDid = currentSchool(c).did
+  const loaded = await loadEvent(eventUri, schoolDid)
   if (!loaded) return c.json({ error: 'NotFound' }, 404)
 
   const existing = await myRsvp(eventUri, viewer.did)
@@ -83,12 +85,12 @@ rsvps.post('/rsvp', requireViewer, async (c) => {
     publicRecordUri = null
   }
 
-  await upsertRsvp({ eventUri, did: viewer.did, status: finalStatus, alsoPublicRecord, publicRecordUri })
+  await upsertRsvp({ eventUri, did: viewer.did, status: finalStatus, alsoPublicRecord, publicRecordUri, schoolDid })
 
   // A departure from 'going' frees a spot — promote whoever has waited longest, and
   // tell them (I2: the promoted member used to learn this only by checking back).
   if (existing?.status === 'going' && finalStatus !== 'going') {
-    await notifyIfPromoted(await promoteFromWaitlist(eventUri), eventUri, loaded.event.name)
+    await notifyIfPromoted(await promoteFromWaitlist(eventUri), eventUri, loaded.event.name, schoolDid)
   }
 
   // The host learns that someone RSVP'd. They are told WHO only because they will meet
@@ -100,6 +102,7 @@ rsvps.post('/rsvp', requireViewer, async (c) => {
       dedupKey: `rsvp.received:${eventUri}:${viewer.did}:going`,
       title: `Someone is coming to "${loaded.event.name ?? 'your class'}"`,
       navigate: `/events/${encodeURIComponent(eventUri)}`,
+      schoolDid,
     })
   }
 
@@ -116,6 +119,8 @@ rsvps.delete('/rsvp', requireViewer, async (c) => {
   const eventUri = c.req.query('eventUri')
   if (!eventUri) return c.json({ error: 'InvalidRequest' }, 400)
   const viewer = c.var.viewer!
+  // Same gate as POST: a class on another school's calendar is not found here.
+  if (!(await loadEvent(eventUri, currentSchool(c).did))) return c.json({ error: 'NotFound' }, 404)
   const removed = await deleteRsvp(eventUri, viewer.did)
   if (removed?.publicRecordUri) {
     await deletePublicRsvp(viewer, removed.publicRecordUri).catch(() => {})
@@ -124,8 +129,8 @@ rsvps.delete('/rsvp', requireViewer, async (c) => {
   if (removed?.wasGoing) {
     const promoted = await promoteFromWaitlist(eventUri)
     if (promoted) {
-      const loaded = await loadEvent(eventUri)
-      await notifyIfPromoted(promoted, eventUri, loaded?.event.name)
+      const loaded = await loadEvent(eventUri, currentSchool(c).did)
+      await notifyIfPromoted(promoted, eventUri, loaded?.event.name, currentSchool(c).did)
     }
   }
   return c.json({ ok: true, counts: await rsvpCounts(eventUri) })
@@ -135,6 +140,7 @@ rsvps.delete('/rsvp', requireViewer, async (c) => {
 rsvps.get('/rsvp', requireViewer, async (c) => {
   const eventUri = c.req.query('eventUri')
   if (!eventUri) return c.json({ error: 'InvalidRequest' }, 400)
+  if (!(await loadEvent(eventUri, currentSchool(c).did))) return c.json({ error: 'NotFound' }, 404)
   const did = c.var.viewer!.did
   const row = await myRsvp(eventUri, did)
   return c.json({
@@ -160,6 +166,7 @@ async function notifyIfPromoted(
   promoted: { did: string } | null,
   eventUri: string,
   eventName: string | undefined,
+  schoolDid?: string,
 ): Promise<void> {
   if (!promoted) return
   await enqueueNotification({
@@ -168,6 +175,7 @@ async function notifyIfPromoted(
     dedupKey: `rsvp.promoted:${eventUri}:${promoted.did}`,
     title: `A spot opened up — you're in for "${eventName ?? 'the class'}"`,
     navigate: `/events/${encodeURIComponent(eventUri)}`,
+    ...(schoolDid ? { schoolDid } : {}),
   })
 }
 
