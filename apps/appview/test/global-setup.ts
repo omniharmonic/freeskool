@@ -3,7 +3,8 @@
  * never point at the database the dev AppView (and the demo seed) use. `vitest.config.ts`
  * pins `DATABASE_URL` to `freeschool_test`; this creates that database if it is missing
  * and applies the migrations (fs_* via drizzle, contrail schema via contrail.init()).
- * Set `DATABASE_URL` explicitly to run the suite somewhere else (CI).
+ * Set `TEST_DATABASE_URL` to run the suite somewhere else (CI); `DATABASE_URL` from a
+ * sourced .env is deliberately ignored so the dev database is never truncated.
  */
 import pg from 'pg'
 
@@ -13,7 +14,7 @@ export default async function setup(): Promise<void> {
   // `test.env` in vitest.config.ts reaches the test workers, not this setup process:
   // pin the variable here too, BEFORE `config()` is first read by the migration import,
   // or the migrations (and contrail's schema) land on the dev database instead.
-  process.env.DATABASE_URL ??= TEST_DATABASE_URL
+  process.env.DATABASE_URL = process.env.TEST_DATABASE_URL ?? TEST_DATABASE_URL
   const url = new URL(process.env.DATABASE_URL)
   const dbName = url.pathname.replace(/^\//, '')
   const admin = new URL(url.toString())
