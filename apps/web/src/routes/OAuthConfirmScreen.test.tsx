@@ -77,10 +77,11 @@ describe('OAuthConfirmScreen', () => {
     expect(vi.mocked(fetch).mock.calls[0]?.[0]).toBe('/oauth/client-metadata.json');
   });
 
-  it('shows the unavailable message when the probe returns 503 OAuthUnavailable', async () => {
+  it('shows the unavailable message when the probe returns 503 OAuthUnavailable, and does not navigate', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       new Response(JSON.stringify({ error: 'OAuthUnavailable', message: 'no https origin' }), { status: 503 }),
     );
+    Object.defineProperty(window, 'location', { value: { ...originalLocation, href: '' }, writable: true });
 
     render(<OAuthConfirmScreen />);
     fireEvent.change(screen.getByLabelText('Your handle, like name.bsky.social'), {
@@ -90,6 +91,7 @@ describe('OAuthConfirmScreen', () => {
 
     expect(await screen.findByText(UNAVAILABLE_MESSAGE)).toBeInTheDocument();
     expect(fetch).toHaveBeenCalledTimes(1);
+    expect(window.location.href).toBe('');
   });
 
   it('also shows the unavailable message for the real server error code (OAuthNotConfigured, status 503)', async () => {
@@ -110,8 +112,9 @@ describe('OAuthConfirmScreen', () => {
     expect(await screen.findByText(UNAVAILABLE_MESSAGE)).toBeInTheDocument();
   });
 
-  it('shows a generic message when the probe fails for some other reason', async () => {
+  it('a non-ok, non-503 probe response still navigates, with no error flash — the start route is the real check', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(new Response('{}', { status: 500 }));
+    Object.defineProperty(window, 'location', { value: { ...originalLocation, href: '' }, writable: true });
 
     render(<OAuthConfirmScreen />);
     fireEvent.change(screen.getByLabelText('Your handle, like name.bsky.social'), {
@@ -119,11 +122,31 @@ describe('OAuthConfirmScreen', () => {
     });
     fireEvent.click(screen.getByRole('button', { name: 'Continue anyway' }));
 
-    expect(await screen.findByText('Could not start sign-in. Try again.')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(window.location.href).toBe('/api/auth/oauth/start?confirm=1&handle=wren.bsky.social'),
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
-  it('shows a generic message when the probe throws (network failure)', async () => {
+  it('an ok probe with a malformed body still navigates, with no error flash', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('not json{{{', { status: 200 }));
+    Object.defineProperty(window, 'location', { value: { ...originalLocation, href: '' }, writable: true });
+
+    render(<OAuthConfirmScreen />);
+    fireEvent.change(screen.getByLabelText('Your handle, like name.bsky.social'), {
+      target: { value: 'wren.bsky.social' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Continue anyway' }));
+
+    await waitFor(() =>
+      expect(window.location.href).toBe('/api/auth/oauth/start?confirm=1&handle=wren.bsky.social'),
+    );
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows a generic message when the probe throws (network failure), and does not navigate', async () => {
     vi.mocked(fetch).mockRejectedValueOnce(new Error('network down'));
+    Object.defineProperty(window, 'location', { value: { ...originalLocation, href: '' }, writable: true });
 
     render(<OAuthConfirmScreen />);
     fireEvent.change(screen.getByLabelText('Your handle, like name.bsky.social'), {
@@ -132,5 +155,47 @@ describe('OAuthConfirmScreen', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Continue anyway' }));
 
     expect(await screen.findByText('Could not start sign-in. Try again.')).toBeInTheDocument();
+    expect(window.location.href).toBe('');
+  });
+
+  it('pressing Enter in the handle field submits exactly like the button — one probe, one navigation', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('{}', { status: 200 }));
+    Object.defineProperty(window, 'location', { value: { ...originalLocation, href: '' }, writable: true });
+
+    render(<OAuthConfirmScreen />);
+    const input = screen.getByLabelText('Your handle, like name.bsky.social');
+    fireEvent.change(input, { target: { value: 'wren.bsky.social' } });
+    fireEvent.submit(input.closest('form') as HTMLFormElement);
+
+    await waitFor(() =>
+      expect(window.location.href).toBe('/api/auth/oauth/start?confirm=1&handle=wren.bsky.social'),
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('two rapid submits produce one probe, one redirect, and no error text', async () => {
+    // Slow enough that both clicks land before the first probe resolves —
+    // exactly the race that used to flash an error right before Bluesky.
+    let resolveProbe!: (value: Response) => void;
+    vi.mocked(fetch).mockReturnValueOnce(new Promise((resolve) => { resolveProbe = resolve; }));
+    Object.defineProperty(window, 'location', { value: { ...originalLocation, href: '' }, writable: true });
+
+    render(<OAuthConfirmScreen />);
+    fireEvent.change(screen.getByLabelText('Your handle, like name.bsky.social'), {
+      target: { value: 'wren.bsky.social' },
+    });
+    const button = screen.getByRole('button', { name: 'Continue anyway' });
+    fireEvent.click(button);
+    fireEvent.click(button);
+    fireEvent.click(button);
+
+    resolveProbe(new Response('{}', { status: 200 }));
+
+    await waitFor(() =>
+      expect(window.location.href).toBe('/api/auth/oauth/start?confirm=1&handle=wren.bsky.social'),
+    );
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
