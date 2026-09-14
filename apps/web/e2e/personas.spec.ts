@@ -102,8 +102,10 @@ test.describe.serial('1. A newcomer arrives, chooses a handle, and turns up in t
     await page.getByLabel('Display name').fill(name);
     await page.getByLabel('A line about you').fill('Just moved here. Mostly here for the bread.');
     await page.getByRole('button', { name: 'Save and continue' }).click();
-    await expect(page.getByRole('button', { name: 'Save and continue' })).toBeVisible();
+    // Cards collapse as they are done with (UX audit journey finding 7): the profile
+    // card goes away and the skills card is what is on screen now.
     await expect(page.getByText('Step 3 of 3')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'What could you share?' })).toBeVisible();
   });
 
   test('two skills are found by typing, and Finish lands on the requests board', async () => {

@@ -34,7 +34,7 @@ vi.mock('../../lib/api', () => {
 });
 
 const { api } = await import('../../lib/api');
-const { AdminOverviewScreen } = await import('./AdminLayout');
+const { AdminLayout, AdminOverviewScreen } = await import('./AdminLayout');
 
 const memberMe = {
   did: 'did:plc:member1',
@@ -53,6 +53,40 @@ function renderOverview() {
     </QueryClientProvider>,
   );
 }
+
+describe('the steward screens\' help line', () => {
+  beforeEach(() => {
+    vi.mocked(api.auth.me).mockReset().mockResolvedValue({ ...memberMe, role: 40 });
+    vi.mocked(api.admin.skills.proposals).mockReset().mockResolvedValue({ proposals: [] });
+  });
+
+  // UX audit journey finding 15: every steward screen assumed its own vocabulary.
+  it('prints the one-line explanation above the tool', async () => {
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <AdminLayout title="Moderation" current="moderation" help="An item is one thing a steward wants to do.">
+          <p>the tool</p>
+        </AdminLayout>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText('An item is one thing a steward wants to do.')).toBeInTheDocument();
+  });
+
+  it('is inside the steward gate: a member sees the notice and no help text', async () => {
+    vi.mocked(api.auth.me).mockResolvedValue(memberMe);
+    render(
+      <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+        <AdminLayout title="Moderation" current="moderation" help="An item is one thing a steward wants to do.">
+          <p>the tool</p>
+        </AdminLayout>
+      </QueryClientProvider>,
+    );
+
+    expect(await screen.findByText('Stewards only.')).toBeInTheDocument();
+    expect(screen.queryByText('An item is one thing a steward wants to do.')).not.toBeInTheDocument();
+  });
+});
 
 describe('AdminOverviewScreen', () => {
   beforeEach(() => {

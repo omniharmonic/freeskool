@@ -31,7 +31,8 @@ import { oauthClient, oauthOriginState, OAuthUnavailableError } from '../oauth.j
 import { config } from '../../config.js'
 import { roleOf } from '../../lib/roles.js'
 import { getDb } from '../../db/index.js'
-import { custodialAccount, memberPrefs, membership, school as schoolTable } from '../../db/schema.js'
+import { custodialAccount, membership, school as schoolTable } from '../../db/schema.js'
+import { loadDirectoryPrefs } from '../../lib/profile.js'
 import { canonicalHostsFor, getSchool, schoolHostFor } from '../../lib/schools.js'
 import { isMemberOf } from '../../lib/membership.js'
 import { describeError, log } from '../../lib/logging.js'
@@ -155,10 +156,12 @@ auth.post('/logout', async (c) => {
 auth.get('/me', requireViewer, async (c) => {
   const viewer = c.var.viewer!
   const here = c.var.school ?? (await legacySchool())
-  const [role, custodial, prefsRows, schools] = await Promise.all([
+  const [role, custodial, prefs, schools] = await Promise.all([
     roleOf(viewer.did, schoolDidOrLegacy(c)),
     getCustodialAccount(viewer.did),
-    getDb().select({ onboardedAt: memberPrefs.onboardedAt }).from(memberPrefs).where(eq(memberPrefs.did, viewer.did)).limit(1),
+    // The SHARED loader, not a second copy of the query (final-review nit 7): `GET /api/me`
+    // reads `onboarded` through `loadDirectoryPrefs` and these two must never drift.
+    loadDirectoryPrefs(viewer.did, schoolDidOrLegacy(c)),
     schoolsForViewer(viewer.did),
   ])
   return c.json({
@@ -168,9 +171,7 @@ auth.get('/me', requireViewer, async (c) => {
     handle: custodial?.handle,
     isCustodial: custodial?.isCustodial ?? false,
     emailVerified: Boolean(custodial?.verifiedAt),
-    // Task 6: consistent with `GET /api/me`'s own `onboarded` field — see `me.ts`'s
-    // `loadDirectoryPrefs`, which reads the same column the same way.
-    onboarded: (prefsRows[0]?.onboardedAt ?? null) != null,
+    onboarded: prefs.onboarded,
     ...(here?.did ? { school: { did: here.did, label: here.label, name: here.name } } : {}),
     schools,
   })

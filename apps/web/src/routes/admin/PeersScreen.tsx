@@ -63,7 +63,12 @@ export function PeersScreen() {
   };
 
   return (
-    <AdminLayout title="Peers" current="peers" standfirst="Other PDS hosts this school's index reads from.">
+    <AdminLayout
+      title="Peers"
+      current="peers"
+      standfirst="Other PDS hosts this school's index reads from."
+      help="A peer is another school's server that this school reads from, so what they publish can appear here. Adding one gives nobody any power at this school and shares nothing about your members — it only widens what this school can see."
+    >
       <div className="space-y-5">
         <div className="plate space-y-3 p-3.5">
           <label className="block">

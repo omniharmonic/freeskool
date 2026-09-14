@@ -34,6 +34,7 @@ vi.mock('../lib/api', () => {
       members: { get: vi.fn() },
       attestations: { create: vi.fn(), remove: vi.fn() },
       me: { attestations: vi.fn() },
+      requests: { create: vi.fn() },
     },
     ApiError,
   };
@@ -99,6 +100,7 @@ describe('MemberProfileScreen', () => {
     vi.mocked(api.me.attestations).mockReset().mockResolvedValue({ given: [], received: [] });
     vi.mocked(api.attestations.create).mockReset().mockResolvedValue({ id: 'att1' });
     vi.mocked(api.attestations.remove).mockReset().mockResolvedValue(undefined);
+    vi.mocked(api.requests.create).mockReset().mockResolvedValue({ uri: 'at://did:plc:viewer/freeschool.draft.request/r1', cid: 'bafy' });
   });
 
   it('shows the member, their claims grouped by level, what they host, and their notes', async () => {
@@ -244,6 +246,65 @@ describe('MemberProfileScreen', () => {
     fireEvent.click(await screen.findByRole('button', { name: /who vouched \(1\)/i }));
 
     expect(await screen.findByText('Juno Marsh')).toBeInTheDocument();
+  });
+
+  it('explains what a vouch is, beside the button, and links to the longer answer', async () => {
+    renderScreen();
+
+    expect(
+      await screen.findByText(/A vouch says you have seen this person do this/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/who vouched is visible only to them/i)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'How vouches work' })).toHaveAttribute('href', '/how-it-works');
+  });
+
+  describe('"Ask <name> to teach this"', () => {
+    it('posts an ordinary request for that skill, addressed to them', async () => {
+      renderScreen();
+
+      fireEvent.click((await screen.findAllByRole('button', { name: 'Ask Wren to teach this' }))[0]!);
+
+      await waitFor(() =>
+        expect(api.requests.create).toHaveBeenCalledWith({
+          title: 'Mending',
+          skill: SKILL_URI,
+          askedOf: SUBJECT_DID,
+        }),
+      );
+      // Said back in the member's own words, including that they were told.
+      expect(await screen.findByText(/Wren has been told/)).toBeInTheDocument();
+    });
+
+    it('is offered for every skill they claim', async () => {
+      renderScreen();
+      expect(await screen.findAllByRole('button', { name: 'Ask Wren to teach this' })).toHaveLength(2);
+    });
+
+    it('is never offered on your own profile — you cannot ask yourself', async () => {
+      vi.mocked(api.auth.me).mockResolvedValue({
+        did: SUBJECT_DID,
+        kind: 'custodial',
+        role: 20,
+        handle: 'wren.fs.boulder',
+        isCustodial: true,
+        emailVerified: true,
+        onboarded: true,
+      });
+      renderScreen();
+
+      await screen.findByRole('heading', { name: 'Wren Halloway' });
+      expect(screen.queryByRole('button', { name: /Ask .* to teach this/ })).not.toBeInTheDocument();
+    });
+
+    it('says so and leaves the button alone when the ask is refused', async () => {
+      vi.mocked(api.requests.create).mockRejectedValue(new ApiError(500, 'Internal', 'nope'));
+      renderScreen();
+
+      fireEvent.click((await screen.findAllByRole('button', { name: 'Ask Wren to teach this' }))[0]!);
+
+      expect(await screen.findByRole('alert')).toHaveTextContent(/could not send that ask/i);
+      expect(screen.getAllByRole('button', { name: 'Ask Wren to teach this' }).length).toBeGreaterThan(0);
+    });
   });
 
   it('says plainly when the member is not in the directory', async () => {

@@ -81,6 +81,7 @@ export function SkillsAdminScreen() {
       title="Skills"
       current="skills"
       standfirst="Review what members have proposed for the shared taxonomy."
+      help="Anyone can propose a skill and it appears straight away — nothing here is an approval queue. Your job is tidying: move a skill under a better parent, or retire one that duplicates another. Retiring hides it from new classes and leaves every class and claim already filed under it alone."
     >
       {isPending ? <LoadingState label="Loading proposed skills…" /> : null}
       {isError ? (

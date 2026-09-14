@@ -181,7 +181,26 @@ function WelcomeCards({
       title="Welcome to Free School"
       description="Three small things before you go in. You can skip any of them and change all of them later."
     >
+      {/* UX audit journey finding 7 / controller 7: the counter used to sit over three
+          cards that were all open at once, so it read like a wizard and gated nothing —
+          and on a phone the page was very long. One card at a time, the strip moving with
+          it, and every card still skippable. */}
       <p className="stamp text-caption text-ink-soft">Step {Math.min(step, 3)} of 3</p>
+      <ol className="mt-1.5 flex gap-1.5" aria-label="Onboarding steps">
+        {[1, 2, 3].map((n) => (
+          <li
+            key={n}
+            aria-current={step === n ? 'step' : undefined}
+            className="h-1 flex-1 border-[1.5px] border-ink"
+            style={{ background: step >= n ? 'var(--c-ink)' : 'transparent' }}
+          >
+            <span className="sr-only">
+              Step {n}
+              {step === n ? ' (current)' : step > n ? ' (done)' : ''}
+            </span>
+          </li>
+        ))}
+      </ol>
 
       <section className="plate mt-3 p-4">
         <h2 className="text-lede font-bold">Choose your handle</h2>
@@ -206,7 +225,7 @@ function WelcomeCards({
               Choose my own
             </Button>
             <Button variant="quiet" ink="ink" onClick={() => advance(1)}>
-              Skip choosing a handle
+              Next
             </Button>
           </div>
         )}
@@ -217,6 +236,7 @@ function WelcomeCards({
         </p>
       </section>
 
+      {step >= 2 ? (
       <section className="plate mt-3 p-4">
         <h2 className="text-lede font-bold">Say who you are</h2>
         <p className="mt-2 text-caption text-ink-soft">Only people at this school see this.</p>
@@ -260,7 +280,9 @@ function WelcomeCards({
           </Button>
         </div>
       </section>
+      ) : null}
 
+      {step >= 3 ? (
       <section className="plate mt-3 p-4">
         <h2 className="text-lede font-bold">What could you share?</h2>
         <p className="mt-2 text-caption text-ink-soft">
@@ -287,6 +309,7 @@ function WelcomeCards({
           </Button>
         </div>
       </section>
+      ) : null}
 
       <div className="mt-6">
         <Button wide disabled={onboarded.isPending} onClick={() => void finish()}>

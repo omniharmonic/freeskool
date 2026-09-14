@@ -84,6 +84,21 @@ async function typeHandle(prefix: string) {
   fireEvent.change(await screen.findByLabelText('Your handle'), { target: { value: prefix } });
 }
 
+/**
+ * Cards 2 and 3 are collapsed until the card before them is done with (UX audit journey
+ * finding 7), so every test that wants one opens it the way a member does.
+ */
+async function openProfileCard() {
+  fireEvent.click(await screen.findByRole('button', { name: 'Next' }));
+  return screen.findByLabelText('Display name');
+}
+
+async function openSkillsCard() {
+  await openProfileCard();
+  fireEvent.click(screen.getByRole('button', { name: 'Skip the profile' }));
+  return screen.findByLabelText('Search the skill taxonomy');
+}
+
 describe('WelcomeScreen', () => {
   beforeEach(() => {
     navigateSpy.mockReset();
@@ -222,7 +237,7 @@ describe('WelcomeScreen', () => {
   it('saves the profile card without publishing anything', async () => {
     renderScreen();
 
-    fireEvent.change(await screen.findByLabelText('Display name'), { target: { value: 'Wren Halloway' } });
+    fireEvent.change(await openProfileCard(), { target: { value: 'Wren Halloway' } });
     fireEvent.change(screen.getByLabelText('A line about you'), { target: { value: 'Mending pile.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
 
@@ -242,7 +257,7 @@ describe('WelcomeScreen', () => {
     });
     renderScreen();
 
-    expect(await screen.findByLabelText('Display name')).toHaveValue('Wren Halloway');
+    expect(await openProfileCard()).toHaveValue('Wren Halloway');
     expect(screen.getByLabelText('A line about you')).toHaveValue('Mending pile.');
   });
 
@@ -257,7 +272,7 @@ describe('WelcomeScreen', () => {
     });
     renderScreen();
 
-    fireEvent.change(await screen.findByLabelText('Display name'), { target: { value: '' } });
+    fireEvent.change(await openProfileCard(), { target: { value: '' } });
     fireEvent.change(screen.getByLabelText('A line about you'), { target: { value: '' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
 
@@ -276,7 +291,8 @@ describe('WelcomeScreen', () => {
     });
     renderScreen();
 
-    fireEvent.change(await screen.findByLabelText('A line about you'), { target: { value: 'Two dull knives.' } });
+    await openProfileCard();
+    fireEvent.change(screen.getByLabelText('A line about you'), { target: { value: 'Two dull knives.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save and continue' }));
 
     await waitFor(() => expect(api.me.updateProfile).toHaveBeenCalledWith({ bio: 'Two dull knives.' }));
@@ -301,7 +317,8 @@ describe('WelcomeScreen', () => {
   it('saves chosen skills school-only, at "practicing"', async () => {
     renderScreen();
 
-    fireEvent.change(await screen.findByLabelText('Search the skill taxonomy'), { target: { value: 'bread' } });
+    await openSkillsCard();
+    fireEvent.change(screen.getByLabelText('Search the skill taxonomy'), { target: { value: 'bread' } });
     fireEvent.click(await screen.findByRole('option', { name: 'Bread baking' }));
     fireEvent.click(screen.getByRole('button', { name: 'Save these skills' }));
 
@@ -316,11 +333,17 @@ describe('WelcomeScreen', () => {
     renderScreen();
     await screen.findByText('Step 1 of 3');
 
-    fireEvent.click(screen.getByRole('button', { name: 'Skip choosing a handle' }));
+    // Card 2 is not on the page at all until card 1 is done with (finding 7).
+    expect(screen.queryByLabelText('Display name')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     expect(await screen.findByText('Step 2 of 3')).toBeInTheDocument();
+    expect(screen.getByLabelText('Display name')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Search the skill taxonomy')).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Skip the profile' }));
     expect(await screen.findByText('Step 3 of 3')).toBeInTheDocument();
+    expect(screen.getByLabelText('Search the skill taxonomy')).toBeInTheDocument();
   });
 
   it('Finish marks the member onboarded and lands them on the requests board', async () => {

@@ -43,7 +43,7 @@ import { requireViewer } from '../session.js'
 import { evidenceFor, roleOf } from '../../lib/roles.js'
 import { myRsvps } from '../../lib/rsvp.js'
 import { getIndexer } from '../../index/indexer.js'
-import { getRecordByUri, listCollection } from '../../index/queries.js'
+import { getRecordByUri, listCollection, parseAtUri } from '../../index/queries.js'
 import { getDb } from '../../db/index.js'
 import { appMeta, attendanceTally, attestation, custodialAccount, memberPrefs } from '../../db/schema.js'
 import { getThresholds } from '../../lib/policy.js'
@@ -140,15 +140,18 @@ me.put('/', async (c) => {
   const parsed = profileBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest', issues: parsed.error.issues.map((i) => i.path.join('.')) }, 400)
   const viewer = c.var.viewer!
-  if (parsed.data.publicListing && viewer.kind === 'oauth' && !parsed.data.confirmPublicLinkage) {
-    return c.json(
-      {
-        error: 'PublicLinkageConfirmRequired',
-        message: 'publishing from an existing account links it to this school permanently; resend with confirmPublicLinkage: true',
-      },
-      400,
-    )
-  }
+  // The SAME rule as a public skill claim, from the same function rather than from a
+  // second copy of the sentence (final-review nit 6): an OAuth-door session confirms the
+  // permanent linkage once, out loud, on the request that needs it. Listing yourself
+  // publicly is not a skill and carries no tier, so the tier half is handed an already-
+  // confirmed 'A' — `confirmTierB: true` — and only the linkage half can refuse.
+  const linkage = checkPublicClaims(
+    viewer.kind,
+    parsed.data.publicListing ? ['A'] : [],
+    true,
+    parsed.data.confirmPublicLinkage ?? false,
+  )
+  if (!linkage.ok) return c.json({ error: linkage.error, message: linkage.message }, linkage.status)
   const { confirmPublicLinkage: _confirm, ...fields } = parsed.data
   const profile = await saveProfile(viewer.did, fields, currentSchool(c).did)
   return c.json({
@@ -406,13 +409,38 @@ export async function displayNamesForDids(dids: string[]): Promise<Record<string
   return out
 }
 
-/** Batched skill-uri -> label lookup, for the received-vouches list and the directory. */
+/**
+ * Batched skill-uri -> label lookup, for the received-vouches list and the directory.
+ *
+ * ONE INDEX QUERY PER REPO, not one per skill (final-review nit 9). Every canonical skill
+ * lives in the taxonomy authority's repo, so a page of vouches spanning twenty skills is
+ * one walk of that repo rather than twenty `getRecordByUri` scans of it — and a member's
+ * own proposal, which lives in their own repo, adds exactly one more. Anything the index
+ * has not got is named `'a skill'`, the same fallback as before: a label we cannot resolve
+ * must never surface as a raw AT-URI.
+ */
 export async function labelsForSkills(skillUris: string[], indexer: Awaited<ReturnType<typeof getIndexer>>): Promise<Record<string, string>> {
   const out: Record<string, string> = {}
+  if (skillUris.length === 0) return out
+
+  const byRepo = new Map<string, Set<string>>()
+  for (const uri of skillUris) {
+    out[uri] = 'a skill'
+    const did = parseAtUri(uri)?.did
+    if (!did) continue
+    const wanted = byRepo.get(did) ?? new Set<string>()
+    wanted.add(uri)
+    byRepo.set(did, wanted)
+  }
+
   await Promise.all(
-    skillUris.map(async (uri) => {
-      const skill = await getRecordByUri<{ label?: string }>(indexer, 'skill', uri)
-      out[uri] = skill?.value.label ?? 'a skill'
+    [...byRepo.entries()].map(async ([did, wanted]) => {
+      // `limit` is what makes `listCollection` follow contrail's cursor past the first
+      // page; without it a repo of more than 200 skills would answer only its first.
+      const { records } = await listCollection<{ label?: string }>(indexer, 'skill', { did, limit: 5000 })
+      for (const record of records) {
+        if (wanted.has(record.uri) && record.value.label) out[record.uri] = record.value.label
+      }
     }),
   )
   return out

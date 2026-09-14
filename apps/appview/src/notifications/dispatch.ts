@@ -41,6 +41,10 @@ export const CATEGORIES = [
   'offering.published',
   'member.joined',
   'feedback.received',
+  // "Rosa asked if you would teach bicycle mechanics" (UX audit journey finding 13). The
+  // ONLY place the asked member is named — the request record itself never is (see
+  // `lib/requests.ts`), so this notification is the whole of how they find out.
+  'request.asked-of',
 ] as const
 export type Category = (typeof CATEGORIES)[number]
 

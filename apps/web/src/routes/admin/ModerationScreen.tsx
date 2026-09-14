@@ -108,7 +108,12 @@ export function ModerationScreen() {
   const items = data?.items ?? [];
 
   return (
-    <AdminLayout title="Moderation" current="moderation" standfirst="Open, approve, and run destructive actions — every one needs a written reason.">
+    <AdminLayout
+      title="Moderation"
+      current="moderation"
+      standfirst="Open, approve, and run destructive actions — every one needs a written reason."
+      help="An item is one thing a steward wants to do that cannot be undone — take a class down, remove a member. Opening one writes down who asked and why; it does nothing until enough stewards agree and one of them runs it. The reason is kept for stewards and is never shown to the school."
+    >
       <section aria-labelledby="propose-heading" className="mb-7">
         <h2 id="propose-heading" className="mb-2.5 text-lede font-bold">
           Open an item

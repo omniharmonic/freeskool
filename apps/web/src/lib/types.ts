@@ -462,6 +462,13 @@ export interface CreateRequestInput {
   description?: string;
   skill?: string;
   threshold?: number;
+  /**
+   * "Ask <name> to teach this" — the member this request is addressed to.
+   * APP-SIDE ON THE APPVIEW: it never reaches the public request record, which
+   * must not name a person who did not write it. The only one who learns of it
+   * is the member asked, in their own notifications.
+   */
+  askedOf?: string;
 }
 
 export interface RequestClaimInput {

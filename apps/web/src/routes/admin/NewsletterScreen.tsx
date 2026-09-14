@@ -46,7 +46,12 @@ export function NewsletterScreen() {
   };
 
   return (
-    <AdminLayout title="Newsletter" current="newsletter" standfirst="A monthly digest of listed classes — counts and dates only, never a roster.">
+    <AdminLayout
+      title="Newsletter"
+      current="newsletter"
+      standfirst="A monthly digest of listed classes — counts and dates only, never a roster."
+      help="Free School writes this for you out of the month's listed classes — you are not composing anything by hand. Read the draft, then decide whether it goes out. Subscribers are never shown to you, before or after."
+    >
       <div className="space-y-5">
         <div className="plate space-y-3 p-3.5">
           <label className="block">
@@ -64,28 +69,42 @@ export function NewsletterScreen() {
           </Button>
         </div>
 
+        {/* UX audit journey finding 14: Preview used to appear only AFTER "Compose
+            draft", so the screen looked like a blank composer and said nothing about
+            where the words come from. The section is always here; before there is a
+            draft it says so. */}
+        <section aria-labelledby="newsletter-preview-heading">
+          <h2 id="newsletter-preview-heading" className="mb-2.5 text-lede font-bold">
+            Preview
+          </h2>
+          {draft ? (
+            <div className="plate space-y-3 p-3.5">
+              <p className="text-body font-bold">{draft.subject}</p>
+              <label className="block">
+                <span className="text-caption text-ink-soft">
+                  Review the digest before sending it to subscribers.
+                </span>
+                <textarea
+                  className="mt-1.5 min-h-[180px] w-full resize-y border-[1.5px] border-ink bg-sheet px-3 py-2 text-body outline-none"
+                  aria-label="Newsletter preview"
+                  readOnly
+                  value={draft.body}
+                />
+              </label>
+            </div>
+          ) : (
+            <div className="plate p-3.5">
+              <p className="text-body text-ink-soft">Nothing to preview yet.</p>
+              <p className="mt-1.5 text-caption text-ink-soft">
+                Pick a month and choose “Compose draft”. Free School writes the digest from that month’s
+                listed classes; you will read the whole thing here before anything is sent.
+              </p>
+            </div>
+          )}
+        </section>
+
         {draft ? (
           <>
-            <section aria-labelledby="newsletter-preview-heading">
-              <h2 id="newsletter-preview-heading" className="mb-2.5 text-lede font-bold">
-                Preview
-              </h2>
-              <div className="plate space-y-3 p-3.5">
-                <p className="text-body font-bold">{draft.subject}</p>
-                <label className="block">
-                  <span className="text-caption text-ink-soft">
-                    Review the digest before sending it to subscribers.
-                  </span>
-                  <textarea
-                    className="mt-1.5 min-h-[180px] w-full resize-y border-[1.5px] border-ink bg-sheet px-3 py-2 text-body outline-none"
-                    aria-label="Newsletter preview"
-                    readOnly
-                    value={draft.body}
-                  />
-                </label>
-              </div>
-            </section>
-
             {sentCount !== null ? (
               <p role="status" className="text-body text-green">Sent — reached {sentCount} subscriber{sentCount === 1 ? '' : 's'}.</p>
             ) : null}

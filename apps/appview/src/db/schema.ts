@@ -366,6 +366,32 @@ export const requestRsvp = pgTable(
 )
 
 /**
+ * "Ask <name> to teach this" (UX audit journey finding 13): who a request was addressed
+ * to, when it was addressed to somebody.
+ *
+ * APP-SIDE AND NOWHERE ELSE. The `freeschool.draft.request` record itself stays exactly
+ * as it was — a public statement that somebody would like to learn a thing — and never
+ * names the person asked. Putting that on the record would publish a claim about
+ * somebody else's time under their DID, written by a member they may not know, which is
+ * the R9 failure mode in one field. The asked member learns of it through their own
+ * notifications; nobody else can read this row through any route.
+ *
+ * One row per request: each ask writes its own request, so this is a property of that
+ * request rather than a list.
+ */
+export const requestAskedOf = pgTable(
+  'fs_request_asked_of',
+  {
+    requestUri: text('request_uri').primaryKey(),
+    askedOfDid: text('asked_of_did').notNull(),
+    /** Which school the ask happened in — the same scoping every other app-side row has. */
+    schoolDid: schoolDidColumn(),
+    createdAt: ts('created_at').notNull().defaultNow(),
+  },
+  (t) => [index('fs_request_asked_of_did_idx').on(t.askedOfDid)],
+)
+
+/**
  * A DURABLE record that this DID has ever authenticated with THIS school, through either
  * door. Written on every successful `createSession` call (see `http/session.ts`) and by
  * `create-school` for the school/steward DIDs. Deliberately NEVER deleted on logout or
@@ -982,6 +1008,7 @@ export const schema = {
   inviteLink,
   skillTier,
   requestRsvp,
+  requestAskedOf,
   member,
   rsvp,
   eventExtra,

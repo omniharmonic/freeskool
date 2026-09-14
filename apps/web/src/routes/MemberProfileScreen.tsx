@@ -7,6 +7,7 @@ import { Button, CLAIM_LEVEL_ORDER, MemberAvatar, SkillChip, claimLevelLabel } f
 import { ApiError } from '../lib/api';
 import { formatDayStamp, formatTime } from '../lib/dates';
 import {
+  useCreateRequestMutation,
   useMe,
   useMemberProfile,
   useMyAttestations,
@@ -99,6 +100,37 @@ function MemberProfileBody({ profile, viewerDid }: { profile: MemberProfileRespo
   const unvouchMutation = useUnvouchMutation();
   const queryClient = useQueryClient();
   const [vouchError, setVouchError] = useState<string | null>(null);
+  /**
+   * "Ask <name> to teach this" (UX audit journey finding 13): a profile used to be the
+   * end of the road. This posts an ordinary needs-board request for that skill and
+   * addresses it to this member — `askedOf` is app-side on the AppView and never reaches
+   * the record, so nothing published here names them.
+   */
+  const createRequest = useCreateRequestMutation();
+  const [asked, setAsked] = useState<Record<string, boolean>>({});
+  const [askError, setAskError] = useState<string | null>(null);
+  const [askingSkill, setAskingSkill] = useState<string | null>(null);
+
+  const onAsk = async (claim: MemberClaim) => {
+    setAskError(null);
+    setAskingSkill(claim.skillUri);
+    try {
+      await createRequest.mutateAsync({
+        title: claim.skillLabel,
+        skill: claim.skillUri,
+        askedOf: profile.did,
+      });
+      setAsked((prev) => ({ ...prev, [claim.skillUri]: true }));
+    } catch (err) {
+      setAskError(
+        err instanceof ApiError && err.status === 401
+          ? 'Sign in again to ask someone to teach something.'
+          : 'Could not send that ask. Try again.',
+      );
+    } finally {
+      setAskingSkill(null);
+    }
+  };
   /** What this viewer has just done, which the server copy may not show yet. */
   const [justChanged, setJustChanged] = useState<Record<string, boolean>>({});
 
@@ -198,9 +230,24 @@ function MemberProfileBody({ profile, viewerDid }: { profile: MemberProfileRespo
           <p className="section-caption">
             Self-described, with vouches from people who have seen it. Counts, never scores.
           </p>
+          {/* UX audit journey finding 12: the Vouch button used to be unexplained. What a
+              vouch IS belongs beside the act, not in a policy page — the link is for the
+              rest. */}
+          <p className="section-caption">
+            A vouch says you have seen this person do this. Counts show in the school; who vouched is visible
+            only to them.{' '}
+            <Link to="/how-it-works" className="font-bold text-blue">
+              How vouches work
+            </Link>
+          </p>
           {vouchError ? (
             <p role="alert" className="mb-3 text-body text-pink">
               {vouchError}
+            </p>
+          ) : null}
+          {askError ? (
+            <p role="alert" className="mb-3 text-body text-pink">
+              {askError}
             </p>
           ) : null}
           {profile.claims.length === 0 ? (
@@ -220,6 +267,10 @@ function MemberProfileBody({ profile, viewerDid }: { profile: MemberProfileRespo
                       busy={vouchMutation.isPending || unvouchMutation.isPending}
                       attesters={(attestations?.received ?? []).filter((r) => r.skillUri === claim.skillUri)}
                       onToggle={(vouched) => void onToggleVouch(claim, vouched)}
+                      askName={own ? undefined : firstName(name)}
+                      asked={asked[claim.skillUri] ?? false}
+                      asking={askingSkill === claim.skillUri}
+                      onAsk={() => void onAsk(claim)}
                     />
                   ))}
                 </ul>
@@ -273,6 +324,10 @@ function ClaimRow({
   busy,
   attesters,
   onToggle,
+  askName,
+  asked,
+  asking,
+  onAsk,
 }: {
   claim: MemberClaim;
   own: boolean;
@@ -281,6 +336,11 @@ function ClaimRow({
   busy: boolean;
   attesters: Array<{ id: string; attesterDisplayName?: string; attesterHandle?: string }>;
   onToggle: (vouched: boolean) => void;
+  /** What to call them in "Ask … to teach this". Absent on your own profile. */
+  askName?: string;
+  asked: boolean;
+  asking: boolean;
+  onAsk: () => void;
 }) {
   const [showWho, setShowWho] = useState(false);
   const count = Math.max(0, claim.vouchCount + delta);
@@ -315,6 +375,26 @@ function ClaimRow({
         </button>
       </div>
 
+      {askName ? (
+        <div className="mt-2.5">
+          {asked ? (
+            <p role="status" className="text-caption text-ink-soft">
+              Asked. It’s on the needs board now, and {askName} has been told — they can say yes by posting a
+              class, or leave it.
+            </p>
+          ) : (
+            <button
+              type="button"
+              disabled={asking}
+              className="min-h-[44px] text-caption font-bold text-blue disabled:opacity-40"
+              onClick={onAsk}
+            >
+              {asking ? 'Asking…' : `Ask ${askName} to teach this`}
+            </button>
+          )}
+        </div>
+      ) : null}
+
       {own ? (
         <div className="mt-2.5">
           <button
@@ -342,6 +422,16 @@ function ClaimRow({
       ) : null}
     </li>
   );
+}
+
+/**
+ * What to call somebody in a sentence. A display name is whatever they typed, and a
+ * handle is not a name at all — "Ask wren.fs.boulder to teach this" reads like a robot —
+ * so this takes the first word of a display name and falls back to the whole string.
+ */
+function firstName(name: string): string {
+  const first = name.trim().split(/\s+/)[0];
+  return first && !first.includes('.') ? first : name;
 }
 
 /** Most practised first; anything the server adds later lands at the end. */

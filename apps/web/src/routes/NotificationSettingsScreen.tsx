@@ -23,6 +23,7 @@ const CATEGORY_LABEL: Record<string, string> = {
   'offering.published': 'New classes posted',
   'member.joined': 'When someone new joins',
   'feedback.received': 'Feedback on a class you taught',
+  'request.asked-of': 'When someone asks you to teach something',
 };
 
 /**

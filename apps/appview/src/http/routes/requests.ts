@@ -98,6 +98,13 @@ const createBody = z.object({
   description: z.string().max(20_000).optional(),
   skill: z.string().startsWith('at://').optional(),
   threshold: z.number().int().min(1).max(1000).optional(),
+  /**
+   * "Ask <name> to teach this" (UX audit journey finding 13). APP-SIDE: `createRequest`
+   * strips it before writing the record and keeps it in `fs_request_asked_of`, and the
+   * only person who ever learns of it is the member named — through their own
+   * notifications. It is never served back by `GET /requests`.
+   */
+  askedOf: z.string().startsWith('did:').max(255).optional(),
 })
 
 requests.post('/requests', requireViewer, async (c) => {
@@ -105,7 +112,7 @@ requests.post('/requests', requireViewer, async (c) => {
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
   const viewer = c.var.viewer!
   try {
-    return c.json(await createRequest(viewer, parsed.data), 201)
+    return c.json(await createRequest(viewer, parsed.data, { schoolDid: currentSchool(c).did }), 201)
   } catch (err) {
     if (err instanceof NoActorCredentialError) return c.json({ error: 'ReauthRequired' }, 401)
     throw err
