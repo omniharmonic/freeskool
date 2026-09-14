@@ -212,6 +212,57 @@ describe('createAttestation', () => {
     ).rejects.toMatchObject({ status: 409, code: 'AlreadyVouched' })
   })
 
+  /**
+   * THE PRE-BACKFILL FORK (federation phase, found by Task 11's two-school seed).
+   *
+   * Migration 0012 put `school_did` into `fs_attestation`'s unique index, so a row
+   * written before tenancy (`school_did = ''`) no longer collides with a stamped insert
+   * for the same (attester, subject, skill). Between deploying the tenancy code and
+   * running `backfill-school`, a re-vouch therefore forked into TWO rows — which inflates
+   * the subject's vouch count and then makes `backfill-school` fail with a unique
+   * violation when it tries to stamp the older one. Ten such pairs were found on the dev
+   * box. `createAttestation` now adopts the unstamped row instead, for the legacy school
+   * and no other.
+   */
+  it('adopts a pre-tenancy unstamped row instead of forking a second one', async () => {
+    if (!available) return
+    await claimSkill(SUBJECT, SKILL_A)
+    // Exactly what a row written before migration 0011 looks like.
+    await testDb()
+      .insert(attestation)
+      .values({ id: 'pre-tenancy', attesterDid: ATTESTER, subjectDid: SUBJECT, skillUri: SKILL_A, schoolDid: '' })
+
+    await expect(
+      createAttestation({ attesterDid: ATTESTER, subjectDid: SUBJECT, skillUri: SKILL_A }),
+    ).rejects.toMatchObject({ status: 409, code: 'AlreadyVouched' })
+
+    const rows = await testDb().select().from(attestation)
+    expect(rows, 'the vouch forked into two rows').toHaveLength(1)
+    // ...and the surviving row is now stamped, so `backfill-school` has nothing to do.
+    expect(rows[0]!.id).toBe('pre-tenancy')
+    expect(rows[0]!.schoolDid).toBe(config().SCHOOL_DID)
+  })
+
+  it('never adopts another school’s unstamped row: the widening is the legacy school’s alone', async () => {
+    if (!available) return
+    await claimSkill(SUBJECT, SKILL_A)
+    await testDb()
+      .insert(attestation)
+      .values({ id: 'pre-tenancy', attesterDid: ATTESTER, subjectDid: SUBJECT, skillUri: SKILL_A, schoolDid: '' })
+
+    // A second city vouching for the same person on the same skill is a NEW vouch there.
+    const created = await createAttestation({
+      attesterDid: ATTESTER,
+      subjectDid: SUBJECT,
+      skillUri: SKILL_A,
+      schoolDid: 'did:plc:attestations-second-school',
+    })
+    const rows = await testDb().select().from(attestation)
+    expect(rows).toHaveLength(2)
+    expect(rows.find((r) => r.id === 'pre-tenancy')!.schoolDid).toBe('')
+    expect(rows.find((r) => r.id === created.id)!.schoolDid).toBe('did:plc:attestations-second-school')
+  })
+
   it('AttestationError instances carry their status and code', async () => {
     if (!available) return
     try {

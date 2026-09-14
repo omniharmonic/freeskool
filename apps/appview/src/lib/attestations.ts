@@ -79,10 +79,44 @@ export async function createAttestation(input: {
     throw new AttestationError('the subject does not hold this skill', 404, 'SubjectNotHolding')
   }
 
+  /**
+   * ADOPT AN UNSTAMPED ROW FIRST, for the legacy school only — the same discipline
+   * `lib/roles.ts#bumpTally` and `lib/newsletter-subscriptions.ts#subscribe` already
+   * follow, and for the same reason.
+   *
+   * `fs_attestation`'s unique index gained `school_did` in migration 0012, so a
+   * pre-tenancy row (`school_did = ''`) does NOT conflict with a stamped insert for the
+   * same (attester, subject, skill). Between deploying this code and running
+   * `backfill-school`, a re-vouch would therefore FORK into two rows — inflating the
+   * subject's vouch count, and then making `backfill-school` itself fail with a unique
+   * violation the moment it tries to stamp the older one. (Observed on the dev box, which
+   * ran the new code for a day before anyone back-filled it: ten forked pairs.)
+   *
+   * `schoolScope` is `= schoolDid` widened to include `''` for the legacy school and for
+   * no other, so this UPDATE can never reach across schools: for a second city it matches
+   * nothing and the insert below is the whole story.
+   */
+  const id = rowId()
+  const adopted = await getDb()
+    .update(attestation)
+    .set({ schoolDid })
+    .where(
+      and(
+        eq(attestation.attesterDid, attesterDid),
+        eq(attestation.subjectDid, subjectDid),
+        eq(attestation.skillUri, skillUri),
+        eq(attestation.schoolDid, ''),
+        schoolScope(attestation.schoolDid, schoolDid),
+      ),
+    )
+    .returning({ id: attestation.id })
+  if (adopted.length > 0) {
+    throw new AttestationError('already vouched for this skill', 409, 'AlreadyVouched')
+  }
+
   // One statement, not check-then-insert: two concurrent vouches for the same
   // (attester, subject, skill) must yield one row and one 409, never a raw unique
   // violation surfacing as a 500. The unique index is the arbiter.
-  const id = rowId()
   const inserted = await getDb()
     .insert(attestation)
     .values({ id, attesterDid, subjectDid, skillUri, schoolDid, contextEventUri: contextEventUri ?? null })
