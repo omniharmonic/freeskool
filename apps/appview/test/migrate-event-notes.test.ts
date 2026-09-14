@@ -25,8 +25,29 @@ const OAUTH = 'did:plc:migrate-oauth-host'
 
 interface Indexed { uri: string; did: string; value: Record<string, unknown> }
 const records = vi.hoisted(() => [] as Indexed[])
+/** Every record the (non-dry-run) repair writes, so a real run never reaches a real PDS. */
+const written = vi.hoisted(() => [] as Array<{ collection: string; rkey: string; record: Record<string, unknown> }>)
 
 vi.mock('../src/index/indexer.js', () => ({ getIndexer: async () => ({ notify: async () => {} }) }))
+
+// Same fake agent `event-notes-placement.test.ts` uses: the repair's write path
+// (`actorAgent` + `putInActorRepo`) is real, only the PDS call underneath it is stubbed.
+vi.mock('../src/lib/actor-agent.js', () => ({
+  NoActorCredentialError: class extends Error {},
+  actorAgent: async () => ({
+    com: {
+      atproto: {
+        repo: {
+          putRecord: async ({ collection, rkey, record }: { collection: string; rkey: string; record: Record<string, unknown> }) => {
+            written.push({ collection, rkey, record })
+            return { data: { uri: `at://${CUSTODIAL}/${collection}/${rkey}`, cid: `bafy-${rkey}` } }
+          },
+          deleteRecord: async () => ({}),
+        },
+      },
+    },
+  }),
+}))
 
 vi.mock('../src/index/queries.js', async () => {
   const actual = await vi.importActual<typeof import('../src/index/queries.js')>('../src/index/queries.js')
@@ -56,6 +77,7 @@ beforeEach(async () => {
   if (!available) return
   await truncate('fs_event_extra', 'fs_app_meta', 'fs_custodial_account')
   records.length = 0
+  written.length = 0
   await testDb().insert(custodialAccount).values({ did: CUSTODIAL, handle: 'host.test', email: 'h@example.org', keyVersion: 'v1' })
 })
 
@@ -132,5 +154,32 @@ describe('migrateEventNotes --dry-run', () => {
     expect(serialized).not.toContain('did:plc')
     expect(serialized).not.toContain('code 1234')
     expect(serialized).not.toContain('zoom')
+  })
+})
+
+describe('migrateEventNotes (not dry-run) — review finding 3', () => {
+  it('keeps a cancel reason set before the run still set after it', async () => {
+    if (!available) return
+    const uri = uriFor(CUSTODIAL, 'cancelled-legacy')
+    records.push({ uri, did: CUSTODIAL, value: { description: 'Side door, code 1234', uris: [{ uri: 'https://us02web.zoom.us/j/123' }] } })
+    await savePresentation(uri, { publicOverview: { description: 'Learn to grow oyster mushrooms.' } })
+    // Set BEFORE the repair runs — migration 0010 added this column after the repair
+    // script was written, so `setEventExtra`'s "absent means cleared" convention is a
+    // trap here unless the script spreads the existing row first (review finding 3).
+    await setEventExtra(uri, { materials: [], cancelReason: 'the instructor is sick' })
+
+    const counts = await migrateEventNotes({ dryRun: false })
+    expect(counts).toMatchObject({ affected: 1, repaired: 1, failed: 0 })
+
+    const { getEventExtra } = await import('../src/lib/event-extra.js')
+    const extra = await getEventExtra(uri)
+    expect(extra.cancelReason).toBe('the instructor is sick')
+    expect(extra.attendeeNotes).toBe('Side door, code 1234')
+    expect(extra.meetingLink).toBe('https://us02web.zoom.us/j/123')
+
+    // And the rewrite went through the host's own (stubbed) agent, never a real PDS.
+    expect(written).toHaveLength(1)
+    expect(written[0]?.record.description).toBe('Learn to grow oyster mushrooms.')
+    expect(written[0]?.record.uris).toBeUndefined()
   })
 })

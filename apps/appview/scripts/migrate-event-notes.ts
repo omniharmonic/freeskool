@@ -169,9 +169,11 @@ export async function migrateEventNotes(options: { dryRun?: boolean; limit?: num
         ...carried,
         ...(overview ? { description: overview } : {}),
       })
+      // Spread the existing `extra` FIRST, then overrides: `setEventExtra` clears anything
+      // absent from its argument, and `cancelReason` (added by migration 0010, after this
+      // script) is not this repair's to forget — same reasoning as `lib/events.ts:587`.
       await setEventExtra(row.uri, {
-        materials: extra.materials,
-        ...(extra.suppliesNote ? { suppliesNote: extra.suppliesNote } : {}),
+        ...extra,
         ...(attendeeNotes ? { attendeeNotes } : {}),
         ...(meetingLink ? { meetingLink } : {}),
       })

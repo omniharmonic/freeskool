@@ -1,7 +1,7 @@
 import { KnowledgeShelf } from '../components/KnowledgeShelf';
 import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { Link, Navigate, useParams } from '@tanstack/react-router';
+import { Link, useParams } from '@tanstack/react-router';
 import { LoadingState, PageState } from '../components/PageState';
 import { ClassHero } from '../components/ClassArtwork';
 import { Screen } from '../components/Screen';
@@ -34,19 +34,6 @@ const PERMANENCE_SENTENCE =
  * seed data. Any other tag is assumed host-written and still renders.
  */
 const ROUTING_TAGS = new Set(['skillshare', 'free-school', 'demo']);
-
-/**
- * `/event/$eventId` is the pre-Task-4 route, built around a mock short id
- * (`eventId()` in `EventCard.tsx`, the last path segment of the AT-URI). The
- * real `GET /api/events/:id` needs the FULL AT-URI — the same shape the new
- * `/events/$id/*` placeholders already use (Task 1's router skeleton) — so
- * this route now just forwards there rather than trying to resolve a partial
- * id into a full one.
- */
-export function EventRedirect() {
-  const { eventId } = useParams({ from: '/event/$eventId' });
-  return <Navigate to="/events/$id" params={{ id: eventId }} replace />;
-}
 
 function formatAddress(location: EventLocation): string {
   const rec = location as Record<string, unknown>;

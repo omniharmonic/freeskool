@@ -73,6 +73,11 @@ import { PdsError } from '../../lib/pds.js'
 
 export const me = new Hono<AppEnv>()
 
+// Header first, gate second: even the 401 for an anonymous caller must say noindex.
+me.use('*', async (c, next) => {
+  c.header('X-Robots-Tag', 'noindex, nofollow')
+  await next()
+})
 me.use('*', requireViewer)
 
 /**
@@ -376,8 +381,11 @@ export async function profilesFor(dids: string[]): Promise<Map<string, Profile>>
   return out
 }
 
-/** Batched app-side `displayName` lookup, same shape as `events.ts`'s roster helper. */
-async function displayNamesForAttesters(dids: string[]): Promise<Record<string, string>> {
+/**
+ * Batched app-side `displayName` lookup. Exported so `http/routes/events.ts`'s roster
+ * (review finding 2) reaches for this one implementation instead of keeping its own copy.
+ */
+export async function displayNamesForDids(dids: string[]): Promise<Record<string, string>> {
   const profiles = await profilesFor(dids)
   const out: Record<string, string> = {}
   for (const [did, p] of profiles) if (p.displayName) out[did] = p.displayName
@@ -421,7 +429,7 @@ me.get('/attestations', async (c) => {
   const skillUris = [...new Set(received.map((r) => r.skillUri))]
   const [handles, displayNames, labels] = await Promise.all([
     handlesForDids(attesterDids),
-    displayNamesForAttesters(attesterDids),
+    displayNamesForDids(attesterDids),
     labelsForSkills(skillUris, indexer),
   ])
 

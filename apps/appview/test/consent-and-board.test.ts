@@ -490,4 +490,15 @@ describe('Task 2: GET /api/me reports directoryListing and onboarded', () => {
     expect(body.directoryListing).toBe(false)
     expect(body.onboarded).toBe(true)
   })
+
+  it('sets X-Robots-Tag: noindex, nofollow on both the 200 and the 401', async () => {
+    if (!available) return
+    const ok = await createApp().request('/api/me', { headers: { Cookie: await cookieFor(MEMBER) } })
+    expect(ok.status).toBe(200)
+    expect(ok.headers.get('X-Robots-Tag')).toBe('noindex, nofollow')
+
+    const anon = await createApp().request('/api/me')
+    expect(anon.status).toBe(401)
+    expect(anon.headers.get('X-Robots-Tag')).toBe('noindex, nofollow')
+  })
 })

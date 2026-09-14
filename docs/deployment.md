@@ -129,6 +129,19 @@ one-off record repair, none of which `release.sh` or the AppView's own boot-time
 In order, against the production server (`ssh -i ~/.ssh/frontrange-twin root@167.233.100.123`, checkout
 at `/opt/freeskool`, `C="docker compose --env-file infra/production/.env -f infra/production/compose.yml"`):
 
+**Pre-flight, before step 1:** this branch's migration 0008 adds a UNIQUE index on
+`fs_custodial_account.email` (`fs_custodial_account_email_idx`). `runMigrations()` runs at AppView
+boot, not in a separate script, so a duplicate email already in production makes the index creation
+fail and takes the AppView down rather than merely failing a migration script. Check for duplicates
+before running step 1:
+```sh
+$C exec postgres psql -U freeschool -d freeschool -c \
+   "select lower(email), count(*) from fs_custodial_account group by 1 having count(*) > 1;"
+```
+If this returns any rows, resolve them before proceeding — merge or re-point the duplicate accounts
+(e.g. via `take-ownership`/steward intervention) so every email is unique, then re-run the check. Do
+not start step 1 while it returns rows: the AppView will not boot until the duplicates are resolved.
+
 1. **Merge `refinement` to `main`**, then `/opt/freeskool/infra/production/release.sh` as usual (see
    "Releasing a change" above) — this pulls, backs up, rebuilds and recreates `appview` + `web`.
 2. **Add `AUTHORITY_DID`, `AUTHORITY_HANDLE`, `AUTHORITY_PASSWORD` to `infra/production/.env` and

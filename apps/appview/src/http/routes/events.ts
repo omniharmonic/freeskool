@@ -14,7 +14,7 @@
 import { getPresentation, presentationFields } from '../../lib/event-presentation.js'
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { and, eq, inArray, isNull, sql } from 'drizzle-orm'
+import { and, eq, isNull, sql } from 'drizzle-orm'
 import { Role } from '@freeschool/shared'
 import type { AppEnv } from '../session.js'
 import { requireViewer, requireRole } from '../session.js'
@@ -41,14 +41,14 @@ import { viewerRelation } from '../relation.js'
 import { toCalendarEvent } from './calendar.js'
 import { buildIcs, icsStatus } from '../../lib/ics.js'
 import { getDb } from '../../db/index.js'
-import { appMeta, attendance, attendanceRollup, custodialAccount } from '../../db/schema.js'
+import { attendance, attendanceRollup } from '../../db/schema.js'
 import { rowId } from '../../lib/ids.js'
 import { bumpTally, roleOf } from '../../lib/roles.js'
 import { rsvpCounts, rsvpRoster } from '../../lib/rsvp.js'
 import { recordAttendance } from '../../lib/attendance.js'
 import { getEventExtra, type EventExtra } from '../../lib/event-extra.js'
 import { config } from '../../config.js'
-import { PROFILE_KEY, type Profile } from './me.js'
+import { displayNamesForDids, handlesForDids } from './me.js'
 
 export const events = new Hono<AppEnv>()
 
@@ -322,59 +322,6 @@ events.get('/events/:id/rsvps', requireViewer, async (c) => {
     })),
   )
 })
-
-/**
- * Roster `displayName` (review I3): the app-side profile a member sets at `PUT /api/me`
- * (`fs_app_meta`, key `profile:<did>` — see `http/routes/me.ts`). One batched `inArray`
- * query for every DID on the roster, never one query per row. Omitted when the member
- * never set one.
- */
-async function displayNamesForDids(dids: string[]): Promise<Record<string, string>> {
-  if (dids.length === 0) return {}
-  const rows = await getDb()
-    .select({ key: appMeta.key, value: appMeta.value })
-    .from(appMeta)
-    .where(inArray(appMeta.key, dids.map(PROFILE_KEY)))
-  const out: Record<string, string> = {}
-  for (const r of rows) {
-    const displayName = (r.value as Profile | undefined)?.displayName
-    if (displayName) out[r.key.slice('profile:'.length)] = displayName
-  }
-  return out
-}
-
-/**
- * Best-effort DID -> handle for the roster only — never authoritative, never cached.
- * Our own custodial members resolve straight from `fs_custodial_account`; anyone else
- * (an existing OAuth account) falls back to contrail's `identities` table, which is
- * populated by indexing/backfill, not by us. A DID that resolves nowhere falls back to
- * itself rather than leaving a gap in the response.
- */
-async function handlesForDids(dids: string[]): Promise<Record<string, string>> {
-  if (dids.length === 0) return {}
-  const out: Record<string, string> = {}
-  const rows = await getDb()
-    .select({ did: custodialAccount.did, handle: custodialAccount.handle })
-    .from(custodialAccount)
-    .where(inArray(custodialAccount.did, dids))
-  for (const r of rows) out[r.did] = r.handle
-  const remaining = dids.filter((d) => !out[d])
-  if (remaining.length > 0) {
-    try {
-      const indexer = await getIndexer()
-      for (const did of remaining) {
-        const row = await indexer.db
-          .prepare('SELECT handle FROM identities WHERE did = ? LIMIT 1')
-          .bind(did)
-          .first<{ handle: string | null }>()
-        if (row?.handle) out[did] = row.handle
-      }
-    } catch {
-      /* index not ready; the did-as-handle fallback below still gives a usable response */
-    }
-  }
-  return out
-}
 
 const attendanceBody = z.object({
   attendees: z
