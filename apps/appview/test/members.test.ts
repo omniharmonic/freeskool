@@ -93,11 +93,12 @@ vi.mock('../src/index/indexer.js', () => ({
 import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
 import { listMembers, memberProfile, memberVisible, peopleForSkill } from '../src/lib/members.js'
 import { createAttestation } from '../src/lib/attestations.js'
+import { setDirectoryListing } from '../src/lib/membership.js'
 import { createApp } from '../src/http/app.js'
 import { createSession } from '../src/http/session.js'
 import { signSessionId } from '../src/lib/crypto.js'
 import { config } from '../src/config.js'
-import { appMeta, custodialAccount, member, memberPrefs, skillClaimIndex } from '../src/db/schema.js'
+import { appMeta, custodialAccount, member, membership, memberPrefs, skillClaimIndex } from '../src/db/schema.js'
 import { eq } from 'drizzle-orm'
 
 let available = false
@@ -111,6 +112,7 @@ beforeEach(async () => {
   if (!available) return
   await truncate(
     'fs_member',
+    'fs_membership',
     'fs_member_prefs',
     'fs_skill_claim_index',
     'fs_attestation',
@@ -134,12 +136,23 @@ function fakeContext(): Context {
 /** Signs the DID in via the custodial door (this is what writes the `fs_member` row). */
 async function signIn(did: string, lastSeenAt?: Date): Promise<string> {
   const id = await createSession(fakeContext(), did, 'custodial')
-  if (lastSeenAt) await testDb().update(member).set({ lastSeenAt }).where(eq(member.did, did))
+  if (lastSeenAt) {
+    // Both rows: `fs_member` is the global presence fact, `fs_membership` is the
+    // per-school one the directory now orders by.
+    await testDb().update(member).set({ lastSeenAt }).where(eq(member.did, did))
+    await testDb().update(membership).set({ lastSeenAt }).where(eq(membership.did, did))
+  }
   return `${config().SESSION_COOKIE}=${signSessionId(id)}`
 }
 
+/**
+ * `directoryListing` is per-school now (`fs_membership`), with the old global
+ * `fs_member_prefs` column kept for one release — `PUT /api/me` writes both, and so does
+ * this fixture.
+ */
 async function hide(did: string): Promise<void> {
   await testDb().insert(memberPrefs).values({ did, directoryListing: false, updatedAt: new Date() })
+  await setDirectoryListing(did, config().SCHOOL_DID, false)
 }
 
 async function claimSkill(did: string, skillUri: string, opts: { level?: string; visibility?: 'public' | 'school' } = {}): Promise<void> {

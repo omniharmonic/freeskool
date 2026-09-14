@@ -3,6 +3,14 @@
  * write). A member "vouches" that another member holds a skill; `fs_attestation` rows
  * are the record of truth, never a protocol record.
  *
+ * PER SCHOOL (MS §2, §10). The tempting design is global — Ana vouched that Maya can
+ * weld, so surely that is true everywhere — and under R9 it cannot be: rendering a
+ * Boulder vouch on Maya's Denver profile tells every Denver member that Maya and Ana both
+ * belong to Boulder, a membership disclosure neither of them made. So `school_did` is in
+ * the unique index and in every count query, and no cross-school aggregate exists. The
+ * honest cross-school path is the double opt-in `freeschool.draft.skillAttestation` pair
+ * (interop audit §3(d)), where a vouch both parties published travels by being a record.
+ *
  * `subjectHoldsSkill` is the gate on `createAttestation`: a vouch only makes sense
  * against a skill the subject already claims (`fs_skill_claim_index`) OR visibly
  * demonstrates by hosting a class that teaches it (`freeschool.draft.skillLevel`
@@ -11,6 +19,8 @@
 import { and, desc, eq, inArray, sql } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { attestation, skillClaimIndex } from '../db/schema.js'
+import { legacySchoolDid } from './schools.js'
+import { schoolScope } from './school-scope.js'
 import { rowId } from './ids.js'
 import { getIndexer } from '../index/indexer.js'
 import { sidecarsForEvent } from '../index/queries.js'
@@ -56,8 +66,11 @@ export async function createAttestation(input: {
   subjectDid: string
   skillUri: string
   contextEventUri?: string
+  /** The school the vouch was given in. Defaults to the legacy school for scripts. */
+  schoolDid?: string
 }): Promise<{ id: string }> {
   const { attesterDid, subjectDid, skillUri, contextEventUri } = input
+  const schoolDid = input.schoolDid ?? legacySchoolDid()
 
   if (attesterDid === subjectDid) {
     throw new AttestationError('cannot vouch for your own skill', 400, 'SelfAttestation')
@@ -72,8 +85,10 @@ export async function createAttestation(input: {
   const id = rowId()
   const inserted = await getDb()
     .insert(attestation)
-    .values({ id, attesterDid, subjectDid, skillUri, contextEventUri: contextEventUri ?? null })
-    .onConflictDoNothing({ target: [attestation.attesterDid, attestation.subjectDid, attestation.skillUri] })
+    .values({ id, attesterDid, subjectDid, skillUri, schoolDid, contextEventUri: contextEventUri ?? null })
+    .onConflictDoNothing({
+      target: [attestation.attesterDid, attestation.subjectDid, attestation.skillUri, attestation.schoolDid],
+    })
     .returning({ id: attestation.id })
   if (inserted.length === 0) {
     throw new AttestationError('already vouched for this skill', 409, 'AlreadyVouched')
@@ -82,60 +97,88 @@ export async function createAttestation(input: {
 }
 
 /** True only when THIS attester's own vouch was deleted — never anyone else's. */
-export async function removeAttestation(id: string, attesterDid: string): Promise<boolean> {
+export async function removeAttestation(
+  id: string,
+  attesterDid: string,
+  schoolDid = legacySchoolDid(),
+): Promise<boolean> {
   const deleted = await getDb()
     .delete(attestation)
-    .where(and(eq(attestation.id, id), eq(attestation.attesterDid, attesterDid)))
+    .where(and(eq(attestation.id, id), eq(attestation.attesterDid, attesterDid), schoolScope(attestation.schoolDid, schoolDid)))
     .returning({ id: attestation.id })
   return deleted.length > 0
 }
 
 /** Vouch counts for one subject, by skill. */
-export async function vouchCountsFor(subjectDid: string): Promise<Map<string, number>> {
+export async function vouchCountsFor(subjectDid: string, schoolDid = legacySchoolDid()): Promise<Map<string, number>> {
   const rows = await getDb()
     .select({ skillUri: attestation.skillUri, n: sql<number>`count(*)::int` })
     .from(attestation)
-    .where(eq(attestation.subjectDid, subjectDid))
+    .where(and(eq(attestation.subjectDid, subjectDid), schoolScope(attestation.schoolDid, schoolDid)))
     .groupBy(attestation.skillUri)
   return new Map(rows.map((r) => [r.skillUri, r.n]))
 }
 
 /** Total vouch count per subject, batched for a directory listing. */
-export async function vouchCountsForMany(subjectDids: string[]): Promise<Map<string, number>> {
+export async function vouchCountsForMany(
+  subjectDids: string[],
+  schoolDid = legacySchoolDid(),
+): Promise<Map<string, number>> {
   const unique = [...new Set(subjectDids)]
   if (unique.length === 0) return new Map()
   const rows = await getDb()
     .select({ subjectDid: attestation.subjectDid, n: sql<number>`count(*)::int` })
     .from(attestation)
-    .where(inArray(attestation.subjectDid, unique))
+    .where(and(inArray(attestation.subjectDid, unique), schoolScope(attestation.schoolDid, schoolDid)))
     .groupBy(attestation.subjectDid)
   return new Map(rows.map((r) => [r.subjectDid, r.n]))
 }
 
 /** Vouch counts for ONE skill, across a batch of subjects — the members directory's "people with this skill" list. */
-export async function vouchCountsForSkill(skillUri: string, subjectDids: string[]): Promise<Map<string, number>> {
+export async function vouchCountsForSkill(
+  skillUri: string,
+  subjectDids: string[],
+  schoolDid = legacySchoolDid(),
+): Promise<Map<string, number>> {
   const unique = [...new Set(subjectDids)]
   if (unique.length === 0) return new Map()
   const rows = await getDb()
     .select({ subjectDid: attestation.subjectDid, n: sql<number>`count(*)::int` })
     .from(attestation)
-    .where(and(eq(attestation.skillUri, skillUri), inArray(attestation.subjectDid, unique)))
+    .where(
+      and(
+        eq(attestation.skillUri, skillUri),
+        inArray(attestation.subjectDid, unique),
+        schoolScope(attestation.schoolDid, schoolDid),
+      ),
+    )
     .groupBy(attestation.subjectDid)
   return new Map(rows.map((r) => [r.subjectDid, r.n]))
 }
 
 /** Which skills has THIS attester already vouched THIS subject for? For the "vouched" UI toggle. */
-export async function viewerVouches(attesterDid: string, subjectDid: string): Promise<Set<string>> {
+export async function viewerVouches(
+  attesterDid: string,
+  subjectDid: string,
+  schoolDid = legacySchoolDid(),
+): Promise<Set<string>> {
   const rows = await getDb()
     .select({ skillUri: attestation.skillUri })
     .from(attestation)
-    .where(and(eq(attestation.attesterDid, attesterDid), eq(attestation.subjectDid, subjectDid)))
+    .where(
+      and(
+        eq(attestation.attesterDid, attesterDid),
+        eq(attestation.subjectDid, subjectDid),
+        schoolScope(attestation.schoolDid, schoolDid),
+      ),
+    )
   return new Set(rows.map((r) => r.skillUri))
 }
 
 /** Every vouch received by a subject, attester included — raw rows for `GET /api/me/attestations`. */
 export async function receivedWithAttesters(
   subjectDid: string,
+  schoolDid = legacySchoolDid(),
 ): Promise<Array<{ skillUri: string; attesterDid: string; id: string; createdAt: string }>> {
   const rows = await getDb()
     .select({
@@ -145,7 +188,7 @@ export async function receivedWithAttesters(
       createdAt: attestation.createdAt,
     })
     .from(attestation)
-    .where(eq(attestation.subjectDid, subjectDid))
+    .where(and(eq(attestation.subjectDid, subjectDid), schoolScope(attestation.schoolDid, schoolDid)))
     .orderBy(desc(attestation.createdAt))
   return rows.map((r) => ({ ...r, createdAt: r.createdAt.toISOString() }))
 }

@@ -15,6 +15,7 @@ import type { AppEnv } from '../session.js'
 import { requireViewer } from '../session.js'
 import { listMembers, memberProfile, memberVisible } from '../../lib/members.js'
 import { loadProfile } from './me.js'
+import { currentSchool } from '../school-context.js'
 
 export const members = new Hono<AppEnv>()
 
@@ -35,13 +36,14 @@ const listQuery = z.object({
 members.get('/members', async (c) => {
   const parsed = listQuery.safeParse(Object.fromEntries(new URL(c.req.url).searchParams))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
-  return c.json(await listMembers(parsed.data))
+  return c.json(await listMembers(parsed.data, currentSchool(c).did))
 })
 
 members.get('/members/:did', async (c) => {
   const did = c.req.param('did')
   const viewer = c.var.viewer!
-  const profile = await memberProfile(did, viewer.did)
+  // 404, never 403, for a DID with no shared school: a 403 confirms existence (MS §10).
+  const profile = await memberProfile(did, viewer.did, currentSchool(c).did)
   if (!profile) return c.json({ error: 'NotFound' }, 404)
   return c.json(profile)
 })
@@ -49,7 +51,7 @@ members.get('/members/:did', async (c) => {
 members.get('/members/:did/avatar', async (c) => {
   const did = c.req.param('did')
   const viewer = c.var.viewer!
-  if (!(await memberVisible(did, viewer.did))) return c.json({ error: 'NotFound' }, 404)
+  if (!(await memberVisible(did, viewer.did, currentSchool(c).did))) return c.json({ error: 'NotFound' }, 404)
   const profile = await loadProfile(did)
   if (!profile.avatar) return c.json({ error: 'NotFound' }, 404)
   c.header('Content-Type', 'image/webp')

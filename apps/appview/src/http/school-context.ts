@@ -68,11 +68,16 @@ export function resetSchoolContextCache(): void {
 
 /**
  * The env-configured school as a row, or as a synthetic stand-in when `fs_school` has no
- * row for it yet (see the module doc). `undefined` only when `SCHOOL_DID` is unset.
+ * row for it yet (see the module doc). Never `undefined`: an unconfigured deployment gets
+ * a school whose DID is `''`, which is exactly what every per-school call used to receive
+ * from `config().SCHOOL_DID`.
  */
 export async function legacySchool(): Promise<School | undefined> {
   const did = legacySchoolDid()
-  if (!did) return undefined
+  // DELIBERATELY NOT `if (!did) return undefined`. A deployment that has not run
+  // `create-school` yet has `SCHOOL_DID=''`, and before tenancy every per-school call
+  // simply received that empty string and worked. `currentSchool(c).did === ''` keeps
+  // that true — the alternative is 404ing `/api/me` on an unconfigured deployment.
   if (legacyCache && Date.now() - legacyCache.at < LEGACY_TTL_MS && legacyCache.school?.did === did) {
     return legacyCache.school
   }

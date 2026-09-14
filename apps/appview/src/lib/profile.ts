@@ -14,6 +14,8 @@ import { eq } from 'drizzle-orm'
 import { getDb } from '../db/index.js'
 import { appMeta, memberPrefs } from '../db/schema.js'
 import { normalizeImage, type ImageInput, type StoredImage } from './images.js'
+import { directoryListing as membershipDirectoryListing, setDirectoryListing } from './membership.js'
+import { legacySchoolDid } from './schools.js'
 
 export const PROFILE_KEY = (did: string) => `profile:${did}`
 
@@ -30,14 +32,20 @@ export async function loadProfile(did: string): Promise<Profile> {
 }
 
 /**
- * `fs_member_prefs` row for the directory/onboarding flags — `directoryListing`
- * defaults true and `onboarded` false when the member has no row yet (see the column
- * comments on `memberPrefs` in `db/schema.ts`).
+ * The directory/onboarding flags. `directoryListing` is PER SCHOOL and is read from
+ * `fs_membership` (falling back to the old global `fs_member_prefs` column while the two
+ * coexist — MS §9 E); `onboarded` is a global fact about the member and stays where it is.
  */
-export async function loadDirectoryPrefs(did: string): Promise<{ directoryListing: boolean; onboarded: boolean }> {
+export async function loadDirectoryPrefs(
+  did: string,
+  schoolDid = legacySchoolDid(),
+): Promise<{ directoryListing: boolean; onboarded: boolean }> {
   const rows = await getDb().select().from(memberPrefs).where(eq(memberPrefs.did, did)).limit(1)
   const row = rows[0]
-  return { directoryListing: row?.directoryListing ?? true, onboarded: row?.onboardedAt != null }
+  return {
+    directoryListing: await membershipDirectoryListing(did, schoolDid),
+    onboarded: row?.onboardedAt != null,
+  }
 }
 
 /**
@@ -54,7 +62,11 @@ export interface SaveProfileFields {
 }
 
 /** The merged profile as it now stands, so a caller can render it without re-reading. */
-export async function saveProfile(did: string, fields: SaveProfileFields): Promise<Profile> {
+export async function saveProfile(
+  did: string,
+  fields: SaveProfileFields,
+  schoolDid = legacySchoolDid(),
+): Promise<Profile> {
   const existing = await loadProfile(did)
   const profile: Profile = {
     ...existing,
@@ -72,6 +84,10 @@ export async function saveProfile(did: string, fields: SaveProfileFields): Promi
     .onConflictDoUpdate({ target: appMeta.key, set: { value: profile, updatedAt: now } })
 
   if (fields.directoryListing !== undefined) {
+    // BOTH, during the transition (MS §9 E): `fs_membership` is what every reader now
+    // consults, and the old global column stays written so a rollback to the flag-off
+    // code path still sees the member's choice.
+    await setDirectoryListing(did, schoolDid, fields.directoryListing)
     await getDb()
       .insert(memberPrefs)
       .values({ did, directoryListing: fields.directoryListing, updatedAt: now })

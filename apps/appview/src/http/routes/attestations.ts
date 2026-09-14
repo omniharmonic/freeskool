@@ -15,6 +15,9 @@ import { requireViewer } from '../session.js'
 import { AttestationError, createAttestation, removeAttestation } from '../../lib/attestations.js'
 import { getDb } from '../../db/index.js'
 import { attestation } from '../../db/schema.js'
+import { currentSchool } from '../school-context.js'
+import { schoolScope } from '../../lib/school-scope.js'
+import { and } from 'drizzle-orm'
 
 export const attestations = new Hono<AppEnv>()
 
@@ -39,6 +42,8 @@ attestations.post('/attestations', requireViewer, async (c) => {
       subjectDid: parsed.data.subjectDid,
       skillUri: parsed.data.skillUri,
       contextEventUri: parsed.data.contextEventUri,
+      // A vouch belongs to the school it was given in (MS §2).
+      schoolDid: currentSchool(c).did,
     })
     return c.json({ id }, 201)
   } catch (err) {
@@ -50,11 +55,16 @@ attestations.post('/attestations', requireViewer, async (c) => {
 attestations.delete('/attestations/:id', requireViewer, async (c) => {
   const id = c.req.param('id')
   const viewer = c.var.viewer!
-  const removed = await removeAttestation(id, viewer.did)
+  const schoolDid = currentSchool(c).did
+  const removed = await removeAttestation(id, viewer.did, schoolDid)
   if (removed) return c.body(null, 204)
   // Distinguish "not yours" from "not there" — the boolean from `removeAttestation`
   // alone cannot, so one cheap lookup decides which error this is.
-  const rows = await getDb().select({ id: attestation.id }).from(attestation).where(eq(attestation.id, id)).limit(1)
+  const rows = await getDb()
+    .select({ id: attestation.id })
+    .from(attestation)
+    .where(and(eq(attestation.id, id), schoolScope(attestation.schoolDid, schoolDid)))
+    .limit(1)
   if (rows.length === 0) return c.json({ error: 'NotFound' }, 404)
   return c.json({ error: 'Forbidden' }, 403)
 })

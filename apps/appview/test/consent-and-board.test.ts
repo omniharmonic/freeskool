@@ -147,6 +147,7 @@ vi.mock('../src/index/indexer.js', async () => {
 })
 
 import { closeTestDb, pgAvailable, SKIP_MESSAGE, testDb, truncate } from './helpers/pg.js'
+import { setDirectoryListing } from '../src/lib/membership.js'
 import { createApp } from '../src/http/app.js'
 import { createSession } from '../src/http/session.js'
 import { signSessionId } from '../src/lib/crypto.js'
@@ -485,6 +486,10 @@ describe('Task 2: GET /api/me reports directoryListing and onboarded', () => {
     await testDb()
       .insert(memberPrefs)
       .values({ did: MEMBER, directoryListing: false, onboardedAt: new Date() })
+    // `directoryListing` is per-school now and lives on `fs_membership`; `onboarded` is
+    // still the global `fs_member_prefs` fact. `PUT /api/me` writes both (MS §9 E), and
+    // so does the backfill — this fixture does the same rather than only half of it.
+    await setDirectoryListing(MEMBER, config().SCHOOL_DID, false)
     const res = await createApp().request('/api/me', { headers: { Cookie: await cookieFor(MEMBER) } })
     const body = (await res.json()) as { directoryListing: boolean; onboarded: boolean }
     expect(body.directoryListing).toBe(false)

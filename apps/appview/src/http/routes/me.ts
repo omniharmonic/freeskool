@@ -67,6 +67,9 @@ import { setChosenHandle, isHandleTaken } from '../../lib/handle-change.js'
 import { isPublicRoleOptIn, publishRoleClaim, setPublicRoleOptIn } from '../../lib/membership-claims.js'
 import { badgeSentences, type VouchCount } from '../../lib/badges.js'
 import { receivedWithAttesters, vouchCountsFor } from '../../lib/attestations.js'
+import { currentSchool } from '../school-context.js'
+import { legacySchoolDid } from '../../lib/schools.js'
+import { schoolScope } from '../../lib/school-scope.js'
 import { importBlueskyProfile } from '../../lib/bsky-profile.js'
 import { isValidChosenHandle, normalizeHandlePrefix } from '../../lib/handles.js'
 import { PdsError } from '../../lib/pds.js'
@@ -89,16 +92,18 @@ export { PROFILE_KEY, loadProfile, type Profile }
 
 me.get('/', async (c) => {
   const did = c.var.viewer!.did
+  const schoolDid = currentSchool(c).did
   const [role, evidence, thresholds, rsvps, profile, directoryPrefs] = await Promise.all([
-    roleOf(did),
-    evidenceFor(did),
-    getThresholds(),
+    roleOf(did, schoolDid),
+    evidenceFor(did, schoolDid),
+    getThresholds(schoolDid),
     myRsvps(did),
     loadProfile(did),
-    loadDirectoryPrefs(did),
+    loadDirectoryPrefs(did, schoolDid),
   ])
   return c.json({
     did,
+    school: schoolDid,
     role,
     // Showing the evidence is deliberate: a derived role that cannot be explained to the
     // person it applies to is indistinguishable from an arbitrary one.
@@ -145,7 +150,7 @@ me.put('/', async (c) => {
     )
   }
   const { confirmPublicLinkage: _confirm, ...fields } = parsed.data
-  const profile = await saveProfile(viewer.did, fields)
+  const profile = await saveProfile(viewer.did, fields, currentSchool(c).did)
   return c.json({
     did: viewer.did,
     profile: visibleProfile(profile),
@@ -252,8 +257,16 @@ me.post('/onboarded', async (c) => {
  * returns. Exported so `lib/members.ts` can show the same thing on another member's
  * profile without a second implementation.
  */
-export async function badgesFor(did: string) {
-  const [role, tallyRows, vouches] = await Promise.all([roleOf(did), getDb().select().from(attendanceTally).where(eq(attendanceTally.did, did)).limit(1), vouchesReceived(did)])
+export async function badgesFor(did: string, schoolDid = legacySchoolDid()) {
+  const [role, tallyRows, vouches] = await Promise.all([
+    roleOf(did, schoolDid),
+    getDb()
+      .select()
+      .from(attendanceTally)
+      .where(and(eq(attendanceTally.did, did), schoolScope(attendanceTally.schoolDid, schoolDid)))
+      .limit(1),
+    vouchesReceived(did, schoolDid),
+  ])
   const hosted = tallyRows[0]?.hostedEvents ?? 0
   const attended = tallyRows[0]?.attendedConfirmed ?? 0
   const vouched = vouches.reduce((sum, v) => sum + v.count, 0)
@@ -265,7 +278,7 @@ export async function badgesFor(did: string) {
 }
 
 me.get('/badges', async (c) => {
-  return c.json(await badgesFor(c.var.viewer!.did))
+  return c.json(await badgesFor(c.var.viewer!.did, currentSchool(c).did))
 })
 
 const publicRoleBody = z.object({ publicRole: z.boolean() }).strict()
@@ -274,13 +287,14 @@ me.put('/public-role', async (c) => {
   const parsed = publicRoleBody.safeParse(await c.req.json().catch(() => ({})))
   if (!parsed.success) return c.json({ error: 'InvalidRequest' }, 400)
   const viewer = c.var.viewer!
-  await setPublicRoleOptIn(viewer.did, parsed.data.publicRole)
+  const schoolDid = currentSchool(c).did
+  await setPublicRoleOptIn(viewer.did, parsed.data.publicRole, schoolDid)
   // Re-derivation moment: opting in may immediately qualify if the role is already
   // Host+ and the policy already allows it — no need to wait for the next attendance
   // attestation. Best-effort; the opt-in itself always succeeds either way.
-  if (parsed.data.publicRole && config().SCHOOL_DID) {
-    const role = await roleOf(viewer.did)
-    await publishRoleClaim(config().SCHOOL_DID as `did:${string}`, viewer.did as `did:${string}`, role).catch(() => undefined)
+  if (parsed.data.publicRole && schoolDid) {
+    const role = await roleOf(viewer.did, schoolDid)
+    await publishRoleClaim(schoolDid as `did:${string}`, viewer.did as `did:${string}`, role).catch(() => undefined)
   }
   return c.json({ publicRole: parsed.data.publicRole })
 })
@@ -294,7 +308,7 @@ me.get('/public-role', async (c) => {
  * app-side vouches (`fs_attestation`, this task's own vouching feature), merged into the
  * same by-skill counts before labels are resolved.
  */
-async function vouchesReceived(did: string): Promise<VouchCount[]> {
+async function vouchesReceived(did: string, schoolDid = legacySchoolDid()): Promise<VouchCount[]> {
   const indexer = await getIndexer()
   const { records } = await listCollection<{ skill?: string; direction?: string }>(indexer, 'skillAttestation', {
     filters: { subject: did },
@@ -307,7 +321,7 @@ async function vouchesReceived(did: string): Promise<VouchCount[]> {
     if (!skill) continue
     bySkill.set(skill, (bySkill.get(skill) ?? 0) + 1)
   }
-  const appSideCounts = await vouchCountsFor(did)
+  const appSideCounts = await vouchCountsFor(did, schoolDid)
   for (const [skillUri, count] of appSideCounts) {
     bySkill.set(skillUri, (bySkill.get(skillUri) ?? 0) + count)
   }
@@ -421,10 +435,10 @@ me.get('/attestations', async (c) => {
       createdAt: attestation.createdAt,
     })
     .from(attestation)
-    .where(eq(attestation.attesterDid, did))
+    .where(and(eq(attestation.attesterDid, did), schoolScope(attestation.schoolDid, currentSchool(c).did)))
     .orderBy(desc(attestation.createdAt))
 
-  const received = await receivedWithAttesters(did)
+  const received = await receivedWithAttesters(did, currentSchool(c).did)
   const attesterDids = [...new Set(received.map((r) => r.attesterDid))]
   const skillUris = [...new Set(received.map((r) => r.skillUri))]
   const [handles, displayNames, labels] = await Promise.all([
