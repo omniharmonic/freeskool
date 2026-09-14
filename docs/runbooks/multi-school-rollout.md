@@ -98,6 +98,106 @@ Both are handled in code, and both disappear once nothing is unstamped.
 - The `school_did` values the back-fill wrote are harmless to old code, which never reads
   the column. There is no un-stamp step and there should not be one.
 
+## Testing this, before and after
+
+Four suites cover this migration, in the order you would reach for them.
+
+**1. The migration itself, from a fixture.** `apps/appview/test/migration-fixture.test.ts`
+creates a throwaway database, replays `drizzle/meta/_journal.json` **up to `0010`** (the
+last migration before the federation phase), loads
+`apps/appview/test/fixtures/pre-federation-rows.sql` — a real single-school deployment's
+worth of rows — then runs `0011`…HEAD and `backfill-school` over it and asserts the result:
+every scoped table stamped and nothing left at `''`, one `fs_membership` row per
+`fs_member` carrying that member's own `directory_listing` and `public_role`, the four
+tables that already held a real `school_did` untouched, a second run stamping nothing, and
+the existing suites' invariants (`roleOf`, `listMembers`, per-school vouches) still true on
+the migrated database.
+
+The schema comes from the journal on purpose: a checked-in `pg_dump` of the old schema is
+a second copy of the migrations and rots the first time somebody adds a column.
+
+**2. The flag, both ways.** The same suite ends with `MULTI_SCHOOL` off and on against the
+migrated database: with the flag **off** an unknown host is still the legacy school (the
+pre-federation answer, i.e. the rollback works *after* the migration has run); with it
+**on** and only one school, an unknown host still resolves (which is what makes the flip a
+non-event for a city with no neighbour); with it on and a second `fs_school` row present,
+an unknown host is `404 UnknownSchool` — never 403.
+
+**3. Tenant isolation, route by route.** `apps/appview/test/tenant-isolation.test.ts`: two
+schools, three members and a steward of one who is an ordinary member of the other, and a
+ROUTE TABLE asked on both hosts. Every route asserts both halves — none of the other
+school's rows, **and** its own school's row present, so an endpoint that returns nothing
+cannot pass trivially. Adding a route is one line. A second table pins the handful of
+surfaces that are global on purpose (the skill taxonomy, published profiles, the public
+practitioner directory) as answering identically on both hosts, so they cannot drift in
+either direction unnoticed.
+
+**4. Two schools end to end.**
+
+```
+pnpm --filter @freeschool/appview seed:demo --schools boulder,denver
+pnpm --filter @freeschool/web exec playwright test e2e/multi-school.spec.ts
+```
+
+The seed creates Denver through the real `createSchool`, gives it a policy that asks for
+one attended class before hosting, and puts Maya in both cities with the same profile and
+claims and different vouches, RSVPs and derived role — Host in Boulder, Member in Denver.
+`apps/appview/.demo-users.json` gains `school` and `schools` per persona.
+
+**A dev-stack caveat that is not a product bug.** In production every city is a subdomain
+of one registrable domain and `SESSION_COOKIE_DOMAIN=.freeskool.xyz` carries the session
+across the school switcher's hop. Locally the cities are `*.localhost`, and **Chromium
+refuses a cookie with `Domain=localhost` or `Domain=.localhost` outright** — it stores
+nothing at all, so no configuration of the dev AppView can make one session span
+`boulder.localhost` and `denver.localhost`. The dev AppView therefore runs with
+`SESSION_COOKIE_DOMAIN=` (host-only cookies, one per city) and the e2e journey asserts the
+server half of the switch (`POST /api/auth/switch-school` moves the session and names the
+host) plus the navigation, then signs in through the second city's own door. Nothing about
+production changes.
+
+**5. The privacy audit, per school.**
+
+```
+pnpm --filter @freeschool/appview privacy-audit              # every school, then the whole PDS
+pnpm --filter @freeschool/appview privacy-audit --school=did:plc:…
+```
+
+Each school gets its own report over its own repos with **its own** consent gates
+(`fs_membership.public_role` and that school's `thresholds.publishRoles` — never another
+school's), plus MS §10.3's two cross-tenant assertions: no scoped `fs_*` row left unstamped
+or naming a school that is not in `fs_school` (reported once, under the legacy school,
+because an unstamped row is that school's by `school-scope.ts`'s rule), and no public
+response on a school's own host naming a DID whose only membership is in another school.
+An unscoped run finishes with the whole-PDS sweep, so a repo belonging to no school is
+still audited.
+
+## Two things that went wrong on the dev box, and what they mean for production
+
+Both were found by running this migration out of order on the development stack — the app
+served traffic for a day on the new code before anybody back-filled it. **Step 5 before
+step 7 is not bureaucracy**, and here is what it prevents:
+
+1. **A vouch forked instead of being adopted.** `fs_attestation`'s unique index gained
+   `school_did` in `0012`, so a pre-tenancy row (`school_did = ''`) no longer collides with
+   a stamped insert for the same (attester, subject, skill). A re-vouch in that window
+   created a SECOND row — inflating the subject's count — and then `backfill-school` failed
+   with a unique violation trying to stamp the older one. `createAttestation` now adopts the
+   unstamped row first (the same discipline `bumpTally` and `subscribe` already followed),
+   for the legacy school and no other.
+2. **`fs_peer` was never stamped at all, and then could not be.** It was missing from
+   `STAMPED_TABLES`, so `PEER_PDS_HOSTS` seed rows stayed at `''` forever. Adding it
+   revealed the second half: `seedPeersFromEnv` writes the legacy DID explicitly on the new
+   code, so a host can have both `('', host)` and `(<legacy>, host)` — and `fs_peer`'s
+   primary key CONTAINS `school_did`, so stamping the first collides with the second.
+   `backfill-school` now drops the shadowed unstamped row before stamping, and reports how
+   many it dropped.
+
+A third thing is worth knowing rather than fixing: **`backfill-school` maps every
+`fs_member` row to the legacy school**, which is exactly right for pre-tenancy data and
+wrong for anybody who joined a second school after the flag went on. Running it late (after
+a second school exists) therefore quietly makes those members members of the legacy school
+too. It is the same reason step 7 is last, stated from the other side.
+
 ## What this runbook does not cover
 
 Flipping `MULTI_SCHOOL=1`, the neutral PDS hostname migration

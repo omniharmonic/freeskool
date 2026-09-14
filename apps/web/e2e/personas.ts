@@ -27,6 +27,8 @@ export const DEMO_USERS_PATH = fileURLToPath(new URL('../../appview/.demo-users.
 
 export type PersonaIntent = 'host' | 'learner' | 'facilitator-to-be' | 'steward';
 
+export type DemoSchool = 'boulder' | 'denver';
+
 export interface DemoUser {
   slug: string;
   did: string;
@@ -34,6 +36,35 @@ export interface DemoUser {
   email: string;
   displayName: string;
   intent: PersonaIntent;
+  /** The school this persona signed up in. Absent in a fixture from a single-school seed. */
+  school?: DemoSchool;
+  /** Every school they belong to. Only `maya` has two — see `--schools boulder,denver`. */
+  schools?: DemoSchool[];
+}
+
+/**
+ * WHERE EACH SCHOOL IS SERVED IN DEVELOPMENT (federation phase).
+ *
+ * `*.localhost` resolves to loopback in every browser without touching `/etc/hosts`
+ * (RFC 6761), and the Vite dev proxy is configured `changeOrigin: false`, so the AppView
+ * receives the ORIGINAL `Host` header and `withSchool` resolves the city from it. Two
+ * cities, one dev server, no machine-level setup.
+ *
+ * Kept in step with `apps/appview/scripts/demo-personas.ts#DEMO_SCHOOL_HOSTS`.
+ */
+export const DEMO_SCHOOL_HOSTS: Record<DemoSchool, string> = {
+  boulder: 'boulder.localhost',
+  denver: 'denver.localhost',
+};
+
+/**
+ * The origin a school is served from, carrying the suite's own port. Derived from
+ * `baseURL` rather than hard-coded, so `E2E_BASE_URL=http://localhost:5199` still works.
+ */
+export function originFor(school: DemoSchool, baseUrl = process.env.E2E_BASE_URL ?? 'http://localhost:5173'): string {
+  const url = new URL(baseUrl);
+  url.hostname = DEMO_SCHOOL_HOSTS[school];
+  return url.origin;
 }
 
 /**
@@ -138,16 +169,37 @@ export async function signInAs(page: Page, slug: string): Promise<DemoUser> {
  * `page.request.get('/api/auth/me')` was racing that fetch, and won or lost it depending
  * on how long the magic link took to find. Leaving `/verify` is the observable end of it.
  */
-export async function openMagicLink(page: Page, url: string): Promise<void> {
+export async function openMagicLink(page: Page, url: string, origin?: string): Promise<void> {
   // Opened RELATIVE to the suite's own `baseURL`, token and query untouched: the AppView
   // builds the link from its `WEB_PUBLIC_URL`, which names whichever PWA that AppView
   // thinks is in front of it — not necessarily the one this run was pointed at
   // (`E2E_BASE_URL`, and the `APPVIEW_PROXY_TARGET` escape hatch in `vite.config.ts`).
   // Following the host verbatim there signs a DIFFERENT app in and leaves this page
   // signed out, which reads as a broken door rather than as a mismatched stack.
+  //
+  // `origin` overrides which app that is, for the two-school journeys: the door on
+  // `denver.localhost` is Denver's door, and confirming it on Boulder's origin would
+  // join the wrong city (`schoolDidOrLegacy` resolves the school from the request host).
   const link = new URL(url);
-  await page.goto(`${link.pathname}${link.search}`);
+  await page.goto(`${origin ?? ''}${link.pathname}${link.search}`);
   await page.waitForURL((current) => !current.pathname.startsWith('/verify'), { timeout: 30_000 });
+}
+
+/**
+ * Sign in through ONE SCHOOL'S OWN FRONT DOOR — `signInAs`, but on `boulder.localhost`
+ * or `denver.localhost` rather than on whatever `baseURL` names.
+ *
+ * The host is the whole point: `POST /api/auth/signin` resolves the school from it, and
+ * so does the magic link's `/verify`, so this is also how a member JOINS a second city
+ * (signing in on a school's host is joining it — `http/session.ts#createSession`).
+ */
+export async function signInAsOn(page: Page, slug: string, school: DemoSchool): Promise<DemoUser> {
+  const user = await demoUser(slug);
+  const origin = originFor(school);
+  const res = await page.request.post(`${origin}/api/auth/signin`, { data: { email: user.email } });
+  if (!res.ok()) throw new Error(`POST ${origin}/api/auth/signin for "${slug}" -> ${res.status()} ${await res.text()}`);
+  await openMagicLink(page, await verifyUrlFrom(await res.json().catch(() => null), user.email), origin);
+  return user;
 }
 
 /** One node of `GET /api/skills`' tree, as much of it as these journeys read. */

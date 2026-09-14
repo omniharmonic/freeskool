@@ -42,7 +42,6 @@ import { setSkillClaims } from '../src/lib/skill-claims.js'
 import { createEventAsHost, putInActorRepo, routeListing, updateEventAsHost, type CreateEventInput } from '../src/lib/events.js'
 import { getPresentation } from '../src/lib/event-presentation.js'
 import { actorAgent } from '../src/lib/actor-agent.js'
-import { schoolDid } from '../src/lib/school-actors.js'
 import { NSID } from '../src/lexicons/nsids.js'
 import { tid } from '../src/lib/ids.js'
 import type { EventListing } from '../src/lexicons/coop.js'
@@ -57,9 +56,27 @@ import { materializeSeries, type SeriesRecord } from '../src/jobs/materialize-se
 import { getIndexer } from '../src/index/indexer.js'
 import { getRecordByUri, listCollection, sidecarsForEvent } from '../src/index/queries.js'
 import { seriesOccurrence } from '../src/db/schema.js'
-import { getThresholds } from '../src/lib/policy.js'
+import { getThresholds, refreshPolicyCache } from '../src/lib/policy.js'
 import { appointSteward } from './appoint-steward.js'
-import { PERSONAS, SKILL, emailFor, identiconSvg, type Persona } from './demo-personas.js'
+import {
+  BOULDER,
+  DEMO_SCHOOLS,
+  DEMO_SCHOOL_HOSTS,
+  DENVER,
+  DENVER_PERSONAS,
+  IN_BOTH_SCHOOLS,
+  PERSONAS,
+  SKILL,
+  emailFor,
+  identiconSvg,
+  type DemoSchool,
+  type Persona,
+} from './demo-personas.js'
+import { createSchool, legacySchoolDid, legacySchoolHosts, listSchools, type School } from '../src/lib/schools.js'
+import { setDirectoryListing } from '../src/lib/membership.js'
+import { actorFor } from '../src/lib/school-actors.js'
+import { getRecord } from '../src/lib/pds.js'
+import { school, schoolDomain } from '../src/db/schema.js'
 
 /** Where the Playwright helper (`apps/web/e2e/personas.ts`) reads the cast back out. */
 export const DEMO_USERS_PATH = fileURLToPath(new URL('../.demo-users.json', import.meta.url))
@@ -74,6 +91,10 @@ export interface DemoUser {
   email: string
   displayName: string
   intent: Persona['intent']
+  /** The school this persona signed up in — their home city, and the host to sign in on. */
+  school: DemoSchool
+  /** EVERY school they belong to. Only `maya` has two, and that is the whole point. */
+  schools: DemoSchool[]
 }
 
 export interface SeedCounts {
@@ -88,6 +109,8 @@ export interface SeedCounts {
   vouches: number
   notes: number
   stewards: number
+  /** Schools this run seeded (1, or 2 with `--schools boulder,denver`). */
+  schools: number
   /** Artifacts a previous half-finished run lost, put back on this one. */
   repairs: number
 }
@@ -134,16 +157,25 @@ const headlessContext = () => ({ header: () => undefined }) as unknown as Contex
  * written by `createSession` and nowhere else. The session row is deleted again at the
  * end of the run; the durable membership fact it created is the point and stays.
  */
-async function signUpPersona(persona: Persona): Promise<{ viewer: Viewer; did: string; handle: string }> {
+async function signUpPersona(persona: Persona, schoolDid: string): Promise<{ viewer: Viewer; did: string; handle: string }> {
   const email = emailFor(persona.slug)
-  const result = await signup({ email })
+  /**
+   * `schoolDid` ON THE DOOR TOO, not only on the session. `signup()` records the invite
+   * that IS this member's admission evidence (`fs_invite.school_did`), and evidence is
+   * per school — a Denver persona whose invite landed in Boulder would derive a role
+   * there off a door they never walked through.
+   */
+  const result = await signup({ email, schoolDid })
   if (!result.verifyUrl) {
     throw new Error('signup did not return a verifyUrl — is SMTP_URL set? seed:demo needs the dev mail path')
   }
   const token = new URL(result.verifyUrl).searchParams.get('token')
   if (!token) throw new Error('could not read the verification token out of the signup result')
   const { did } = await verifyEmailToken(token)
-  const sessionId = await createSession(headlessContext(), did, 'custodial')
+  // `schoolDid` is what signing in on that city's host does: `createSession` writes the
+  // global `fs_member` row AND `fs_membership` for THIS school (MS §4). Passing it
+  // explicitly is the headless equivalent of the Host header.
+  const sessionId = await createSession(headlessContext(), did, 'custodial', { schoolDid })
   return { viewer: { did, kind: 'custodial', sessionId }, did, handle: result.handle }
 }
 
@@ -574,12 +606,12 @@ async function occurrenceCount(seriesUri: string): Promise<number> {
   return rows.length
 }
 
-/** Does our school already hold a curation listing for this event? */
-async function hasOurListing(eventUri: string): Promise<boolean> {
+/** Does THIS school already hold a curation listing for this event? */
+async function hasOurListing(eventUri: string, forSchool: string): Promise<boolean> {
   try {
     const indexer = await getIndexer()
     const rows = await sidecarsForEvent<EventListing>(indexer, 'eventListing', eventUri)
-    return rows.some((r) => r.value.school === schoolDid())
+    return rows.some((r) => r.value.school === forSchool)
   } catch {
     // Cannot prove it is missing, so do not write a second one.
     return true
@@ -596,6 +628,7 @@ async function repairClass(
   viewer: Viewer,
   demo: DemoClass,
   eventUri: string,
+  schoolDid: string,
 ): Promise<{ occurrences: number; repairs: number }> {
   const indexer = await getIndexer()
   const record = await getRecordByUri(indexer, 'event', eventUri)
@@ -608,7 +641,7 @@ async function repairClass(
   const plan = planClassRepair({
     hasOverview: Boolean(presentation.publicOverview?.description),
     wantsOverview: Boolean(demo.input.publicOverview?.description),
-    hasListing: await hasOurListing(eventUri),
+    hasListing: await hasOurListing(eventUri, schoolDid),
     // `routeListing` makes the real decision (it also checks the school's own routing
     // tags); this only asks whether a listing is possible in principle.
     routes: (demo.input.visibility ?? 'listed') === 'listed' && (demo.input.tags?.length ?? 0) > 0,
@@ -630,11 +663,16 @@ async function repairClass(
    * firing and leaving two listings behind.
    */
   if (plan.overview) {
-    const updated = await updateEventAsHost(viewer, eventUri, {
-      publicOverview: demo.input.publicOverview,
-      ...(demo.input.attendeeNotes ? { attendeeNotes: demo.input.attendeeNotes } : {}),
-      ...(demo.input.meetingLink ? { meetingLink: demo.input.meetingLink } : {}),
-    })
+    const updated = await updateEventAsHost(
+      viewer,
+      eventUri,
+      {
+        publicOverview: demo.input.publicOverview,
+        ...(demo.input.attendeeNotes ? { attendeeNotes: demo.input.attendeeNotes } : {}),
+        ...(demo.input.meetingLink ? { meetingLink: demo.input.meetingLink } : {}),
+      },
+      schoolDid,
+    )
     notify.push(updated.event.uri)
     if (updated.listing) {
       notify.push(updated.listing.uri)
@@ -650,6 +688,7 @@ async function repairClass(
       tags: demo.input.tags ?? [],
       visibility: demo.input.visibility,
       callerDid: viewer.did as Did,
+      schoolDid,
       auditReason: `restored the listing for "${demo.input.name}" after an interrupted seed run`,
     })
     if (listing) {
@@ -735,9 +774,400 @@ export async function assertHostsCanHost(): Promise<void> {
   }
 }
 
-export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[] }> {
+/* ------------------------------------------------------------------------- *
+ * A second city (federation phase)
+ * ------------------------------------------------------------------------- */
+
+/**
+ * `--schools boulder,denver`. `boulder` is always the env-configured school of this
+ * stack; it is implied, so `--schools denver` still seeds the Boulder cast first (Maya
+ * has to exist in Boulder before she can be the same person in Denver).
+ */
+export function parseSchools(argv: readonly string[]): DemoSchool[] {
+  const flag = argv.find((a) => a === '--schools' || a.startsWith('--schools='))
+  if (!flag) return ['boulder']
+  const raw = flag.includes('=') ? flag.slice(flag.indexOf('=') + 1) : (argv[argv.indexOf(flag) + 1] ?? '')
+  const asked = raw
+    .split(',')
+    .map((x) => x.trim().toLowerCase())
+    .filter(Boolean)
+  for (const label of asked) {
+    if (!(DEMO_SCHOOLS as readonly string[]).includes(label)) {
+      throw new Error(`unknown demo school "${label}" — known: ${DEMO_SCHOOLS.join(', ')}`)
+    }
+  }
+  // Always Boulder first, and only ever each school once.
+  return [...new Set<DemoSchool>(['boulder', ...(asked as DemoSchool[])])]
+}
+
+/**
+ * The hosts a demo school answers on locally.
+ *
+ * DELIBERATELY AN UPSERT, not `ON CONFLICT DO NOTHING` like `ensureLegacySchoolRow`:
+ * a dev box accumulates schools (a Task-5 verification run, an old e2e school), and the
+ * FIRST of them to claim `localhost` keeps it forever under do-nothing — so `localhost`
+ * can end up naming a school nobody is using while the real one is unreachable at the
+ * apex. The demo seed refuses to run outside a local stack (`assertLocalOnly`), so
+ * re-pointing dev hostnames is safe here and nowhere else.
+ */
+async function ensureDemoHosts(schoolDid: string, label: DemoSchool): Promise<void> {
+  if (label === 'boulder') {
+    /**
+     * The demo school IS Boulder, in `fs_school` as well as in its own published record.
+     * `ensureLegacySchoolRow` writes the row `ON CONFLICT DO NOTHING`, so a box whose
+     * school was created by an old e2e run keeps that run's name forever — and because
+     * the calendar masthead prefers the ROW's name when signed in and the RECORD's when
+     * signed out, the same page reads "E2e-86269 Free School" to a member and "Boulder
+     * Free School" to a stranger. Name it once, here, where the demo's identity is
+     * decided anyway.
+     */
+    await getDb()
+      .update(school)
+      .set({ name: BOULDER.name, city: BOULDER.city })
+      .where(eq(school.did, schoolDid))
+  }
+  const rows: Array<{ host: string; kind: 'canonical' | 'alias' }> = [
+    { host: DEMO_SCHOOL_HOSTS[label], kind: label === 'boulder' ? 'alias' : 'canonical' },
+  ]
+  // Boulder is the legacy school, so it also keeps the apex and whatever
+  // `ensureLegacySchoolRow` derives from `WEB_PUBLIC_URL` — `localhost` in dev, which is
+  // what `e2e/mvp.spec.ts` and `e2e/personas.spec.ts` browse, and therefore the one that
+  // stays CANONICAL for Boulder.
+  if (label === 'boulder') rows.push(...legacySchoolHosts())
+
+  /**
+   * EXACTLY ONE CANONICAL HOST PER SCHOOL, and locally it must be a host that resolves.
+   *
+   * `createSchool` writes `<label>.<SCHOOL_DOMAIN_SUFFIX>` — `denver.freeskool.xyz` — as
+   * canonical, because that is what a real deployment serves. On a dev box nothing
+   * answers there, and `canonicalHostFor` (what `POST /api/auth/switch-school` and
+   * `/schools` hand the browser) picks a canonical row, so the school switcher would send
+   * a developer to the production hostname of a school that only exists on their laptop.
+   * Demote whatever this school had before writing the demo's own hosts.
+   */
+  await getDb().update(schoolDomain).set({ kind: 'alias' }).where(eq(schoolDomain.schoolDid, schoolDid))
+  for (const row of rows) {
+    await getDb()
+      .insert(schoolDomain)
+      .values({ host: row.host, schoolDid, kind: row.kind })
+      .onConflictDoUpdate({ target: schoolDomain.host, set: { schoolDid, kind: row.kind } })
+  }
+}
+
+/** Denver, created through the real `createSchool` — or the one a previous run made. */
+async function ensureDenverSchool(): Promise<School> {
+  const existing = (await listSchools()).find((row) => row.label === DENVER.label)
+  if (existing) return existing
+  const created = await createSchool({
+    label: DENVER.label,
+    name: DENVER.name,
+    city: DENVER.city,
+    operator: 'seed:demo',
+    // No `founderDid`: Denver's steward signs up through the ordinary door below and is
+    // appointed afterwards, so nothing here invents a member.
+    seedTiers: false,
+  })
+  const row = await listSchools().then((rows) => rows.find((r) => r.did === created.did))
+  if (!row) throw new Error('createSchool returned a DID with no fs_school row')
+  return row
+}
+
+/**
+ * Denver's hosting bar, written as a REAL policy record through the school actor — the
+ * same two writes `PUT /api/admin/policy` makes (re-point the school record, then write
+ * the policy it names), so the seed cannot produce a policy state the product cannot.
+ *
+ * Idempotent: a re-run finds the bar already where it wants it and writes nothing.
+ */
+async function setDenverHostingBar(denverDid: string, stewardDid: string): Promise<boolean> {
+  const thresholds = await getThresholds(denverDid)
+  if (thresholds.hostMinAttended === DENVER.hostMinAttended) return false
+
+  const actor = await actorFor(denverDid)
+  const schoolRecord = await getRecord(denverDid, NSID.school, 'self')
+  if (!schoolRecord) throw new Error(`Denver has no ${NSID.school} record to re-point`)
+  const currentPolicyRkey = (schoolRecord.value?.policy as string | undefined)?.split('/').pop()
+  const currentPolicy = currentPolicyRkey ? await getRecord(denverDid, NSID.policy, currentPolicyRkey) : null
+
+  const now = new Date().toISOString()
+  const rkey = tid()
+  const policyUri = `at://${denverDid}/${NSID.policy}/${rkey}`
+  const audit = {
+    reason: 'seed:demo — Denver asks for one attended class before hosting, so a member of both cities has a different role in each',
+    approvals: [],
+  }
+  const caller = stewardDid as Did
+  await actor.putRecordAsSchool({
+    schoolDid: denverDid as Did,
+    callerDid: caller,
+    scope: NSID.school,
+    action: 'write-policy',
+    collection: NSID.school,
+    rkey: 'self',
+    record: { ...schoolRecord.value, policy: policyUri },
+    audit,
+  })
+  await actor.putRecordAsSchool({
+    schoolDid: denverDid as Did,
+    callerDid: caller,
+    scope: NSID.policy,
+    action: 'write-policy',
+    collection: NSID.policy,
+    rkey,
+    record: {
+      $type: NSID.policy,
+      title: (currentPolicy?.value?.title as string | undefined) ?? `${DENVER.name} policy`,
+      text: (currentPolicy?.value?.text as string | undefined) ?? 'Free School is free.',
+      version: '2',
+      effectiveAt: now,
+      thresholds: { ...thresholds, hostMinAttended: DENVER.hostMinAttended },
+      createdAt: now,
+    },
+    audit,
+  })
+  await refreshPolicyCache(denverDid)
+  return true
+}
+
+/** Two Denver classes, both hosted by Denver's own steward. */
+function denverClasses(): DemoClass[] {
+  return [
+    {
+      host: 'wren',
+      input: {
+        name: 'Seed swap and starts',
+        publicOverview: {
+          description:
+            'Bring whatever is rattling around in an envelope in your drawer and take home something you have never grown. We label, we swap, and we write down who is planting what so the block is not all growing zucchini in July.',
+          audience: 'Anyone with a pot, a plot or a windowsill.',
+        },
+        attendeeNotes: 'The gate off the alley is the one that opens; the front path is under repair.',
+        startsAt: at(4 * DAY),
+        endsAt: at(4 * DAY + 2 * HOUR),
+        neighborhood: 'Baker',
+        timezone: 'America/Denver',
+        capacity: 20,
+        tags: ['skillshare', 'demo'],
+        skills: [{ skill: skillUri(SKILL.gardening), level: 1 }],
+        materials: ['Seeds, if you have them'],
+      },
+      going: ['maya'],
+    },
+    {
+      host: 'wren',
+      input: {
+        name: 'How a meeting ends on time',
+        publicOverview: {
+          description:
+            'One evening on the small mechanics that stop a two-hour meeting: naming the decision, timing the round, and writing the minute while everyone is still in the room. We practise on a real agenda somebody brings.',
+          audience: 'Anyone who runs, or is about to run, a gathering here.',
+        },
+        startsAt: at(9 * DAY),
+        endsAt: at(9 * DAY + 90 * 60_000),
+        timezone: 'America/Denver',
+        tags: ['skillshare', 'demo'],
+        skills: [{ skill: skillUri(SKILL.facilitation), level: 1 }],
+      },
+    },
+  ]
+}
+
+/** One thing Denver has asked for. Maya asks it; Denver's steward says they want it too. */
+const DENVER_REQUESTS: Array<{ asker: string; title: string; description: string; skill?: string; threshold?: number; interested: string[] }> = [
+  {
+    asker: 'maya',
+    title: 'A winter kraut evening somewhere on this side of the hill',
+    description: 'I teach this up in Boulder and would happily do it here if a kitchen turns up.',
+    skill: SKILL.fermentation,
+    threshold: 2,
+    interested: ['wren'],
+  },
+]
+
+/**
+ * Denver's vouches for Maya — DIFFERENT people, for a DIFFERENT skill, from the ones she
+ * has in Boulder. MS §10: a vouch made in Denver is invisible in Boulder and vice versa,
+ * and this is the fixture that lets a test see that.
+ */
+const DENVER_VOUCHES: Array<{ from: string; to: string; skill: string }> = [
+  { from: 'wren', to: 'maya', skill: SKILL.kimchi },
+]
+
+/**
+ * THE SECOND CITY. Everything here goes through the same libs the Boulder section uses,
+ * with `denver.did` where Boulder passed `boulderDid` — that symmetry IS the test: a
+ * school is a parameter, not a deployment.
+ *
+ * What the fixture is FOR, in order:
+ *   - Maya is the same DID in both cities, with the same profile and the same claims
+ *     (global, MS §2) and a different vouch, a different RSVP and a different derived
+ *     role in each (per school, MS §4);
+ *   - Wren is Denver's steward and nothing at all in Boulder — the "a Denver steward has
+ *     no steward power on Boulder" acceptance criterion needs a person to be;
+ *   - every Boulder-only persona (theo, rosa, …) is someone Denver must never see.
+ */
+async function seedDenver(ctx: {
+  counts: SeedCounts
+  users: DemoUser[]
+  viewers: Map<string, Viewer>
+  viewerFor: (slug: string) => Viewer
+}): Promise<void> {
+  const { counts, users, viewers, viewerFor } = ctx
+  const denver = await ensureDenverSchool()
+
+  await ensureDemoHosts(denver.did, 'denver')
+
+  // 1. Denver's own cast, through the ordinary door, joining DENVER.
+  for (const persona of DENVER_PERSONAS) {
+    const { viewer, did } = await signUpPersona(persona, denver.did)
+    viewers.set(persona.slug, viewer)
+    // The school, explicitly — see the note on the Boulder call above.
+    await saveProfile(
+      did,
+      {
+        displayName: persona.displayName,
+        bio: persona.bio,
+        publicListing: true,
+        directoryListing: true,
+        avatar: await avatarFor(persona.slug),
+      },
+      denver.did,
+    )
+    const chosen = await setChosenHandle(viewer, persona.slug)
+    const handle = chosen.ok ? chosen.handle : `${persona.slug}.${config().handleDomain}`
+    users.push({
+      slug: persona.slug,
+      did,
+      handle,
+      email: emailFor(persona.slug),
+      displayName: persona.displayName,
+      intent: persona.intent,
+      school: 'denver',
+      schools: ['denver'],
+    })
+    counts.members++
+    const result = await setSkillClaims(viewer, {
+      claims: persona.skills.map((skill) => ({
+        skill: skillUri(skill.id),
+        level: skill.level,
+        ...(skill.note ? { note: skill.note } : {}),
+        visibility: skill.visibility ?? 'public',
+      })),
+      confirmTierB: true,
+    })
+    if (result.ok) counts.claims += persona.skills.length
+  }
+
+  // 2. Denver's steward. `appointSteward` clears `suspended_at`, so a re-run is a no-op.
+  const wren = viewerFor('wren')
+  await appointSteward(wren.did, denver.did)
+  counts.stewards++
+
+  // 3. Denver's policy: one attended class before hosting. This is the ONLY difference
+  //    between the two schools' rules, and it is what makes Maya a Host in Boulder and a
+  //    Member in Denver off identical evidence.
+  await setDenverHostingBar(denver.did, wren.did)
+
+  // 4. The people who belong to BOTH. A second session on Denver's host is exactly what a
+  //    member does when they follow a link to the other city and sign in: `createSession`
+  //    writes `fs_membership` for that school and nothing else changes about them.
+  for (const slug of IN_BOTH_SCHOOLS) {
+    const home = users.find((u) => u.slug === slug)
+    if (!home) throw new Error(`"${slug}" belongs in both schools but was never seeded in Boulder`)
+    const sessionId = await createSession(headlessContext(), home.did, 'custodial', { schoolDid: denver.did })
+    await getDb().delete(session).where(eq(session.id, sessionId))
+    /**
+     * ...and listed in Denver's directory. `joinSchool` deliberately does NOT re-list a
+     * RETURNING member (leaving was the stronger statement — `lib/membership.ts`), so
+     * without this a seed re-run after the e2e "leaving Denver" journey would leave Maya
+     * invisible there and the next run would assert against a different fixture. A demo
+     * seed's job is a known starting state; a real member's own choice is never touched
+     * by anything but their own toggle.
+     */
+    await setDirectoryListing(home.did, denver.did, true)
+    if (!home.schools.includes('denver')) home.schools.push('denver')
+  }
+  const didFor = (slug: string) => {
+    const seeded = users.find((u) => u.slug === slug)
+    if (!seeded) throw new Error(`no seeded persona "${slug}"`)
+    return seeded.did
+  }
+
+  // 5. Denver's classes, on Denver's calendar, in Wren's own repo.
+  const classUris = new Map<string, string>()
+  for (const demo of denverClasses()) {
+    const viewer = viewerFor(demo.host)
+    const already = await existingClassUri(viewer.did, demo.input.name)
+    if (already) {
+      classUris.set(demo.input.name, already)
+      const repaired = await repairClass(viewer, demo, already, denver.did)
+      counts.occurrences += repaired.occurrences
+      counts.repairs += repaired.repairs
+      continue
+    }
+    const created = await createEventAsHost(viewer, demo.input, denver.did)
+    classUris.set(demo.input.name, created.event.uri)
+    counts.classes++
+  }
+
+  // 6. RSVPs — Maya is coming to a Denver class she does not teach.
+  for (const demo of denverClasses()) {
+    const eventUri = classUris.get(demo.input.name)
+    if (!eventUri) continue
+    for (const slug of demo.going ?? []) {
+      await upsertRsvp({ eventUri, did: didFor(slug), status: 'going', schoolDid: denver.did })
+      counts.rsvps++
+    }
+  }
+
+  // 7. Denver's needs board.
+  for (const req of DENVER_REQUESTS) {
+    const viewer = viewerFor(req.asker)
+    let uri = await existingRequestUri(viewer.did, req.title)
+    if (!uri) {
+      const created = await createRequest(
+        viewer,
+        {
+          title: req.title,
+          description: req.description,
+          ...(req.skill ? { skill: skillUri(req.skill) } : {}),
+          ...(req.threshold ? { threshold: req.threshold } : {}),
+        },
+        { schoolDid: denver.did },
+      )
+      uri = created.uri
+      counts.requests++
+    }
+    for (const slug of req.interested) {
+      if (await isInterested(uri, didFor(slug), denver.did)) continue
+      await toggleInterest(uri, didFor(slug), denver.did)
+      counts.interests++
+    }
+  }
+
+  // 8. Denver's vouches — different people, different skill, invisible in Boulder.
+  for (const vouch of DENVER_VOUCHES) {
+    try {
+      await createAttestation({
+        attesterDid: didFor(vouch.from),
+        subjectDid: didFor(vouch.to),
+        skillUri: skillUri(vouch.skill),
+        schoolDid: denver.did,
+      })
+      counts.vouches++
+    } catch (err) {
+      if (!(err instanceof AttestationError)) throw err
+    }
+  }
+}
+
+export async function seedDemo(options: { schools?: DemoSchool[] } = {}): Promise<{ counts: SeedCounts; users: DemoUser[] }> {
   assertLocalOnly()
   await assertHostsCanHost()
+  const schools = options.schools ?? ['boulder']
+  const boulderDid = legacySchoolDid()
+  if (!boulderDid) throw new Error('seed:demo needs SCHOOL_DID — run `pnpm --filter @freeschool/appview create-school` first')
+  await ensureDemoHosts(boulderDid, 'boulder')
   const counts: SeedCounts = {
     members: 0,
     claims: 0,
@@ -750,6 +1180,7 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
     vouches: 0,
     notes: 0,
     stewards: 0,
+    schools: 1,
     repairs: 0,
   }
 
@@ -757,16 +1188,28 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
   const viewers = new Map<string, Viewer>()
   const users: DemoUser[] = []
   for (const persona of PERSONAS) {
-    const { viewer, did } = await signUpPersona(persona)
+    const { viewer, did } = await signUpPersona(persona, boulderDid)
     viewers.set(persona.slug, viewer)
 
-    await saveProfile(did, {
-      displayName: persona.displayName,
-      bio: persona.bio,
-      publicListing: true,
-      directoryListing: true,
-      avatar: await avatarFor(persona.slug),
-    })
+    /**
+     * THE SCHOOL IS NOT OPTIONAL HERE. `saveProfile`'s `schoolDid` defaults to the legacy
+     * school, and `directoryListing` is written through `setDirectoryListing`, which
+     * UPSERTS `fs_membership` — so a profile saved without naming the school makes the
+     * member a member of Boulder. (Found by this task's two-school seed: Denver's steward
+     * appeared in Boulder's directory. `PUT /api/me` always passed `currentSchool(c)`, so
+     * the product was never wrong; the script was.)
+     */
+    await saveProfile(
+      did,
+      {
+        displayName: persona.displayName,
+        bio: persona.bio,
+        publicListing: true,
+        directoryListing: true,
+        avatar: await avatarFor(persona.slug),
+      },
+      boulderDid,
+    )
 
     // The same `/welcome` path a member uses. A re-run finds the handle already theirs;
     // the PDS answers `HandleNotAvailable` for a handle they already hold, so a failure
@@ -781,6 +1224,8 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
       email: emailFor(persona.slug),
       displayName: persona.displayName,
       intent: persona.intent,
+      school: 'boulder',
+      schools: ['boulder'],
     })
     counts.members++
   }
@@ -819,12 +1264,12 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
       classUris.set(demo.input.name, already)
       // The class is here, but an interrupted run may have died before its listing or its
       // series ever got written — repair per artifact rather than skipping wholesale.
-      const repaired = await repairClass(viewer, demo, already)
+      const repaired = await repairClass(viewer, demo, already, boulderDid)
       counts.occurrences += repaired.occurrences
       counts.repairs += repaired.repairs
       continue
     }
-    const created = await createEventAsHost(viewer, demo.input)
+    const created = await createEventAsHost(viewer, demo.input, boulderDid)
     classUris.set(demo.input.name, created.event.uri)
     counts.classes++
 
@@ -846,7 +1291,7 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
     const eventUri = classUris.get(demo.input.name)
     if (!eventUri) continue
     for (const slug of demo.going ?? []) {
-      await upsertRsvp({ eventUri, did: didFor(slug), status: 'going' })
+      await upsertRsvp({ eventUri, did: didFor(slug), status: 'going', schoolDid: boulderDid })
       counts.rsvps++
     }
   }
@@ -861,6 +1306,7 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
       hostDid: didFor(demo.host),
       attendees: demo.attended.map((slug) => ({ did: didFor(slug), participated: true, role: 'attendee' as const })),
       eventStartsAt: new Date(demo.input.startsAt),
+      schoolDid: boulderDid,
     })
     counts.attendances += result.recorded
   }
@@ -870,19 +1316,23 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
     const viewer = viewerFor(req.asker)
     let uri = await existingRequestUri(viewer.did, req.title)
     if (!uri) {
-      const created = await createRequest(viewer, {
-        title: req.title,
-        description: req.description,
-        ...(req.skill ? { skill: skillUri(req.skill) } : {}),
-        ...(req.threshold ? { threshold: req.threshold } : {}),
-      })
+      const created = await createRequest(
+        viewer,
+        {
+          title: req.title,
+          description: req.description,
+          ...(req.skill ? { skill: skillUri(req.skill) } : {}),
+          ...(req.threshold ? { threshold: req.threshold } : {}),
+        },
+        { schoolDid: boulderDid },
+      )
       uri = created.uri
       counts.requests++
     }
     for (const slug of req.interested) {
       // `toggleInterest` is a TOGGLE: check first, or a re-run un-interests everybody.
-      if (await isInterested(uri, didFor(slug))) continue
-      await toggleInterest(uri, didFor(slug))
+      if (await isInterested(uri, didFor(slug), boulderDid)) continue
+      await toggleInterest(uri, didFor(slug), boulderDid)
       counts.interests++
     }
   }
@@ -894,6 +1344,7 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
         attesterDid: didFor(vouch.from),
         subjectDid: didFor(vouch.to),
         skillUri: skillUri(vouch.skill),
+        schoolDid: boulderDid,
       })
       counts.vouches++
     } catch (err) {
@@ -916,8 +1367,14 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
   }
 
   // 9. STEWARD — the one role that cannot be derived from records.
-  await appointSteward(didFor('steward'))
+  await appointSteward(didFor('steward'), boulderDid)
   counts.stewards++
+
+  // 9b. A SECOND CITY, when asked for.
+  if (schools.includes('denver')) {
+    await seedDenver({ counts, users, viewers, viewerFor })
+    counts.schools++
+  }
 
   // 10. The fixture the Playwright personas read.
   await writeFile(DEMO_USERS_PATH, `${JSON.stringify(users, null, 2)}\n`, 'utf8')
@@ -933,7 +1390,7 @@ export async function seedDemo(): Promise<{ counts: SeedCounts; users: DemoUser[
 
 if (isMain(import.meta.url)) {
   await runMigrations().catch(() => {})
-  const { counts } = await seedDemo()
+  const { counts } = await seedDemo({ schools: parseSchools(process.argv.slice(2)) })
   // COUNTS AND THE PATH ONLY — never a DID, an email or a handle (R9).
   console.log('Demo school seeded:')
   for (const [what, n] of Object.entries(counts)) console.log(`  ${String(n).padStart(4)}  ${what}`)

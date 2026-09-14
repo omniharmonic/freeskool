@@ -19,11 +19,20 @@
  * THE ONLY EXEMPTIONS, in full:
  *
  *   1. `coop.lexicon.membership` in a SCHOOL's repo may name a member at `subject` when
- *      BOTH consent gates hold: the school policy has `thresholds.publishRoles === true`
- *      AND that member opted in app-side (`fs_member_prefs.public_role`, written by
- *      `PUT /api/me/public-role`). This is the one place a derived role reaches the
- *      protocol — see `src/lib/membership-claims.ts`, which enforces the same two gates
- *      plus `role >= Host` before writing.
+ *      BOTH consent gates hold **for that school**: that school's policy has
+ *      `thresholds.publishRoles === true` AND that member opted in for that school
+ *      (`fs_membership.public_role`, written by `PUT /api/me/public-role`). This is the
+ *      one place a derived role reaches the protocol — see
+ *      `src/lib/membership-claims.ts`, which enforces the same two gates plus
+ *      `role >= Host` before writing.
+ *
+ *      PER SCHOOL, AND THAT MATTERS. Until the federation phase this script read the
+ *      GLOBAL `fs_member_prefs.public_role` and the HOME school's `publishRoles` for
+ *      every repo it looked at — so a member who opted in on Boulder made Denver's claim
+ *      about them look consented, and a claim in a school whose policy has `publishRoles`
+ *      off was cleared by a different school's policy. Consent given to one school is not
+ *      consent spent in another (MS §10); the claim names the school it belongs to, and
+ *      the repo it lives in IS that school, so the repo is what decides which gates apply.
  *   2. `freeschool.draft.moderationAction` in a SCHOOL's repo may name STEWARD DIDs in
  *      `actors[]` — "Stewards who approved", per that lexicon — because a steward consents
  *      by acting, and who approved a removal is the point of the record. Any other field is
@@ -78,13 +87,14 @@
  * `com.atproto.repo.describeRepo`, `com.atproto.repo.listRecords`) — that is the whole
  * point: this is what a stranger can see.
  */
-import { eq } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 import { config } from '../src/config.js'
 import { getDb, closeDb } from '../src/db/index.js'
-import { memberPrefs } from '../src/db/schema.js'
+import { memberPrefs, membership, school as schoolTable } from '../src/db/schema.js'
 import { getThresholds } from '../src/lib/policy.js'
 import { NSID } from '../src/lexicons/nsids.js'
 import { isMain } from '../src/lib/is-main.js'
+import { canonicalHostsFor, legacySchoolDid, listSchools } from '../src/lib/schools.js'
 
 /**
  * The collections a stranger could read that could name somebody else.
@@ -227,10 +237,17 @@ export function textMentions(value: unknown, path = ''): TextMention[] {
 export interface ConsentFacts {
   /** Every repo on an audited host that holds a `freeschool.draft.school` record. */
   schoolDids: Set<string>
-  /** The school policy's `thresholds.publishRoles` (the home school's; see `runPrivacyAudit`). */
-  publishRoles: boolean
-  /** DIDs with `fs_member_prefs.public_role = true`. */
-  publicRoleOptIn: Set<string>
+  /**
+   * `thresholds.publishRoles` PER SCHOOL, keyed by the school's DID. A school we host but
+   * whose policy we could not read is absent, which reads as `false` — fail closed.
+   */
+  publishRoles: Map<string, boolean>
+  /**
+   * Who opted in, PER SCHOOL: `fs_membership.public_role` for that school, plus (for the
+   * legacy school alone, mirroring `lib/membership.ts#publicRoleOptIn`) the old global
+   * `fs_member_prefs.public_role` for members with no membership row there yet.
+   */
+  publicRoleOptIn: Map<string, Set<string>>
   /** Always false in v1 — there is no attestation double-opt-in table. See the module doc. */
   attestationConsentTable: boolean
 }
@@ -254,11 +271,15 @@ export function verdictFor(
   if (facts.schoolDids.has(named.did)) return { allowed: true, reason: 'names a school DID (public institutional actor)' }
 
   if (collection === NSID.membership && isSchoolRepo && named.path === 'subject') {
-    if (!facts.publishRoles) return { allowed: false, reason: 'membership claim but policy.publishRoles is off' }
-    if (!facts.publicRoleOptIn.has(named.did)) {
-      return { allowed: false, reason: 'membership claim without the member’s public-role opt-in' }
+    // THE REPO IS THE SCHOOL. Both gates are read for THIS school and no other — see
+    // exemption 1 in the module doc for why that distinction is the whole point.
+    if (!facts.publishRoles.get(repoDid)) {
+      return { allowed: false, reason: 'membership claim but this school’s policy.publishRoles is off' }
     }
-    return { allowed: true, reason: 'publishRoles + member opt-in' }
+    if (!facts.publicRoleOptIn.get(repoDid)?.has(named.did)) {
+      return { allowed: false, reason: 'membership claim without the member’s public-role opt-in IN THIS SCHOOL' }
+    }
+    return { allowed: true, reason: 'this school’s publishRoles + this member’s opt-in here' }
   }
 
   if ((collection === NSID.approval || collection === NSID.moderationAction) && isSchoolRepo) {
@@ -321,9 +342,14 @@ export interface AuditReport {
   cells: AuditCell[]
   /** Structural namings AND free-text mentions, in one list: the script exits 1 on any. */
   violations: AuditViolation[]
+  /** The subset of `violations` that came from MS §10.3's cross-tenant assertions. */
+  crossTenant: AuditViolation[]
+  /** Which school this report is about, when it was scoped to one. */
+  schoolDid?: string
   /** Recorded in the report so a future run can tell why attestations failed. */
   attestationConsentTable: boolean
-  publishRoles: boolean
+  /** `thresholds.publishRoles` per school DID — one school's answer is not another's. */
+  publishRoles: Record<string, boolean>
 }
 
 /** `did:plc:abcd…` — enough to find it with the rkey, not enough to be a copy of it. */
@@ -403,16 +429,73 @@ async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promis
   return out
 }
 
-async function consentFacts(schoolDid: string, schoolDids: Set<string>): Promise<ConsentFacts> {
-  let publishRoles = false
-  const publicRoleOptIn = new Set<string>()
+/**
+ * Both consent gates, PER SCHOOL, for every school whose repo this run might read.
+ *
+ * FAILS CLOSED, and now per school: a policy we cannot read leaves that school out of
+ * `publishRoles` (absent reads as `false`), and a membership table we cannot read leaves
+ * every school's opt-in set empty. One school's unreadable policy no longer decides
+ * another school's claims either way.
+ */
+async function consentFacts(schoolDids: Set<string>): Promise<ConsentFacts> {
+  const publishRoles = new Map<string, boolean>()
+  const publicRoleOptIn = new Map<string, Set<string>>()
+  const optInFor = (schoolDid: string) => {
+    const existing = publicRoleOptIn.get(schoolDid)
+    if (existing) return existing
+    const made = new Set<string>()
+    publicRoleOptIn.set(schoolDid, made)
+    return made
+  }
+
+  /**
+   * ONLY THE SCHOOLS THIS DEPLOYMENT HOSTS. `schoolDids` is every repo on the PDS holding
+   * a `freeschool.draft.school` record — on a dev box, forty abandoned test schools — and
+   * `getThresholds` is not a pure read: a miss refreshes the policy from the PDS and
+   * WRITES `fs_policy_cache`. Asking it about a school we do not host would have this
+   * audit create a row per stranger's school every run, which it did once before this
+   * comment existed. A school we do not host is absent from the map, which reads as
+   * `publishRoles: false` — fail closed, and honest: we cannot vouch for another
+   * deployment's consent gates.
+   */
+  const ours = new Set((await listSchools().catch(() => [])).map((row) => row.did))
+  for (const did of schoolDids) {
+    if (!ours.has(did)) continue
+    try {
+      publishRoles.set(did, (await getThresholds(did)).publishRoles ?? false)
+    } catch {
+      console.warn(`    !!  could not read ${shortDid(did)}'s policy; treating publishRoles as off`)
+    }
+  }
+
   try {
-    if (schoolDid) publishRoles = (await getThresholds(schoolDid)).publishRoles ?? false
-    const prefs = await getDb().select({ did: memberPrefs.did }).from(memberPrefs).where(eq(memberPrefs.publicRole, true))
-    for (const row of prefs) publicRoleOptIn.add(row.did)
+    const rows = await getDb()
+      .select({ did: membership.did, schoolDid: membership.schoolDid })
+      .from(membership)
+      .where(eq(membership.publicRole, true))
+    for (const row of rows) optInFor(row.schoolDid).add(row.did)
+
+    /**
+     * The legacy school's transition fallback, MIRRORING `lib/membership.ts#publicRoleOptIn`
+     * exactly: the old global column counts for the legacy school alone, and only for a
+     * member who has no membership row there yet. Reading it any wider is the bug this
+     * function was rewritten to fix.
+     */
+    const legacy = legacySchoolDid()
+    if (legacy) {
+      const haveRow = new Set(
+        (await getDb().select({ did: membership.did }).from(membership).where(eq(membership.schoolDid, legacy))).map(
+          (r) => r.did,
+        ),
+      )
+      const prefs = await getDb()
+        .select({ did: memberPrefs.did })
+        .from(memberPrefs)
+        .where(eq(memberPrefs.publicRole, true))
+      for (const row of prefs) if (!haveRow.has(row.did)) optInFor(legacy).add(row.did)
+    }
   } catch {
-    // FAILS CLOSED: with no way to check consent, nothing is exempt.
-    publishRoles = false
+    // FAILS CLOSED: with no way to check consent, nothing is exempt, in any school.
     publicRoleOptIn.clear()
     console.warn('    !!  could not read the consent tables; treating every named DID as unconsented')
   }
@@ -429,15 +512,200 @@ async function surveyHost(host: string, only?: Set<string>): Promise<Array<{ did
   return mapLimit(dids, 8, async (did) => ({ did, collections: await collectionsOf(host, did) }))
 }
 
+/* ─────────────────── MS §10.3: the two cross-tenant assertions ─────────────────── */
+
+/**
+ * The repos a school's audit is ABOUT: the school's own, plus everyone who has ever been
+ * a member of it. A leaver is deliberately included — their public records are still
+ * theirs, still on this PDS, and still readable by a stranger.
+ */
+async function reposOfSchool(schoolDid: string): Promise<string[]> {
+  const rows = await getDb().select({ did: membership.did }).from(membership).where(eq(membership.schoolDid, schoolDid))
+  return [...new Set([schoolDid, ...rows.map((r) => r.did)])]
+}
+
+/**
+ * ASSERTION 1: no scoped `fs_*` row carries a `school_did` that belongs to no school.
+ *
+ * MS §10.3 words this as "no scoped row with a NULL `school_did`"; the columns were
+ * shipped `NOT NULL DEFAULT ''`, so the value that means "not stamped" is `''` — and the
+ * effect is identical, because `lib/school-scope.ts` hands every unstamped row to the
+ * LEGACY school. So the assertion is: after `backfill-school` has run, no scoped row is
+ * left unstamped, and none names a school that is not in `fs_school`.
+ *
+ * Only the tables this file can name are checked, and the list is deliberately explicit
+ * rather than derived from the drizzle schema: a new scoped table should have to be added
+ * here by someone who thought about it.
+ */
+const SCOPED_TABLES = [
+  'fs_membership',
+  'fs_attestation',
+  'fs_rsvp',
+  'fs_attendance',
+  'fs_attendance_tally',
+  'fs_feedback',
+  'fs_moderation_queue',
+  'fs_audit',
+  'fs_invite',
+  'fs_invite_link',
+  'fs_notification_feed',
+  'fs_newsletter_issue',
+  'fs_newsletter_subscription',
+  'fs_skill_proposal',
+  'fs_steward',
+  'fs_policy_cache',
+  'fs_peer',
+  'fs_event_school',
+  'fs_request_rsvp',
+] as const
+
+/**
+ * ASSERTION 2: no PUBLIC response on a school's own host names a DID whose only
+ * membership is in another school.
+ *
+ * The app is built in process and asked with that school's Host header — the same
+ * `withSchool` resolution a browser gets. Only the ANONYMOUS per-school surfaces are
+ * probed, because they are the ones a stranger (and therefore another city's member) can
+ * reach without a session; the signed-in ones are the tenant-isolation suite's job.
+ *
+ * School DIDs and the taxonomy authority are never "a member of another school".
+ */
+const PUBLIC_PROBES = (month: string) => ['/api/calendar', '/api/calendar.ics', `/api/zine/${month}`, '/api/school/how-it-works']
+
+/**
+ * Over HTTP, against the RUNNING AppView, with the school's own host forwarded — never by
+ * building the app in this process.
+ *
+ * Building it would make this audit a WRITER: `createApp()`'s first request constructs the
+ * indexer, which seeds `fs_peer` from `PEER_PDS_HOSTS` under whatever `SCHOOL_DID` this
+ * shell happens to have (`''`, if the operator did not source the env), and every policy
+ * read refreshes `fs_policy_cache`. An audit that mutates what it audits is not an audit.
+ * Reading it over HTTP is also what the rest of this script already does to the PDS: look
+ * at the deployment exactly as a stranger would.
+ *
+ * `undefined` — rather than "no violations" — when nothing is listening, so the report can
+ * say the assertion did not run instead of quietly passing.
+ */
+async function probePublic(base: string, host: string, path: string): Promise<string | undefined> {
+  try {
+    const res = await fetch(new URL(path, base), { headers: { 'X-Forwarded-Host': host } })
+    return res.ok ? await res.text() : undefined
+  } catch {
+    return undefined
+  }
+}
+
+async function crossTenantViolations(schoolDid: string): Promise<AuditViolation[]> {
+  const out: AuditViolation[] = []
+  const db = getDb()
+  const knownSchools = new Set((await listSchools().catch(() => [])).map((row) => row.did))
+
+  /**
+   * ASSERTION 1 IS THE LEGACY SCHOOL'S, ONCE — not every school's, three times.
+   *
+   * An unstamped row (`school_did = ''`) belongs to the LEGACY school and to no other:
+   * `lib/school-scope.ts` widens the predicate to include `''` for that school alone. An
+   * orphan row naming a school that is not in `fs_school` belongs to nobody, which makes
+   * it the deployment's own problem — the same audit. Reporting either under every school
+   * in the loop would say the same thing N times and imply Denver had rows it does not.
+   */
+  const legacy = legacySchoolDid()
+  const ownsUnstamped = !legacy || schoolDid === legacy
+  for (const table of ownsUnstamped ? SCOPED_TABLES : []) {
+    let rows: Array<{ school_did: string; n: number }>
+    try {
+      const result = await db.execute(
+        sql.raw(`select school_did, count(*)::int as n from ${table} group by school_did`),
+      )
+      rows = (result.rows ?? result) as Array<{ school_did: string; n: number }>
+    } catch {
+      // A table this deployment has not got (an older migration state). Not a violation.
+      continue
+    }
+    for (const row of rows) {
+      const value = row.school_did ?? ''
+      if (knownSchools.has(value)) continue
+      out.push({
+        host: '(app-side)',
+        repoDid: schoolDid,
+        collection: table,
+        rkey: `${row.n} row(s)`,
+        path: 'school_did',
+        namedDid: value === '' ? '<unstamped>' : value,
+        reason:
+          value === ''
+            ? `${table} still holds unstamped rows — run \`backfill-school\` before a second school exists (MS §10.3)`
+            : `${table} names a school_did that is not in fs_school`,
+      })
+    }
+  }
+
+  // ---- assertion 2, which IS per school: this school's own public surfaces.
+  const host = (await canonicalHostsFor([schoolDid]).catch(() => new Map<string, string>())).get(schoolDid)
+  if (!host) return out
+  const base = config().APPVIEW_PUBLIC_URL || 'http://localhost:4000'
+  const month = new Date().toISOString().slice(0, 7)
+  const authority = config().AUTHORITY_DID
+  let probed = 0
+  for (const path of PUBLIC_PROBES(month)) {
+    const body = await probePublic(base, host, path)
+    if (body === undefined) continue
+    probed += 1
+    const named = [...new Set(namedDids(body).map((n) => n.did))].filter(
+      (did) => did !== schoolDid && did !== authority && !knownSchools.has(did),
+    )
+    if (named.length === 0) continue
+    const rows = await db
+      .select({ did: membership.did, schoolDid: membership.schoolDid })
+      .from(membership)
+      .where(inArray(membership.did, named))
+    const schoolsOf = new Map<string, Set<string>>()
+    for (const row of rows) {
+      const set = schoolsOf.get(row.did) ?? new Set<string>()
+      set.add(row.schoolDid)
+      schoolsOf.set(row.did, set)
+    }
+    for (const did of named) {
+      const belongs = schoolsOf.get(did)
+      // No membership row at all is not a cross-tenant leak: it is a pre-tenancy member,
+      // or somebody from a peer PDS whose public record we merely index.
+      if (!belongs || belongs.size === 0 || belongs.has(schoolDid)) continue
+      out.push({
+        host: '(app-side)',
+        repoDid: schoolDid,
+        collection: `GET ${path}`,
+        rkey: '-',
+        path: 'response body',
+        namedDid: did,
+        reason: 'a public response on this school’s host names a DID whose only membership is in another school (MS §10.3)',
+      })
+    }
+  }
+  if (probed === 0) {
+    console.warn(
+      `    !!  nothing answered at ${base}: MS §10.3's public-response assertion did not run for ${shortDid(schoolDid)}. ` +
+        'Start the AppView (or set APPVIEW_PUBLIC_URL) and re-run.',
+    )
+  }
+  return out
+}
+
 export async function runPrivacyAudit(options?: {
   hosts?: string[]
+  /**
+   * Audit ONE school (MS §10.3). Its own repo plus the repos of everyone who has ever
+   * been a member of it, and the two cross-tenant assertions below run for it. Omit it —
+   * and the CLI loops every school instead, one report each.
+   */
   schoolDid?: string
   /** Audit only these repos. The smoke test scopes itself to the repos its own run wrote. */
   repos?: string[]
 }): Promise<AuditReport> {
   const c = config()
   const hosts = [...new Set((options?.hosts ?? [c.PDS_URL, ...c.PEER_PDS_HOSTS]).map((h) => h.replace(/\/$/, '')))]
-  const only = options?.repos ? new Set(options.repos) : undefined
+  const scopedToSchool = Boolean(options?.schoolDid) && !options?.repos
+  const explicitRepos = options?.repos ?? (scopedToSchool ? await reposOfSchool(options!.schoolDid!) : undefined)
+  const only = explicitRepos ? new Set(explicitRepos) : undefined
 
   const surveyed = new Map<string, Array<{ did: string; collections: string[] }>>()
   const schoolDids = new Set<string>()
@@ -448,7 +716,10 @@ export async function runPrivacyAudit(options?: {
   }
   // A school named in a scoped run may live outside the scope; keep the configured one.
   if (options?.schoolDid ?? c.SCHOOL_DID) schoolDids.add(options?.schoolDid ?? c.SCHOOL_DID)
-  const facts = await consentFacts(options?.schoolDid ?? c.SCHOOL_DID, schoolDids)
+  // Every school we HOST is a school whether or not this run read its repo — a scoped run
+  // must still know that a DID it meets is an institution, not a person (exemption 4).
+  for (const row of await listSchools().catch(() => [])) schoolDids.add(row.did)
+  const facts = await consentFacts(schoolDids)
 
   const cells: AuditCell[] = []
   const violations: AuditViolation[] = []
@@ -501,6 +772,18 @@ export async function runPrivacyAudit(options?: {
     })
   }
 
+  /**
+   * MS §10.3's two cross-tenant assertions, for the school this run is about.
+   *
+   * Only for a run that is ACTUALLY about one school — not for `scripts/smoke.ts`, which
+   * passes `schoolDid` alongside an explicit `repos` list to narrow the record sweep to
+   * the handful of repos its own run just wrote. Both assertions are about the whole
+   * deployment (every scoped table; every public response on that school's host), so
+   * running them there would judge a throwaway smoke school on the state of the box.
+   */
+  const crossTenant = scopedToSchool ? await crossTenantViolations(options!.schoolDid!) : []
+  violations.push(...crossTenant)
+
   cells.sort((a, b) => a.collection.localeCompare(b.collection) || a.repoDid.localeCompare(b.repoDid))
   return {
     hosts,
@@ -508,8 +791,10 @@ export async function runPrivacyAudit(options?: {
     records,
     cells,
     violations,
+    crossTenant,
+    schoolDid: options?.schoolDid,
     attestationConsentTable: facts.attestationConsentTable,
-    publishRoles: facts.publishRoles,
+    publishRoles: Object.fromEntries(facts.publishRoles),
   }
 }
 
@@ -538,7 +823,16 @@ export function formatReport(report: AuditReport): string {
     `hosts ${report.hosts.length} · repos ${report.repos} · audited collections ${AUDITED_COLLECTIONS.length} · ` +
       `records ${report.records} · free-text mentions ${textFlagged} · violations ${report.violations.length}`,
   )
-  lines.push(`policy.publishRoles=${report.publishRoles} · attestation double-opt-in table: none in v1`)
+  const publishRoles = Object.entries(report.publishRoles)
+    .map(([did, on]) => `${shortDid(did)}=${on}`)
+    .join(' ')
+  lines.push(`policy.publishRoles per school: ${publishRoles || '(none)'} · attestation double-opt-in table: none in v1`)
+  if (report.schoolDid) {
+    lines.push(
+      `cross-tenant assertions (MS §10.3) for ${shortDid(report.schoolDid)}: ` +
+        `${report.crossTenant.length === 0 ? 'OK' : `${report.crossTenant.length} failure(s)`}`,
+    )
+  }
   if (report.violations.length > 0) {
     lines.push('')
     for (const v of report.violations) {
@@ -549,15 +843,46 @@ export function formatReport(report: AuditReport): string {
   return lines.join('\n')
 }
 
+/** `--school=<did>` (or `--school <did>`). Absent means "every school this AppView hosts". */
+export function parseSchoolFlag(argv: readonly string[]): string | undefined {
+  const flag = argv.find((a) => a === '--school' || a.startsWith('--school='))
+  if (!flag) return undefined
+  const value = flag.includes('=') ? flag.slice(flag.indexOf('=') + 1) : (argv[argv.indexOf(flag) + 1] ?? '')
+  const did = value.trim()
+  if (!did.startsWith('did:')) throw new Error('--school takes a school DID (did:plc:…)')
+  return did
+}
+
 if (isMain(import.meta.url)) {
   console.log('Free School privacy audit — public records that name somebody else\n')
-  const report = await runPrivacyAudit()
-  console.log(formatReport(report))
-  console.log(
-    report.violations.length === 0
-      ? '\nPRIVACY AUDIT OK'
-      : `\nPRIVACY AUDIT FAILED — ${report.violations.length} violation(s)`,
-  )
+  const asked = parseSchoolFlag(process.argv.slice(2))
+  /**
+   * PER SCHOOL, AND IT LOOPS (MS §10.3). Each school gets its own report over its own
+   * repos with its own consent gates, because "is this record consented" has a different
+   * answer in every city. A deployment with no `fs_school` rows at all falls back to the
+   * whole-PDS audit this script has always done.
+   */
+  const schools = asked ? [asked] : (await listSchools().catch(() => [])).map((row) => row.did)
+  /**
+   * A scoped run reads only that school's repos, so a repo belonging to NO school — an
+   * abandoned test school, a member who was purged from every roster but whose records are
+   * still on the PDS — would slip out of the audit entirely. So an unscoped run ends with
+   * the whole-PDS sweep this script has always done, after the per-school reports.
+   */
+  const reports: Array<string | undefined> = schools.length > 0 && !asked ? [...schools, undefined] : schools.length > 0 ? schools : [undefined]
+  let total = 0
+  for (const schoolDid of reports) {
+    console.log(
+      schoolDid
+        ? `── school ${shortDid(schoolDid)} ${'─'.repeat(40)}\n`
+        : `── every repo on every audited host ${'─'.repeat(24)}\n`,
+    )
+    const report = await runPrivacyAudit(schoolDid ? { schoolDid } : undefined)
+    console.log(formatReport(report))
+    console.log('')
+    total += report.violations.length
+  }
+  console.log(total === 0 ? 'PRIVACY AUDIT OK' : `PRIVACY AUDIT FAILED — ${total} violation(s)`)
   await closeDb().catch(() => {})
-  if (report.violations.length > 0) process.exitCode = 1
+  if (total > 0) process.exitCode = 1
 }
