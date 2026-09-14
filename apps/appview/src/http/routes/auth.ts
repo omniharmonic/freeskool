@@ -16,7 +16,7 @@ import { Hono, type Context } from 'hono'
 import { z } from 'zod'
 import { and, eq, isNull } from 'drizzle-orm'
 import type { AppEnv } from '../session.js'
-import { createSession, destroySession, requireViewer, setSessionSchool } from '../session.js'
+import { createSession, destroySession, requireViewer, sessionSpansHost, setSessionSchool } from '../session.js'
 import { legacySchool, requestHost, schoolDidOrLegacy } from '../school-context.js'
 import {
   signup,
@@ -210,6 +210,13 @@ const switchSchoolBody = z.object({ schoolDid: z.string().startsWith('did:') })
  * The response carries the school's canonical host: switching is a NAVIGATION, not a
  * state change the current page can render. The session field is what makes the apex
  * agree, and the host is what makes `boulder.freeskool.xyz` stop being Denver.
+ *
+ * …and `sessionSpansHosts`, which says whether the member's cookie actually TRAVELS to
+ * that host. With `SESSION_COOKIE_DOMAIN` empty — the dev stack, and production before
+ * the cutover — it does not: the session row moves, the cookie stays behind, and the
+ * browser lands in the new city signed out with nothing said. The PWA uses this to send
+ * them to that city's own sign-in door with a line explaining why, instead of a blank
+ * screen (Task 4 report, concern 5).
  */
 auth.post('/switch-school', requireViewer, async (c) => {
   const viewer = c.var.viewer!
@@ -223,9 +230,11 @@ auth.post('/switch-school', requireViewer, async (c) => {
   // A membership row for a school that no longer exists is not a school to switch to.
   if (!target) return c.json({ error: 'NotAMember', message: 'you are not a member of that school' }, 403)
   await setSessionSchool(viewer.sessionId, schoolDid)
+  const host = await schoolHostFor(schoolDid)
   return c.json({
     school: { did: target.did, label: target.label, name: target.name },
-    host: await schoolHostFor(schoolDid),
+    host,
+    sessionSpansHosts: sessionSpansHost(host),
   })
 })
 

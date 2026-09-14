@@ -5,8 +5,23 @@ import { Button } from '../components/bits';
 import { api, ApiError } from '../lib/api';
 
 import { rememberSignInReturn } from '../lib/signin-return';
+import { useHowItWorks } from '../lib/queries';
 
 type Status = 'idle' | 'sending' | 'sent' | 'error';
+
+/**
+ * `?switched=1` — `SchoolSwitcher` sent us here.
+ *
+ * Every city is its own origin, and unless the AppView serves a domain-scoped session
+ * cookie the member's session does not come with them. Arriving at a school you just
+ * chose, signed out, with no word about why, reads as a broken app; one plain line is the
+ * whole fix. The NAME comes from this host's own public page — the only place a
+ * signed-out visitor can learn whose school they are standing in — so nothing about which
+ * school this is travels in a query string.
+ */
+function switchedHere(search: string): boolean {
+  return new URLSearchParams(search).get('switched') === '1';
+}
 
 /**
  * Two doors, in R9's order: the email door first, an existing ATProto
@@ -27,6 +42,8 @@ type Status = 'idle' | 'sending' | 'sent' | 'error';
  */
 export function SignInScreen() {
   useEffect(() => rememberSignInReturn(window.location.search), []);
+  const [switched] = useState(() => switchedHere(window.location.search));
+  const school = useHowItWorks(switched).data?.school.name;
   const [email, setEmail] = useState('');
   const [status, setStatus] = useState<Status>('idle');
   const [errorMessage, setErrorMessage] = useState('');
@@ -45,6 +62,13 @@ export function SignInScreen() {
 
   return (
     <FlowFrame title="Come as you are" description="Free classes taught by people who live here. Sign in to join a class, ask for something new, or share what you know.">
+        {switched ? (
+          <p role="status" className="plate p-3.5 text-caption text-ink-soft">
+            {school
+              ? `You switched to ${school}. Sign in here to continue.`
+              : 'You switched schools. Sign in here to continue.'}
+          </p>
+        ) : null}
         {status === 'sent' ? (
           <div role="status" className="plate plate-green p-5">
             <p className="text-body font-bold">Check your email</p>

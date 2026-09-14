@@ -48,10 +48,25 @@ function isLoopback(hostname: string): boolean {
   );
 }
 
-function urlForHost(host: string): string {
+function urlForHost(host: string, path = '/'): string {
   const { hostname, protocol, port } = window.location;
-  if (!isLoopback(hostname)) return `https://${host}/`;
-  return `${protocol}//${host.includes(':') || !port ? host : `${host}:${port}`}/`;
+  if (!isLoopback(hostname)) return `https://${host}${path}`;
+  return `${protocol}//${host.includes(':') || !port ? host : `${host}:${port}`}${path}`;
+}
+
+/**
+ * WHERE THE SWITCH LANDS.
+ *
+ * One session spans every city only when the AppView is serving a domain-scoped cookie
+ * (`SESSION_COOKIE_DOMAIN=.freeskool.xyz`), which it says per switch in
+ * `sessionSpansHosts`. When it does not — the `*.localhost` dev stack, where Chromium
+ * refuses a `Domain=localhost` cookie outright, and production before the cutover — the
+ * member arrives at the next city as a stranger. Dropping them on its home screen signed
+ * out, with no word about why, is the bug; sending them to its own door with one line of
+ * explanation is the fix. `switched=1` is what `SignInScreen` reads.
+ */
+function destinationFor(host: string, spans: boolean): string {
+  return spans ? urlForHost(host) : urlForHost(host, '/signin?returnTo=/&switched=1');
 }
 
 export function SchoolSwitcher({ me }: { me: AuthMe | undefined }) {
@@ -91,7 +106,7 @@ export function SchoolSwitcher({ me }: { me: AuthMe | undefined }) {
       }
       // A full navigation on purpose: the new origin loads its own app, its own service
       // worker scope and its own cache. `assign`, not `replace`, so Back still works.
-      window.location.assign(urlForHost(host));
+      window.location.assign(destinationFor(host, result.sessionSpansHosts === true));
     } catch {
       setError('Could not switch schools. Try again.');
     }

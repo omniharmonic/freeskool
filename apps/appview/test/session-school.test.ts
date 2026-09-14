@@ -240,6 +240,9 @@ describe('POST /api/auth/switch-school', () => {
     expect(await res.json()).toEqual({
       school: { did: SCHOOL_B, label: 'bee', name: 'Bee Free School' },
       host: HOST_B,
+      // No `SESSION_COOKIE_DOMAIN` here, so the cookie does not travel to B and the PWA
+      // is told so — `session-cookie-domain.test.ts` has the other half.
+      sessionSpansHosts: false,
     })
     expect(await currentSchoolDidOf(cookie)).toBe(SCHOOL_B)
 

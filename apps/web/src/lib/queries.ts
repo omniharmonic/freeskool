@@ -638,10 +638,15 @@ export function useEventRoster(eventId: string | undefined, enabled = true) {
   });
 }
 
-export function useHowItWorks() {
+/**
+ * `enabled` exists for one caller: `SignInScreen`, which needs this school's NAME only
+ * when it is explaining a school switch, and must not add a request to every sign-in.
+ */
+export function useHowItWorks(enabled = true) {
   return useQuery({
     queryKey: ['how-it-works'],
     queryFn: () => api.school.howItWorks(),
+    enabled,
   });
 }
 

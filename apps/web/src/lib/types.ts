@@ -110,6 +110,14 @@ export interface AuthMe {
 export interface SwitchSchoolResult {
   school: Omit<ViewerSchool, 'host'>;
   host: string;
+  /**
+   * Whether the session cookie reaches that host (`SESSION_COOKIE_DOMAIN` is set and the
+   * host is under it). When it does not — the dev stack, and production before the
+   * cookie-domain cutover — the browser would arrive signed out, so `SchoolSwitcher`
+   * sends it to that city's sign-in door with a line saying what happened instead.
+   * Optional because an AppView older than this field simply says nothing.
+   */
+  sessionSpansHosts?: boolean;
 }
 
 /**

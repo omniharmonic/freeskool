@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ReactNode } from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 // `SignInScreen`'s second door is a router `Link` (not a plain `<a>`), so it
 // never triggers a full navigation that the dev proxy would 404 — see the
@@ -25,15 +26,26 @@ vi.mock('../lib/api', () => {
       this.code = code;
     }
   }
-  return { api: { auth: { signin: vi.fn(), signup: vi.fn() } }, ApiError };
+  return { api: { auth: { signin: vi.fn(), signup: vi.fn() }, school: { howItWorks: vi.fn() } }, ApiError };
 });
 
 const { api, ApiError } = await import('../lib/api');
 const { SignInScreen } = await import('./SignInScreen');
 
+/** The screen reads this school's own public page for its name (see `?switched=1`). */
+function renderScreen() {
+  return render(
+    <QueryClientProvider client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}>
+      <SignInScreen />
+    </QueryClientProvider>,
+  );
+}
+
 describe('SignInScreen', () => {
   beforeEach(() => {
     vi.mocked(api.auth.signin).mockReset();
+    vi.mocked(api.school.howItWorks).mockReset();
+    window.history.replaceState({}, '', '/signin');
   });
 
   it('posts the email to signin (new or returning, one door) and shows the check-your-email state', async () => {
@@ -43,7 +55,7 @@ describe('SignInScreen', () => {
       verifyUrl: 'http://localhost:4000/verify?token=abc',
     });
 
-    render(<SignInScreen />);
+    renderScreen();
     fireEvent.change(screen.getByLabelText(/your email/i), { target: { value: 'wren@example.com' } });
     fireEvent.click(screen.getByRole('button', { name: 'Continue with email' }));
 
@@ -52,7 +64,7 @@ describe('SignInScreen', () => {
   });
 
   it('shows the helper text under the email field', () => {
-    render(<SignInScreen />);
+    renderScreen();
     expect(screen.getByText('New here or coming back, this is the door.')).toBeInTheDocument();
   });
 
@@ -64,7 +76,7 @@ describe('SignInScreen', () => {
       new ApiError(502, 'SignupFailed', 'could not create the account'),
     );
 
-    render(<SignInScreen />);
+    renderScreen();
     fireEvent.change(screen.getByLabelText(/your email/i), { target: { value: 'wren@example.com' } });
     fireEvent.click(screen.getByRole('button', { name: 'Continue with email' }));
 
@@ -73,8 +85,49 @@ describe('SignInScreen', () => {
   });
 
   it('links the second door to the OAuth confirm screen', () => {
-    render(<SignInScreen />);
+    renderScreen();
     const link = screen.getByRole('link', { name: 'Use an existing AT Protocol account' });
     expect(link).toHaveAttribute('href', '/oauth/confirm');
+  });
+
+  /**
+   * A member who switched cities on a deployment whose session cookie is host-only lands
+   * here signed out. Saying nothing would read as the app losing them.
+   */
+  describe('arriving from the school switcher', () => {
+    it('names the school they switched to and says why they are here', async () => {
+      vi.mocked(api.school.howItWorks).mockResolvedValue({
+        title: 'How it works',
+        school: { name: 'Denver Free School' },
+        sections: [],
+        lastUpdated: '2026-09-14',
+        printable: true,
+      });
+      window.history.replaceState({}, '', '/signin?returnTo=/&switched=1');
+
+      renderScreen();
+
+      expect(
+        await screen.findByText('You switched to Denver Free School. Sign in here to continue.'),
+      ).toBeInTheDocument();
+    });
+
+    it('still explains itself when the school’s name cannot be read', async () => {
+      vi.mocked(api.school.howItWorks).mockRejectedValue(new ApiError(500, 'Internal', 'nope'));
+      window.history.replaceState({}, '', '/signin?switched=1');
+
+      renderScreen();
+
+      expect(
+        await screen.findByText('You switched schools. Sign in here to continue.'),
+      ).toBeInTheDocument();
+    });
+
+    it('says nothing on an ordinary visit, and asks the server nothing', () => {
+      renderScreen();
+
+      expect(screen.queryByText(/You switched/)).not.toBeInTheDocument();
+      expect(api.school.howItWorks).not.toHaveBeenCalled();
+    });
   });
 });

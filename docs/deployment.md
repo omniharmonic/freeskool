@@ -319,16 +319,19 @@ document all of these; `apps/appview/src/config.ts` is still the only thing that
 
 **The cookie-domain cutover** (federation Task 4 report, concern 1): `SESSION_COOKIE_DOMAIN`
 must move from empty (host-only) to `.freeskool.xyz` in the SAME deploy that creates the second
-city — a school switcher that only ever sees one origin's cookie is not a school switcher. But an
-existing member's browser is still holding a host-only cookie set before the cutover, and that
-cookie keeps winning (more specific scope) until it expires or the member signs out — they will
-not silently start seeing the widened, cross-city session just because the server-side default
-changed. The clean cutover is a one-time forced sign-out at the moment `SESSION_COOKIE_DOMAIN` is
-set: every existing session invalidated, every member re-authenticates once and gets the new,
-domain-wide cookie from then on. There is no code for the forced sign-out yet — either a
-short-lived session-secret rotation (`SESSION_SECRET`, which invalidates every signed cookie at
-once) or a one-off script that empties `fs_session`, run in the same maintenance window as the
-`SESSION_COOKIE_DOMAIN` change.
+city — a school switcher that only ever sees one origin's cookie is not a school switcher. An
+existing member's browser is still holding a host-only cookie set before the cutover, and a
+`Cookie:` header says nothing about the scope a value came from, so the server cannot tell the
+two apart by looking.
+
+**It does not need to. There is no forced sign-out.** `apps/appview/src/http/session.ts`
+migrates on first sight: the first request after the flip re-issues the same cookie WITH the
+`Domain`, expires the host-only one (a deletion is scoped too, so it goes out without the
+domain — otherwise the browser keeps both and RFC 6265 ordering hands back the narrow one
+forever), and drops a `fs_session_d` marker so it happens once per browser rather than on every
+response. The member stays signed in throughout; `apps/appview/test/session-cookie-domain.test.ts`
+pins it. Do NOT rotate `SESSION_SECRET` or empty `fs_session` for this — both would sign
+everybody out for no reason.
 
 ## Moving the stack
 

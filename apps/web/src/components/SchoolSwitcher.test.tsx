@@ -83,6 +83,7 @@ describe('SchoolSwitcher', () => {
     vi.mocked(api.auth.switchSchool).mockResolvedValue({
       school: { did: DENVER.did, label: DENVER.label, name: DENVER.name },
       host: 'denver.example.org',
+      sessionSpansHosts: true,
     });
     renderSwitcher(me([BOULDER, DENVER]));
 
@@ -102,6 +103,7 @@ describe('SchoolSwitcher', () => {
     vi.mocked(api.auth.switchSchool).mockResolvedValue({
       school: { did: DENVER.did, label: DENVER.label, name: DENVER.name },
       host: DENVER.host,
+      sessionSpansHosts: true,
     });
     renderSwitcher(me([BOULDER, DENVER]));
 
@@ -116,6 +118,7 @@ describe('SchoolSwitcher', () => {
     vi.mocked(api.auth.switchSchool).mockResolvedValue({
       school: { did: DENVER.did, label: DENVER.label, name: DENVER.name },
       host: 'denver.localhost',
+      sessionSpansHosts: true,
     });
     renderSwitcher(me([BOULDER, DENVER]));
 
@@ -135,6 +138,7 @@ describe('SchoolSwitcher', () => {
     vi.mocked(api.auth.switchSchool).mockResolvedValue({
       school: { did: DENVER.did, label: DENVER.label, name: DENVER.name },
       host: 'denver.localhost',
+      sessionSpansHosts: true,
     });
     renderSwitcher(me([BOULDER, DENVER]));
 
@@ -152,6 +156,56 @@ describe('SchoolSwitcher', () => {
     await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull());
     expect(api.auth.switchSchool).not.toHaveBeenCalled();
     expect(assign).not.toHaveBeenCalled();
+  });
+
+  /**
+   * THE TWO LANDINGS. A switch is only seamless when one cookie reaches both cities; the
+   * AppView is the only thing that knows whether it does, and it says so per switch.
+   */
+  it('goes straight to the new city when one session spans both hosts', async () => {
+    vi.mocked(api.auth.switchSchool).mockResolvedValue({
+      school: { did: DENVER.did, label: DENVER.label, name: DENVER.name },
+      host: DENVER.host,
+      sessionSpansHosts: true,
+    });
+    renderSwitcher(me([BOULDER, DENVER]));
+
+    fireEvent.click(screen.getByRole('button', { name: /Boulder Free School/ }));
+    fireEvent.click(screen.getByRole('option', { name: 'Denver Free School' }));
+
+    await waitFor(() => expect(assign).toHaveBeenCalledWith(`https://${DENVER.host}/`));
+  });
+
+  it('sends the member to the new city’s own door when the cookie does not travel', async () => {
+    vi.mocked(api.auth.switchSchool).mockResolvedValue({
+      school: { did: DENVER.did, label: DENVER.label, name: DENVER.name },
+      host: DENVER.host,
+      sessionSpansHosts: false,
+    });
+    renderSwitcher(me([BOULDER, DENVER]));
+
+    fireEvent.click(screen.getByRole('button', { name: /Boulder Free School/ }));
+    fireEvent.click(screen.getByRole('option', { name: 'Denver Free School' }));
+
+    await waitFor(() =>
+      expect(assign).toHaveBeenCalledWith(`https://${DENVER.host}/signin?returnTo=/&switched=1`),
+    );
+  });
+
+  /** An AppView that predates the field says nothing; assume the cookie stays put. */
+  it('treats a missing sessionSpansHosts as "does not travel"', async () => {
+    vi.mocked(api.auth.switchSchool).mockResolvedValue({
+      school: { did: DENVER.did, label: DENVER.label, name: DENVER.name },
+      host: DENVER.host,
+    });
+    renderSwitcher(me([BOULDER, DENVER]));
+
+    fireEvent.click(screen.getByRole('button', { name: /Boulder Free School/ }));
+    fireEvent.click(screen.getByRole('option', { name: 'Denver Free School' }));
+
+    await waitFor(() =>
+      expect(assign).toHaveBeenCalledWith(`https://${DENVER.host}/signin?returnTo=/&switched=1`),
+    );
   });
 
   it('says so and stays put when the switch is refused', async () => {

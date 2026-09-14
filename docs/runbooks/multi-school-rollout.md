@@ -151,6 +151,29 @@ one attended class before hosting, and puts Maya in both cities with the same pr
 claims and different vouches, RSVPs and derived role — Host in Boulder, Member in Denver.
 `apps/appview/.demo-users.json` gains `school` and `schools` per persona.
 
+**The cookie-domain cutover needs no forced sign-out.** Production sets
+`SESSION_COOKIE_DOMAIN=.freeskool.xyz` in the same deploy that creates the second city
+(`docs/deployment.md`, step 5). Every browser already signed in is holding a HOST-ONLY
+`fs_session` from before that flip, and nothing in a `Cookie:` header says so — so
+`http/session.ts` does not try to tell: on the first request after the flip it re-issues
+the same cookie **with** the `Domain`, sends a deletion of the same name **without** one
+(a deletion is scoped like any other write; skip it and the browser keeps both, and RFC
+6265 ordering hands back the narrow one forever), and sets a `fs_session_d` marker so the
+whole exchange happens once per browser instead of on every response. Nobody is signed
+out, and nobody is left on a session that will not travel to the second city.
+
+So: **do not rotate `SESSION_SECRET` and do not empty `fs_session` at the cutover.** Both
+sign every member out to solve a problem that no longer exists.
+`apps/appview/test/session-cookie-domain.test.ts` pins the migration, the once-only
+marker, that a forged cookie is never re-issued, and that signing out ends both scopes.
+
+**Before the cutover, switching schools explains itself.** Until the domain is set — and
+always on the dev stack — the session does not follow the member to the next city. So
+`POST /api/auth/switch-school` returns `sessionSpansHosts`, and when it is false the PWA
+sends the member to that city's own `/signin?returnTo=/&switched=1` instead of its home
+screen, where `SignInScreen` says "You switched to <school>. Sign in here to continue."
+The session row has still moved; only the cookie has not.
+
 **A dev-stack caveat that is not a product bug.** In production every city is a subdomain
 of one registrable domain and `SESSION_COOKIE_DOMAIN=.freeskool.xyz` carries the session
 across the school switcher's hop. Locally the cities are `*.localhost`, and **Chromium

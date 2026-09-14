@@ -21,6 +21,17 @@
  *    Set and cleared in the SAME place, because a cookie deleted without the `Domain` it
  *    was written with is not deleted at all — the browser keeps the wider one and the
  *    member stays signed in after pressing sign out.
+ *
+ * THE CUTOVER (Task 4 report, concern 1). The day production sets the domain, every
+ * browser already signed in is holding a HOST-ONLY cookie of the same name. The browser
+ * keeps sending it, a domain-scoped one is never written, and the member stays stuck on a
+ * session that does not travel — the switcher lands them signed out in the next city.
+ * Nothing in a `Cookie:` header says which scope a value came from, so the server cannot
+ * simply look: `readViewer` therefore MIGRATES on first sight — re-issues the same name
+ * WITH the domain, deletes the host-only one (a deletion is scoped too, so it must be
+ * sent without the domain), and drops a `<cookie>_d` marker so it happens exactly once
+ * per browser rather than on every response. No forced sign-out, no cleared table; see
+ * `docs/runbooks/multi-school-rollout.md`.
  */
 import type { Context, MiddlewareHandler } from 'hono'
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
@@ -103,14 +114,7 @@ export async function createSession(
   // (MS §4): `fs_member` above stays the GLOBAL presence row, `fs_membership` is what
   // every roster, directory and skill page reads. Same chokepoint, same call.
   await joinSchool(did, schoolDid, kind)
-  setCookie(c, config().SESSION_COOKIE, signSessionId(id), {
-    httpOnly: true,
-    secure: config().isProd,
-    sameSite: 'Lax',
-    path: '/',
-    maxAge: Math.floor(ttlMs / 1000),
-    ...cookieDomain(),
-  })
+  writeSessionCookie(c, signSessionId(id), Math.floor(ttlMs / 1000))
   return id
 }
 
@@ -124,11 +128,43 @@ function cookieDomain(): { domain?: string } {
   return domain ? { domain } : {}
 }
 
+/**
+ * The marker that says "this browser's session cookie already carries the `Domain`".
+ * Value `1` and nothing else — it is not a credential, it is a note to ourselves, and it
+ * is written on the SAME scope as the cookie it vouches for so the two travel together.
+ */
+function migratedMarker(): string {
+  return `${config().SESSION_COOKIE}_d`
+}
+
+/** One shape for every session cookie write: `HttpOnly; Secure; SameSite=Lax; Path=/`. */
+function writeSessionCookie(c: Context, value: string, maxAge: number): void {
+  const attrs = {
+    httpOnly: true,
+    secure: config().isProd,
+    sameSite: 'Lax' as const,
+    path: '/',
+    maxAge,
+    ...cookieDomain(),
+  }
+  setCookie(c, config().SESSION_COOKIE, value, attrs)
+  // With no domain configured there is nothing to mark: the cookie is host-only, which is
+  // what it would have been anyway, and a marker would only outlive its own meaning.
+  if (config().sessionCookieDomain) setCookie(c, migratedMarker(), '1', attrs)
+}
+
 export async function destroySession(c: Context): Promise<void> {
   const raw = getCookie(c, config().SESSION_COOKIE)
   const id = raw ? verifySessionCookie(raw) : null
   if (id) await getDb().delete(session).where(eq(session.id, id))
   deleteCookie(c, config().SESSION_COOKIE, { path: '/', ...cookieDomain() })
+  if (config().sessionCookieDomain) {
+    // Signing out must end BOTH scopes. A browser that has not been migrated yet still
+    // holds the host-only one, and "sign out" that leaves a live session cookie behind is
+    // the worst bug this file could have.
+    deleteCookie(c, config().SESSION_COOKIE, { path: '/' })
+    deleteCookie(c, migratedMarker(), { path: '/', ...cookieDomain() })
+  }
 }
 
 /**
@@ -151,12 +187,51 @@ export async function readViewer(c: Context): Promise<Viewer | undefined> {
     await getDb().delete(session).where(eq(session.id, id))
     return undefined
   }
+  migrateCookieScope(c, raw, row.expiresAt)
   return {
     did: row.did,
     kind: row.kind as SessionKind,
     sessionId: row.id,
     currentSchoolDid: row.currentSchoolDid ?? undefined,
   }
+}
+
+/**
+ * WIDEN A HOST-ONLY COOKIE TO THE SHARED DOMAIN, ONCE.
+ *
+ * Only ever called for a session that has already been verified and found live, so a
+ * forged or stale cookie is never re-issued. Three headers, in this order:
+ *
+ *   1. the same name, same value, now WITH `Domain` — the wide cookie the switcher needs;
+ *   2. a deletion of the same name WITHOUT `Domain` — a deletion is scoped like any other
+ *      write, so this is the only thing that can remove the host-only one, and leaving it
+ *      would mean two cookies of one name where RFC 6265 ordering picks the narrow one;
+ *   3. the marker, so the next request from this browser skips all of the above.
+ *
+ * The expiry carried over is the SESSION ROW's, not a fresh TTL: migrating must not
+ * quietly extend a session that is nearly over.
+ */
+function migrateCookieScope(c: Context, raw: string, expiresAt: Date): void {
+  if (!config().sessionCookieDomain) return
+  if (getCookie(c, migratedMarker())) return
+  const remaining = Math.floor((expiresAt.getTime() - Date.now()) / 1000)
+  if (remaining <= 0) return
+  writeSessionCookie(c, raw, remaining)
+  deleteCookie(c, config().SESSION_COOKIE, { path: '/' })
+}
+
+/**
+ * Does one session cookie reach this host? True only when `SESSION_COOKIE_DOMAIN` is set
+ * AND the host sits under it. `POST /api/auth/switch-school` hands the answer to the PWA,
+ * which otherwise sends a member to another origin where their cookie does not go — a
+ * blank signed-out screen with no explanation (Task 4 report, concern 5).
+ */
+export function sessionSpansHost(host: string): boolean {
+  const domain = config().sessionCookieDomain
+  if (!domain || !host) return false
+  const base = domain.replace(/^\./, '')
+  const target = host.toLowerCase().split(':')[0] ?? ''
+  return target === base || target.endsWith(`.${base}`)
 }
 
 /** Populates `c.var.viewer` when a session exists. Never rejects. */
