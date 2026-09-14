@@ -192,6 +192,28 @@ describe('MeScreen', () => {
     expect(screen.getByRole('button', { name: 'Save' })).toBeInTheDocument();
   });
 
+  it('with no display name, shows "Add your name" once as the title and the handle once — not the handle twice', async () => {
+    vi.mocked(api.me.profile).mockResolvedValue({
+      did: 'did:plc:wren',
+      role: 20,
+      evidence: {},
+      thresholds: {},
+      rsvps: [],
+      profile: { displayName: '', bio: '' },
+    });
+    renderScreen();
+
+    const title = await screen.findByRole('button', { name: 'Add your name' });
+    // The handle appears once in the profile card (the subtitle, not also the
+    // title) — the separate "Your handle" settings row is a different place.
+    const profileCard = title.closest('.profile-card') as HTMLElement;
+    expect(within(profileCard).getAllByText('wren.fs.boulder')).toHaveLength(1);
+
+    fireEvent.click(title);
+
+    expect(await screen.findByLabelText(/display name/i)).toHaveFocus();
+  });
+
   it('display name and bio inputs carry the server\'s length limits (120/2000)', async () => {
     renderScreen();
     fireEvent.click(await screen.findByRole('button', { name: 'Edit' }));

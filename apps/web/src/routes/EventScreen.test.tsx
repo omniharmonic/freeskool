@@ -285,6 +285,20 @@ describe('EventScreen', () => {
     expect(screen.queryByText('Listed from another school')).not.toBeInTheDocument();
   });
 
+  it('hides machine routing tags but keeps any tag a host actually wrote', async () => {
+    vi.mocked(api.events.get).mockResolvedValue({
+      ...baseEvent,
+      tags: ['skillshare', 'free-school', 'demo', 'outdoor'],
+    });
+    renderScreen();
+
+    await screen.findByRole('heading', { name: 'Sourdough basics' });
+    expect(screen.getByText('outdoor')).toBeInTheDocument();
+    expect(screen.queryByText('skillshare')).not.toBeInTheDocument();
+    expect(screen.queryByText('free-school')).not.toBeInTheDocument();
+    expect(screen.queryByText('demo')).not.toBeInTheDocument();
+  });
+
   it('gates "Remind me" on install state: not installed opens the install sheet instead of requesting push', async () => {
     vi.mocked(useInstallFlow).mockReturnValue({
       surface: 'ios-safari',

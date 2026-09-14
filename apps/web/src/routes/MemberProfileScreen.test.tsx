@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 const SUBJECT_DID = 'did:plc:wren';
@@ -112,6 +112,30 @@ describe('MemberProfileScreen', () => {
     expect(screen.getByText('Mending')).toBeInTheDocument();
     expect(screen.getByText('Mending circle')).toBeInTheDocument();
     expect(screen.getByText('Darning notes')).toBeInTheDocument();
+  });
+
+  it('shows what they did instead of the "Host" label below Facilitator — everyone qualifies under the default policy', async () => {
+    renderScreen();
+
+    const heading = await screen.findByRole('heading', { name: 'Wren Halloway' });
+    const header = heading.closest('.member-header') as HTMLElement;
+    expect(within(header).queryByText('Host')).not.toBeInTheDocument();
+    expect(within(header).getByText(/Hosted 2 classes/)).toBeInTheDocument();
+    expect(within(header).getByText(/3 vouches/)).toBeInTheDocument();
+  });
+
+  it('names the role once it reaches Facilitator, instead of the hosted count', async () => {
+    vi.mocked(api.members.get).mockResolvedValue({
+      ...profile,
+      role: 30,
+      roleLabel: 'Facilitator',
+    });
+    renderScreen();
+
+    const heading = await screen.findByRole('heading', { name: 'Wren Halloway' });
+    const header = heading.closest('.member-header') as HTMLElement;
+    expect(within(header).getByText(/Facilitator/)).toBeInTheDocument();
+    expect(within(header).queryByText(/Hosted 2 classes/)).not.toBeInTheDocument();
   });
 
   it('vouches for one skill, sending the subject and the skill', async () => {

@@ -2,7 +2,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import { LoadingState, PageState } from '../components/PageState';
 import { ImagePicker } from '../components/ImagePicker';
 import type { ImageInput } from '../lib/types';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate } from '@tanstack/react-router';
 import { applyPrefs, readPrefs, writePrefs, type ThemeChoice } from '../lib/prefs';
 import { SessionGate } from '../components/SessionGate';
@@ -144,6 +144,18 @@ function MeContent() {
   const [publicListing, setPublicListing] = useState(false);
   const [avatar, setAvatar] = useState<ImageInput | null | undefined>();
   const [profileError, setProfileError] = useState<string | null>(null);
+  // UX audit finding 3: with no display name, the title card's "Add your
+  // name" affordance opens the editor and focuses this field directly,
+  // rather than leaving the member to find it themselves.
+  const displayNameInputRef = useRef<HTMLInputElement>(null);
+  const [focusNameOnOpen, setFocusNameOnOpen] = useState(false);
+
+  useEffect(() => {
+    if (editingProfile && focusNameOnOpen) {
+      displayNameInputRef.current?.focus();
+      setFocusNameOnOpen(false);
+    }
+  }, [editingProfile, focusNameOnOpen]);
 
   useEffect(() => {
     if (!meProfile || editingProfile) return;
@@ -306,7 +318,22 @@ function MeContent() {
             {meProfile?.profile.avatarUrl ? <img src={meProfile.profile.avatarUrl} alt="Your profile image" /> : <span>{(meProfile?.profile.displayName ?? me?.handle ?? 'You').slice(0,2).toUpperCase()}</span>}
           </div>
           <div className="min-w-0 flex-1">
-            <p className="display text-lede font-bold">{meProfile?.profile.displayName || me?.handle || 'You'}</p>
+            {meProfile?.profile.displayName ? (
+              <p className="display text-lede font-bold">{meProfile.profile.displayName}</p>
+            ) : (
+              <button
+                type="button"
+                className="display text-lede font-bold text-blue text-left"
+                onClick={() => {
+                  setProfileError(null);
+                  setAvatar(undefined);
+                  setEditingProfile(true);
+                  setFocusNameOnOpen(true);
+                }}
+              >
+                Add your name
+              </button>
+            )}
             {me?.handle ? <p className="text-caption text-ink-soft">{me.handle}</p> : null}
             {meProfile?.profile.bio ? <p className="mt-3 text-body text-ink-soft">{meProfile.profile.bio}</p> : null}
           </div>
@@ -329,6 +356,7 @@ function MeContent() {
             <label className="block">
               <span className="text-caption text-ink-soft">Display name</span>
               <input
+                ref={displayNameInputRef}
                 className="mt-1.5 w-full border-[1.5px] border-ink bg-sheet px-3 py-2 text-body outline-none"
                 value={displayName}
                 maxLength={120}

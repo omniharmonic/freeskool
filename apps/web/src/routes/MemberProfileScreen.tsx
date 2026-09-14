@@ -16,6 +16,14 @@ import {
 import type { MemberClaim, MemberProfileResponse } from '../lib/types';
 
 /**
+ * Mirrors `Role.Facilitator` in `packages/shared/src/roles.ts` (30). Below
+ * this, every member counts as "Host" under the default policy
+ * (`hostMinAttended: 0`), so the label would be true of everyone and say
+ * nothing — show what they actually did instead (UX audit finding 2).
+ */
+const NAMEABLE_ROLE = 30;
+
+/**
  * One member's profile, for another member.
  *
  * Never public (R9): `GET /api/members/:did` sits behind a session and answers
@@ -162,7 +170,9 @@ function MemberProfileBody({ profile, viewerDid }: { profile: MemberProfileRespo
             <h1 className="lt-title member-header-name">{name}</h1>
             {profile.handle ? <p className="member-card-handle">{profile.handle}</p> : null}
             <p className="member-card-meta">
-              {profile.roleLabel}
+              {profile.role >= NAMEABLE_ROLE
+                ? profile.roleLabel
+                : `Hosted ${profile.badges.counts.hosted} ${profile.badges.counts.hosted === 1 ? 'class' : 'classes'}`}
               {profile.vouchCount > 0
                 ? ` · ${profile.vouchCount} ${profile.vouchCount === 1 ? 'vouch' : 'vouches'}`
                 : ''}

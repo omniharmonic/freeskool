@@ -109,7 +109,36 @@ describe('PeopleScreen', () => {
 
     expect(await screen.findByText('Wren Halloway')).toBeInTheDocument();
     expect(screen.getByText('Juno Marsh')).toBeInTheDocument();
-    expect(screen.getByText(/Host/)).toBeInTheDocument();
+  });
+
+  it('does not label a member "Host" below Facilitator — everyone qualifies under the default policy, so the label would say nothing', async () => {
+    renderScreen();
+
+    await screen.findByText('Wren Halloway');
+    // Wren is role 20 (Host) — not worth naming. Evidence (skill count) stands in its place.
+    expect(screen.queryByText('Host')).not.toBeInTheDocument();
+    expect(screen.getByText(/3 skills/)).toBeInTheDocument();
+    expect(screen.getByText(/2 vouches/)).toBeInTheDocument();
+  });
+
+  it('names the role once it reaches Facilitator', async () => {
+    vi.mocked(api.members.list).mockReset().mockResolvedValue({
+      members: [
+        {
+          did: 'did:plc:fay',
+          handle: 'fay.fs.boulder',
+          displayName: 'Fay Okafor',
+          role: 30,
+          roleLabel: 'Facilitator',
+          claimCount: 4,
+          vouchCount: 1,
+          lastSeenAt: '2026-09-12T18:00:00.000Z',
+        },
+      ],
+    });
+    renderScreen();
+
+    expect(await screen.findByText(/Facilitator/)).toBeInTheDocument();
   });
 
   it('filters by name, passing the search through to the API', async () => {

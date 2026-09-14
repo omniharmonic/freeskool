@@ -19,6 +19,15 @@ const PERMANENCE_SENTENCE =
   'Anyone will be able to see, permanently, that you planned to be at this place at this time.';
 
 /**
+ * Machine tags written by calendar routing/exchange rather than by the host —
+ * never member-facing (UX audit finding 4). The school's actual routing-tag
+ * set isn't exposed to this client yet, so these three are named by hand:
+ * `skillshare`/`free-school` come from the school's own routing, `demo` from
+ * seed data. Any other tag is assumed host-written and still renders.
+ */
+const ROUTING_TAGS = new Set(['skillshare', 'free-school', 'demo']);
+
+/**
  * `/event/$eventId` is the pre-Task-4 route, built around a mock short id
  * (`eventId()` in `EventCard.tsx`, the last path segment of the AT-URI). The
  * real `GET /api/events/:id` needs the FULL AT-URI — the same shape the new
@@ -98,7 +107,7 @@ export function EventScreen() {
             <div className="flex flex-wrap items-center gap-2 mb-5">
               {event.origin === 'listed' ? <SkillChip ink="ink">Listed from another school</SkillChip> : null}
               {event.venueNeeded ? <SkillChip ink="pink">Venue needed</SkillChip> : null}
-              {(event.tags ?? []).map(tag => <SkillChip key={tag} ink="blue">{tag}</SkillChip>)}
+              {(event.tags ?? []).filter(tag => !ROUTING_TAGS.has(tag)).map(tag => <SkillChip key={tag} ink="blue">{tag}</SkillChip>)}
             </div>
             <section className="event-section"><h2>About this class</h2>
               <p className="event-description">{event.publicOverview?.description || 'The host hasn’t added a public overview yet.'}</p>

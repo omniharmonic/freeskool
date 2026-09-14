@@ -27,6 +27,14 @@ import type { MemberSummary } from '../lib/types';
 
 /** Long enough to swallow a name typed at speed, short enough to feel typed. */
 const SEARCH_DEBOUNCE_MS = 250;
+
+/**
+ * Mirrors `Role.Facilitator` in `packages/shared/src/roles.ts` (30). Below
+ * this, every member counts as "Host" under the default policy
+ * (`hostMinAttended: 0`), so the label would be true of everyone and say
+ * nothing — show what they actually did instead (UX audit finding 2).
+ */
+const NAMEABLE_ROLE = 30;
 export function PeopleScreen() {
   return (
     <SessionGate screen prompt="Sign in to see the people at this school.">
@@ -140,7 +148,9 @@ function PeopleContent() {
 function MemberCard({ member }: { member: MemberSummary }) {
   const name = member.displayName || member.handle || 'A member';
   const parts = [
-    member.roleLabel,
+    // Only Facilitator and Steward are worth naming; everyone else gets their
+    // skill count instead (the directory listing has no hosted-class count).
+    ...(member.role >= NAMEABLE_ROLE ? [member.roleLabel] : []),
     `${member.claimCount} ${member.claimCount === 1 ? 'skill' : 'skills'}`,
     ...(member.vouchCount > 0
       ? [`${member.vouchCount} ${member.vouchCount === 1 ? 'vouch' : 'vouches'}`]
