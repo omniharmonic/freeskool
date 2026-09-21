@@ -117,6 +117,9 @@ services:
       # ones it lists — an empty value would reach Caddy as an empty site address.
       PDS_LEGACY_HOST: ${PDS_LEGACY_HOST:-legacy-pds.invalid}
       PDS_LEGACY_HANDLE_DOMAIN: ${PDS_LEGACY_HANDLE_DOMAIN:-legacy.invalid}
+      # The Tributary stack's public host (a sibling compose project on this box that joins
+      # this network). Unset = a `.invalid` sentinel; see the Caddyfile.
+      TRIBUTARY_HOST: ${TRIBUTARY_HOST:-tributary.invalid}
     ports:
       - '80:80'
       - '443:443'

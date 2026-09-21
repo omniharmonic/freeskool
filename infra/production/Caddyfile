@@ -143,6 +143,23 @@
 	reverse_proxy pds:3000
 }
 
+# Tributary (the events adapter + Boulder Directory console), a sibling compose stack on
+# this box that joins this Caddy's network (see /opt/tributary/infra/production/compose.yml).
+# One site, one upstream. Unset = a `.invalid` sentinel that never resolves. Its certificate
+# is on-demand like the PDS host's, vouched for by the short-circuit in the ask gate below.
+{$TRIBUTARY_HOST:tributary.invalid} {
+	tls {
+		on_demand
+	}
+	encode zstd gzip
+	header {
+		Referrer-Policy no-referrer
+		X-Content-Type-Options nosniff
+		Strict-Transport-Security "max-age=31536000"
+	}
+	reverse_proxy tributary:4100
+}
+
 # The on-demand "ask" gate (container-local only), proxied to the AppView, which answers
 # `GET /internal/tls-check?domain=` with 200 (issue) or 403 (do not). A 403 — including a
 # PDS that failed to answer — must never become a certificate.
@@ -157,5 +174,8 @@ http://127.0.0.1:9000 {
 	respond @legacy 200
 	@www query domain=www.{$WEB_HOST}
 	respond @www 200
+	# Tributary's host (a sibling stack; see the site block above).
+	@tributary query domain={$TRIBUTARY_HOST:tributary.invalid}
+	respond @tributary 200
 	reverse_proxy appview:4000
 }

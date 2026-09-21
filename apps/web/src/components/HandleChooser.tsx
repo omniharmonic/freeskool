@@ -23,6 +23,7 @@ export const HANDLE_PREFIX_RE = /^[a-z0-9](?:[a-z0-9-]{1,18}[a-z0-9])?$/;
 export const RESERVED_LABELS = [
   'admin', 'www', 'pds', 'skills', 'school', 'help', 'mail', 'api',
   'app', 'static', 'assets', 'internal', 'denver', 'boulder',
+  'tributary', 'events', 'directory', 'gate',
 ];
 
 /** That rule said the way a person would say it. Shown for a prefix that doesn't fit. */
