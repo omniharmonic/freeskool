@@ -333,6 +333,17 @@ response. The member stays signed in throughout; `apps/appview/test/session-cook
 pins it. Do NOT rotate `SESSION_SECRET` or empty `fs_session` for this — both would sign
 everybody out for no reason.
 
+## Tributary (sibling stack, 2026-09-21)
+
+The events adapter and the Boulder Directory console (`omniharmonic/tributary`) run on this box as a
+second compose project, `/opt/tributary`, behind this stack's Caddy: `TRIBUTARY_HOST` in
+`infra/production/.env` (currently `tributary.freeskool.directory`) names the site block in the
+Caddyfile, which proxies to the `tributary` container on the `production_default` network. It uses this
+PDS for custodial host accounts (handles `<label>.freeskool.directory`), so the labels `tributary`,
+`events`, `directory` and `gate` are reserved in `apps/appview/src/lib/handles.ts`. Its own runbook is
+`/opt/tributary/docs/deployment.md`. The two stacks share nothing else; Tributary's compose project is
+deliberately named `tributary` so its `postgres`/volumes never collide with this project's.
+
 ## Moving the stack
 
 Everything that moves: the two volumes (`postgres`, `pds`) and `infra/production/.env`. Stop the
