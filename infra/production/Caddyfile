@@ -143,14 +143,22 @@
 	reverse_proxy pds:3000
 }
 
-# Tributary (the events adapter + Boulder Directory console), a sibling compose stack on
-# this box that joins this Caddy's network (see /opt/tributary/infra/production/compose.yml).
-# One site, one upstream. Unset = a `.invalid` sentinel that never resolves. Its certificate
-# is on-demand like the PDS host's, vouched for by the short-circuit in the ask gate below.
-{$TRIBUTARY_HOST:tributary.invalid} {
-	tls {
-		on_demand
-	}
+# Boulder Events Directory, running on Tributary: a sibling compose stack on this box that
+# joins this Caddy's network (see /opt/tributary/infra/production/compose.yml). It brings
+# its own domain and its own PDS, so this edge serves three more kinds of name for it:
+#
+#   {$BED_HOST}              the app: console + API        -> tributary:4100
+#   {$BED_PDS_HOST}          its PDS, whole                -> directory-pds:3000
+#   *.{$BED_HANDLE_DOMAIN}   every host handle             -> the two atproto paths to the
+#                                                             PDS, everything else the app
+#
+# Certificates are all on-demand. The ask gate at the bottom sends any name under the
+# Boulder domain to Tributary's own /internal/tls-check, which asks its PDS; this stack's
+# AppView knows nothing about those handles and must not be asked.
+#
+# Unset variables fall back to `.invalid` sentinels: site blocks for names that cannot
+# resolve, which cost nothing.
+(bed_app) {
 	encode zstd gzip
 	header {
 		Referrer-Policy no-referrer
@@ -158,6 +166,43 @@
 		Strict-Transport-Security "max-age=31536000"
 	}
 	reverse_proxy tributary:4100
+}
+
+{$BED_HOST:bed.invalid} {
+	tls {
+		on_demand
+	}
+	import bed_app
+}
+
+{$BED_PDS_HOST:bed-pds.invalid} {
+	tls {
+		on_demand
+	}
+	reverse_proxy directory-pds:3000
+}
+
+*.{$BED_HANDLE_DOMAIN:bed-handles.invalid} {
+	tls {
+		on_demand
+	}
+	@www host www.{$BED_HOST:bed.invalid}
+	redir @www https://{$BED_HOST:bed.invalid}{uri} permanent
+	# The only two paths a handle host owes the network.
+	@pds path /.well-known/atproto-did /xrpc/*
+	handle @pds {
+		reverse_proxy directory-pds:3000
+	}
+	import bed_app
+}
+
+# The name the adapter was first deployed on, before it had a domain of its own. Kept as a
+# permanent redirect so old links and the OAuth client metadata URL do not simply break.
+{$TRIBUTARY_HOST:tributary.invalid} {
+	tls {
+		on_demand
+	}
+	redir https://{$BED_HOST:bed.invalid}{uri} permanent
 }
 
 # The on-demand "ask" gate (container-local only), proxied to the AppView, which answers
@@ -174,8 +219,14 @@ http://127.0.0.1:9000 {
 	respond @legacy 200
 	@www query domain=www.{$WEB_HOST}
 	respond @www 200
-	# Tributary's host (a sibling stack; see the site block above).
+	# Tributary's first host (a sibling stack; see the site blocks above).
 	@tributary query domain={$TRIBUTARY_HOST:tributary.invalid}
 	respond @tributary 200
+	# Boulder Events Directory: its app host and PDS host are ours to vouch for; every
+	# handle under its domain is Tributary's PDS to vouch for, so the ask goes there.
+	@bed query domain={$BED_HOST:bed.invalid} domain={$BED_PDS_HOST:bed-pds.invalid}
+	respond @bed 200
+	@bedhandle expression {query.domain}.endsWith("{$BED_HANDLE_DOMAIN:bed-handles.invalid}")
+	reverse_proxy @bedhandle tributary:4100
 	reverse_proxy appview:4000
 }

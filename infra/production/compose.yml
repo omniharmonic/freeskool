@@ -120,6 +120,10 @@ services:
       # The Tributary stack's public host (a sibling compose project on this box that joins
       # this network). Unset = a `.invalid` sentinel; see the Caddyfile.
       TRIBUTARY_HOST: ${TRIBUTARY_HOST:-tributary.invalid}
+      # Boulder Events Directory (the Tributary stack's own domain and PDS).
+      BED_HOST: ${BED_HOST:-bed.invalid}
+      BED_PDS_HOST: ${BED_PDS_HOST:-bed-pds.invalid}
+      BED_HANDLE_DOMAIN: ${BED_HANDLE_DOMAIN:-bed-handles.invalid}
     ports:
       - '80:80'
       - '443:443'
